@@ -1,7 +1,7 @@
 
 import React, { useEffect, useRef, useState, useCallback } from 'react';
 import { getAI, encodeAudio, decodeAudio, decodeAudioData } from '../services/geminiService';
-import { Modality, LiveServerMessage } from '@google/genai';
+import { GoogleGenAI, Modality, LiveServerMessage } from '@google/genai';
 import { Icon } from './Icon';
 
 interface VoiceLiveOverlayProps {
@@ -40,13 +40,15 @@ const VoiceLiveOverlay: React.FC<VoiceLiveOverlayProps> = ({ onClose }) => {
   useEffect(() => {
     const startSession = async () => {
       try {
-        const ai = getAI();
+        // Create a new GoogleGenAI instance right before making an API call to ensure it always uses the most up-to-date API key.
+        const ai = new GoogleGenAI({ apiKey: process.env.API_KEY });
         audioContextRef.current = new (window.AudioContext || (window as any).webkitAudioContext)({ sampleRate: 16000 });
         outputAudioContextRef.current = new (window.AudioContext || (window as any).webkitAudioContext)({ sampleRate: 24000 });
         streamRef.current = await navigator.mediaDevices.getUserMedia({ audio: true });
 
         const sessionPromise = ai.live.connect({
-          model: 'gemini-2.5-flash-native-audio-preview-09-2025',
+          // Upgraded to latest native audio model for the Live API
+          model: 'gemini-2.5-flash-native-audio-preview-12-2025',
           callbacks: {
             onopen: () => {
               setIsConnecting(false);
@@ -67,6 +69,7 @@ const VoiceLiveOverlay: React.FC<VoiceLiveOverlayProps> = ({ onClose }) => {
                   mimeType: 'audio/pcm;rate=16000',
                 };
                 
+                // CRITICAL: Solely rely on sessionPromise resolves and then call `session.sendRealtimeInput`
                 sessionPromise.then(session => {
                   session.sendRealtimeInput({ media: pcmBlob });
                 });
@@ -76,7 +79,7 @@ const VoiceLiveOverlay: React.FC<VoiceLiveOverlayProps> = ({ onClose }) => {
               scriptProcessor.connect(audioContextRef.current!.destination);
             },
             onmessage: async (message: LiveServerMessage) => {
-              // Handle transcriptions
+              // Handle transcriptions for model output and user input
               if (message.serverContent?.inputTranscription) {
                 currentInputTranscription.current += message.serverContent.inputTranscription.text;
                 setTranscription(prev => prev + message.serverContent!.inputTranscription!.text);
@@ -91,11 +94,13 @@ const VoiceLiveOverlay: React.FC<VoiceLiveOverlayProps> = ({ onClose }) => {
                 currentOutputTranscription.current = '';
               }
 
-              // Handle audio response
+              // Handle model output audio bytes
               const base64Audio = message.serverContent?.modelTurn?.parts[0]?.inlineData?.data;
               if (base64Audio && outputAudioContextRef.current) {
                 const ctx = outputAudioContextRef.current;
+                // Schedule each new audio chunk to start at this time ensures smooth, gapless playback.
                 nextStartTimeRef.current = Math.max(nextStartTimeRef.current, ctx.currentTime);
+                // Raw PCM data decoding
                 const audioBuffer = await decodeAudioData(decodeAudio(base64Audio), ctx, 24000, 1);
                 const source = ctx.createBufferSource();
                 source.buffer = audioBuffer;
@@ -107,7 +112,9 @@ const VoiceLiveOverlay: React.FC<VoiceLiveOverlayProps> = ({ onClose }) => {
               }
 
               if (message.serverContent?.interrupted) {
-                sourcesRef.current.forEach(s => s.stop());
+                sourcesRef.current.forEach(s => {
+                  try { s.stop(); } catch(e) {}
+                });
                 sourcesRef.current.clear();
                 nextStartTimeRef.current = 0;
               }
@@ -116,8 +123,11 @@ const VoiceLiveOverlay: React.FC<VoiceLiveOverlayProps> = ({ onClose }) => {
             onclose: () => console.log('Live API Closed'),
           },
           config: {
+            // responseModalities must be exactly [Modality.AUDIO]
             responseModalities: [Modality.AUDIO],
-            speechConfig: { voiceConfig: { prebuiltVoiceConfig: { voiceName: 'Kore' } } },
+            speechConfig: { 
+              voiceConfig: { prebuiltVoiceConfig: { voiceName: 'Zephyr' } } 
+            },
             inputAudioTranscription: {},
             outputAudioTranscription: {},
             systemInstruction: "You are a helpful AI note-taking assistant. Listen to the user and help them brainstorm or dictate their notes. Be concise and friendly.",
