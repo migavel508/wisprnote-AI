@@ -1,9 +1,10 @@
 
 import React, { useState, useEffect, useMemo, useRef } from 'react';
-import { Note, AppView, Todo, ChatMessage, NoteStatus, Priority, NoteCategory } from './types';
+import { Note, AppView, Todo, ChatMessage, NoteStatus, Priority, NoteCategory, VoiceAgent } from './types';
 import { Icon } from './components/Icon';
 import VoiceLiveOverlay from './components/VoiceLiveOverlay';
 import ImageEditorOverlay from './components/ImageEditorOverlay';
+import AgentBuilderOverlay from './components/AgentBuilderOverlay';
 import { 
   summarizeNote, 
   suggestUnifiedMetadata, 
@@ -15,7 +16,7 @@ import {
   decodeAudio,
   autoCorrectAndRestructure,
   extractTasks
-} from './geminiService';
+} from './services/geminiService';
 
 const App: React.FC = () => {
   const [view, setView] = useState<AppView>(AppView.LIST);
@@ -25,7 +26,23 @@ const App: React.FC = () => {
       return saved ? JSON.parse(saved) : [];
     } catch(e) { return []; }
   });
+  const [agents, setAgents] = useState<VoiceAgent[]>(() => {
+    try {
+      const saved = localStorage.getItem('lumina-agents-v1');
+      return saved ? JSON.parse(saved) : [{
+        id: 'default',
+        name: 'Brainstormer',
+        rules: 'You are a brilliant startup co-founder. You focus on lean methodology and rapid iteration.',
+        icon: 'sparkle',
+        color: '#4f46e5',
+        linkedNoteIds: [],
+        lastUsed: Date.now()
+      }];
+    } catch(e) { return []; }
+  });
   const [activeNote, setActiveNote] = useState<Note | null>(null);
+  const [activeAgent, setActiveAgent] = useState<VoiceAgent | null>(null);
+  const [editingAgent, setEditingAgent] = useState<VoiceAgent | undefined>();
   const [searchTerm, setSearchTerm] = useState('');
   const [isAiLoading, setIsAiLoading] = useState(false);
   const [showChat, setShowChat] = useState(false);
@@ -38,6 +55,10 @@ const App: React.FC = () => {
   useEffect(() => {
     localStorage.setItem('lumina-workspace-v1', JSON.stringify(notes));
   }, [notes]);
+
+  useEffect(() => {
+    localStorage.setItem('lumina-agents-v1', JSON.stringify(agents));
+  }, [agents]);
 
   useEffect(() => {
     if (showChat) chatEndRef.current?.scrollIntoView({ behavior: 'smooth' });
@@ -78,6 +99,19 @@ const App: React.FC = () => {
     const updatedNote = { ...activeNote, ...updates, updatedAt: Date.now() };
     setActiveNote(updatedNote);
     setNotes(prev => prev.map(n => n.id === activeNote.id ? updatedNote : n));
+  };
+
+  // Fixed: Added missing handleSaveAgent function
+  const handleSaveAgent = (agent: VoiceAgent) => {
+    setAgents(prev => {
+      const exists = prev.find(a => a.id === agent.id);
+      if (exists) {
+        return prev.map(a => a.id === agent.id ? agent : a);
+      }
+      return [...prev, agent];
+    });
+    setEditingAgent(undefined);
+    setView(AppView.AGENTS);
   };
 
   const handleSmartClean = async () => {
@@ -253,7 +287,7 @@ const App: React.FC = () => {
     <div className="flex flex-col h-screen bg-[#020617] text-slate-100 overflow-hidden max-w-lg mx-auto border-x border-slate-800/50 shadow-2xl relative">
       <header className="px-6 py-4 flex justify-between items-center border-b border-slate-800/40 bg-slate-900/60 backdrop-blur-2xl sticky top-0 z-30 h-16">
         <div className="flex items-center gap-4">
-          {view === AppView.EDITOR ? (
+          {view === AppView.EDITOR || view === AppView.AGENT_BUILDER || view === AppView.AGENTS ? (
             <button onClick={() => setView(AppView.LIST)} className="p-2 -ml-2 hover:bg-slate-800/50 rounded-full transition-all">
               <Icon name="back" className="w-5 h-5" />
             </button>
@@ -267,10 +301,11 @@ const App: React.FC = () => {
           )}
         </div>
         
-        {view !== AppView.EDITOR && (
+        {view !== AppView.EDITOR && view !== AppView.AGENT_BUILDER && (
           <div className="flex gap-1.5 bg-slate-800/50 p-1 rounded-xl">
              <button onClick={() => setView(AppView.LIST)} className={`px-4 py-1.5 rounded-lg text-[9px] font-black transition-all ${view === AppView.LIST ? 'bg-indigo-600 text-white shadow-lg' : 'text-slate-500 hover:text-slate-300'}`}>NOTES</button>
              <button onClick={() => setView(AppView.BOARD)} className={`px-4 py-1.5 rounded-lg text-[9px] font-black transition-all ${view === AppView.BOARD ? 'bg-indigo-600 text-white shadow-lg' : 'text-slate-500 hover:text-slate-300'}`}>BOARD</button>
+             <button onClick={() => setView(AppView.AGENTS)} className={`px-4 py-1.5 rounded-lg text-[9px] font-black transition-all ${view === AppView.AGENTS ? 'bg-indigo-600 text-white shadow-lg' : 'text-slate-500 hover:text-slate-300'}`}>AGENTS</button>
           </div>
         )}
 
@@ -280,7 +315,7 @@ const App: React.FC = () => {
                <Icon name="volume" className="w-5 h-5" />
              </button>
            )}
-           <button onClick={() => setView(AppView.VOICE_LIVE)} className="p-2 bg-indigo-600 text-white rounded-full shadow-lg hover:scale-105 active:scale-95 transition-all">
+           <button onClick={() => { setActiveAgent(null); setView(AppView.VOICE_LIVE); }} className="p-2 bg-indigo-600 text-white rounded-full shadow-lg hover:scale-105 active:scale-95 transition-all">
              <Icon name="mic" className="w-5 h-5" />
            </button>
         </div>
@@ -339,6 +374,50 @@ const App: React.FC = () => {
             <div className="snap-center">{renderBoardColumn('TO_DO', 'To Do')}</div>
             <div className="snap-center">{renderBoardColumn('IN_PROGRESS', 'In Progress')}</div>
             <div className="snap-center">{renderBoardColumn('DONE', 'Done')}</div>
+          </div>
+        )}
+
+        {view === AppView.AGENTS && (
+          <div className="p-6 h-full flex flex-col space-y-8 overflow-y-auto no-scrollbar">
+            <div className="space-y-2">
+               <h2 className="text-2xl font-black italic tracking-tighter uppercase text-indigo-100">Your Forge</h2>
+               <p className="text-xs text-slate-500 font-bold uppercase tracking-widest">Select a specialized co-founder</p>
+            </div>
+
+            <div className="grid gap-4 pb-24">
+              {agents.map(agent => (
+                <div 
+                  key={agent.id}
+                  className="bg-slate-900/40 p-5 rounded-[2.5rem] border border-slate-800/60 flex items-center gap-5 hover:border-indigo-500/30 transition-all group"
+                >
+                  <div 
+                    onClick={() => { setActiveAgent(agent); setView(AppView.VOICE_LIVE); }}
+                    className="w-14 h-14 rounded-3xl flex items-center justify-center shadow-lg transition-transform hover:scale-110 active:scale-90 cursor-pointer"
+                    style={{ backgroundColor: agent.color }}
+                  >
+                    <Icon name="mic" className="w-7 h-7 text-white" />
+                  </div>
+                  <div className="flex-1 cursor-pointer" onClick={() => { setActiveAgent(agent); setView(AppView.VOICE_LIVE); }}>
+                    <h3 className="font-black text-slate-100 uppercase tracking-tight">{agent.name}</h3>
+                    <p className="text-[10px] text-slate-500 font-bold uppercase tracking-widest mt-1">{agent.linkedNoteIds.length} Linked Notes</p>
+                  </div>
+                  <button 
+                    onClick={() => { setEditingAgent(agent); setView(AppView.AGENT_BUILDER); }}
+                    className="p-3 bg-slate-800 rounded-2xl opacity-0 group-hover:opacity-100 transition-opacity"
+                  >
+                    <Icon name="sparkle" className="w-4 h-4 text-slate-400" />
+                  </button>
+                </div>
+              ))}
+              
+              <button 
+                onClick={() => { setEditingAgent(undefined); setView(AppView.AGENT_BUILDER); }}
+                className="w-full bg-indigo-600/10 border border-indigo-500/20 border-dashed p-6 rounded-[2.5rem] text-indigo-400 flex flex-col items-center justify-center gap-2 hover:bg-indigo-600/20 transition-all"
+              >
+                <Icon name="plus" className="w-8 h-8" />
+                <span className="text-[10px] font-black uppercase tracking-widest">Forge New Co-Founder</span>
+              </button>
+            </div>
           </div>
         )}
 
@@ -469,7 +548,7 @@ const App: React.FC = () => {
               </div>
             )}
             
-            <div className="grid grid-cols-3 gap-3 pt-8 sticky bottom-0 bg-[#020617] pb-6 mt-auto">
+            <div className="grid grid-cols-4 gap-2 pt-8 sticky bottom-0 bg-[#020617] pb-6 mt-auto">
                <label className="cursor-pointer">
                  <div className="bg-slate-900/50 hover:bg-slate-800 text-slate-300 h-14 rounded-2xl flex items-center justify-center gap-2 text-[10px] font-black border border-slate-800 active:scale-95 transition-all uppercase tracking-widest">
                    <Icon name="image" className="w-4 h-4" />
@@ -489,7 +568,13 @@ const App: React.FC = () => {
                  className="bg-slate-900/50 hover:bg-slate-800 text-indigo-400 h-14 rounded-2xl flex items-center justify-center gap-2 text-[10px] font-black border border-slate-800 active:scale-95 transition-all uppercase tracking-widest disabled:opacity-50"
                >
                  <Icon name="list-check" className={`w-4 h-4 ${isAiLoading ? 'animate-pulse' : ''}`} />
-                 Capture Tasks
+               </button>
+               <button 
+                 onClick={handleFactCheck}
+                 disabled={isAiLoading}
+                 className="bg-slate-900/50 hover:bg-slate-800 text-cyan-400 h-14 rounded-2xl flex items-center justify-center gap-2 text-[10px] font-black border border-slate-800 active:scale-95 transition-all uppercase tracking-widest disabled:opacity-50"
+               >
+                 <Icon name="search" className={`w-4 h-4 ${isAiLoading ? 'animate-pulse' : ''}`} />
                </button>
                <button 
                  onClick={handleSmartRefine}
@@ -497,19 +582,18 @@ const App: React.FC = () => {
                  className="bg-indigo-600 hover:bg-indigo-500 text-white h-14 rounded-2xl flex items-center justify-center gap-2 text-[10px] font-black shadow-2xl shadow-indigo-500/20 active:scale-95 transition-all uppercase tracking-widest disabled:opacity-50"
                >
                  <Icon name="sparkle" className={`w-4 h-4 ${isAiLoading ? 'animate-spin' : ''}`} />
-                 Refine
                </button>
             </div>
           </div>
         )}
       </main>
 
-      {view !== AppView.EDITOR && (
+      {view === AppView.LIST && (
         <button 
           onClick={handleCreateNote}
-          className="fixed bottom-10 right-8 w-20 h-20 bg-indigo-600 text-white rounded-[2.5rem] shadow-2xl shadow-indigo-500/40 flex items-center justify-center transform active:scale-90 transition-all z-40 group"
+          className="fixed bottom-10 right-8 w-20 h-20 bg-indigo-600 text-white rounded-[2.5rem] shadow-2xl flex items-center justify-center transform active:scale-90 transition-all z-40"
         >
-          <Icon name="plus" className="w-10 h-10 group-hover:scale-110 transition-transform" />
+          <Icon name="plus" className="w-10 h-10" />
         </button>
       )}
 
@@ -531,13 +615,6 @@ const App: React.FC = () => {
                  </div>
                </div>
              ))}
-             {isAiLoading && (
-               <div className="flex gap-2 p-5 bg-slate-900/50 rounded-2xl border border-slate-800 w-fit animate-pulse">
-                 <div className="w-2 h-2 bg-indigo-500 rounded-full animate-bounce"></div>
-                 <div className="w-2 h-2 bg-indigo-500 rounded-full animate-bounce delay-150"></div>
-                 <div className="w-2 h-2 bg-indigo-500 rounded-full animate-bounce delay-300"></div>
-               </div>
-             )}
              <div ref={chatEndRef} />
            </div>
 
@@ -558,15 +635,25 @@ const App: React.FC = () => {
         </div>
       )}
 
+      {view === AppView.EDITOR && (
+        <button 
+          onClick={() => setShowChat(true)}
+          className="fixed bottom-24 right-8 w-14 h-14 bg-emerald-600 text-white rounded-2xl shadow-2xl flex items-center justify-center z-40 transform active:scale-90 transition-all"
+        >
+          <Icon name="chat" className="w-6 h-6" />
+        </button>
+      )}
+
       {view === AppView.VOICE_LIVE && (
         <VoiceLiveOverlay 
+          agent={activeAgent || undefined}
+          notesContext={activeAgent ? notes.filter(n => activeAgent.linkedNoteIds.includes(n.id)) : []}
           onClose={async (transcription) => {
             if (transcription) {
               setIsAiLoading(true);
               let finalContent = transcription;
               let newTodos: Todo[] = [];
               
-              // Apply Auto-Correct/Restructure if enabled
               if (isAutoCorrectOn) {
                 try {
                   finalContent = await autoCorrectAndRestructure(transcription);
@@ -578,24 +665,24 @@ const App: React.FC = () => {
                     priority: t.priority as Priority
                   }));
                 } catch (e) {
-                  console.error("Auto-correct or task extraction failed:", e);
+                  console.error("Auto-correct failed:", e);
                 }
               }
 
               const newNote: Note = {
                 id: Date.now().toString(),
-                title: 'New Captured Thought',
+                title: activeAgent ? `Decisions with ${activeAgent.name}` : 'Voice Session',
                 content: finalContent,
                 createdAt: Date.now(),
                 updatedAt: Date.now(),
-                tags: ['voice'],
+                tags: ['voice', activeAgent?.name || 'session'],
                 todos: newTodos,
                 chatHistory: [],
                 category: 'Idea',
-                vibeColor: '#8b5cf6',
+                vibeColor: activeAgent?.color || '#8b5cf6',
                 status: 'TO_DO',
                 priority: 'MEDIUM',
-                epic: 'Discovery'
+                epic: 'Brainstorm'
               };
               setNotes(prev => [newNote, ...prev]);
               setActiveNote(newNote);
@@ -603,6 +690,15 @@ const App: React.FC = () => {
             }
             setView(AppView.EDITOR);
           }} 
+        />
+      )}
+
+      {view === AppView.AGENT_BUILDER && (
+        <AgentBuilderOverlay 
+          initialAgent={editingAgent}
+          availableNotes={notes}
+          onSave={handleSaveAgent}
+          onClose={() => setView(AppView.AGENTS)}
         />
       )}
 

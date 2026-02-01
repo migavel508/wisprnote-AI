@@ -43,10 +43,22 @@ export interface Note {
   };
 }
 
+export interface VoiceAgent {
+  id: string;
+  name: string;
+  rules: string;
+  icon: string;
+  color: string;
+  linkedNoteIds: string[];
+  lastUsed: number;
+}
+
 export enum AppView {
   LIST = 'LIST',
   BOARD = 'BOARD',
   EDITOR = 'EDITOR',
   IMAGE_EDIT = 'IMAGE_EDIT',
-  VOICE_LIVE = 'VOICE_LIVE'
+  VOICE_LIVE = 'VOICE_LIVE',
+  AGENTS = 'AGENTS',
+  AGENT_BUILDER = 'AGENT_BUILDER'
 }
