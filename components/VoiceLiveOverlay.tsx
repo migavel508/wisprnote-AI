@@ -29,7 +29,7 @@ const VoiceLiveOverlay: React.FC<VoiceLiveOverlayProps> = ({ agent, notesContext
 
   const stopSession = useCallback(() => {
     if (sessionRef.current) {
-      sessionRef.current.close();
+      try { sessionRef.current.close(); } catch(e) {}
       sessionRef.current = null;
     }
     if (streamRef.current) {
@@ -46,18 +46,24 @@ const VoiceLiveOverlay: React.FC<VoiceLiveOverlayProps> = ({ agent, notesContext
         const ai = new GoogleGenAI({ apiKey: process.env.API_KEY });
         audioContextRef.current = new (window.AudioContext || (window as any).webkitAudioContext)({ sampleRate: 16000 });
         outputAudioContextRef.current = new (window.AudioContext || (window as any).webkitAudioContext)({ sampleRate: 24000 });
+        
+        await audioContextRef.current.resume();
+        await outputAudioContextRef.current.resume();
+
         streamRef.current = await navigator.mediaDevices.getUserMedia({ audio: true });
 
-        // Build the system instruction from Agent rules and linked notes
         const knowledgeBase = notesContext?.map(n => `NOTE: ${n.title}\nCONTENT: ${n.content}`).join('\n\n') || "No prior notes linked.";
         const systemInstruction = `
           PERSONALITY & RULES:
-          ${agent?.rules || "You are Lumina, a generic AI co-founder. Be helpful and decisive."}
+          ${agent?.rules || "You are Lumina, a brilliant AI co-founder. Be decisive and helpful."}
 
-          YOUR KNOWLEDGE BASE (CONTEXT):
+          KNOWLEDGE BASE:
           ${knowledgeBase}
 
-          GOAL: Brainstorm and make decisive decisions. Refer to specific notes in your knowledge base when relevant. Speak naturally and concisely.
+          MULTILINGUAL SUPPORT:
+          Listen for and respond to a mix of Tamil and English. Do not skip Tamil portions.
+
+          GOAL: Engaging in a real-time conversation to brainstorm and decide.
         `;
 
         const sessionPromise = ai.live.connect({
@@ -74,7 +80,9 @@ const VoiceLiveOverlay: React.FC<VoiceLiveOverlayProps> = ({ agent, notesContext
                 const int16 = new Int16Array(l);
                 for (let i = 0; i < l; i++) int16[i] = inputData[i] * 32768;
                 const pcmBlob = { data: encodeAudio(new Uint8Array(int16.buffer)), mimeType: 'audio/pcm;rate=16000' };
-                sessionPromise.then(session => session.sendRealtimeInput({ media: pcmBlob }));
+                sessionPromise.then(session => {
+                  if (session) session.sendRealtimeInput({ media: pcmBlob });
+                });
               };
               source.connect(scriptProcessor);
               scriptProcessor.connect(audioContextRef.current!.destination);
@@ -112,7 +120,7 @@ const VoiceLiveOverlay: React.FC<VoiceLiveOverlayProps> = ({ agent, notesContext
           },
           config: {
             responseModalities: [Modality.AUDIO],
-            speechConfig: { voiceConfig: { prebuiltVoiceConfig: { voiceName: 'Charon' } } }, // Deeper co-founder voice
+            speechConfig: { voiceConfig: { prebuiltVoiceConfig: { voiceName: 'Charon' } } },
             inputAudioTranscription: {},
             outputAudioTranscription: {},
             systemInstruction,
@@ -129,43 +137,48 @@ const VoiceLiveOverlay: React.FC<VoiceLiveOverlayProps> = ({ agent, notesContext
   }, [stopSession, agent, notesContext]);
 
   return (
-    <div className="fixed inset-0 z-50 bg-[#020617]/95 flex flex-col items-center justify-between p-6 backdrop-blur-2xl">
+    <div className="fixed inset-0 z-50 bg-[#020617]/98 flex flex-col items-center justify-between p-6 backdrop-blur-2xl">
       <div className="w-full flex justify-between items-center px-2">
         <div className="flex items-center gap-3">
-          <div className="w-10 h-10 rounded-xl flex items-center justify-center" style={{ backgroundColor: agent?.color || '#4f46e5' }}>
+          <div className="w-10 h-10 rounded-xl flex items-center justify-center shadow-lg" style={{ backgroundColor: agent?.color || '#4f46e5' }}>
             <Icon name="sparkle" className="text-white w-6 h-6" />
           </div>
           <div>
             <h2 className="text-xl font-black text-white uppercase tracking-tighter">{agent?.name || 'Lumina Assistant'}</h2>
-            <p className="text-[10px] text-slate-500 font-black tracking-widest uppercase">Decisive Co-Founder Protocol</p>
+            <p className="text-[10px] text-slate-500 font-black tracking-widest uppercase">Direct Neural Link</p>
           </div>
         </div>
-        <button onClick={() => onClose(transcription)} className="p-3 bg-slate-900 rounded-2xl hover:bg-slate-800 transition-all border border-slate-800">
+        <button onClick={() => onClose(transcription)} className="p-3 bg-slate-900 rounded-2xl border border-slate-800 hover:bg-slate-800 transition-all">
           <Icon name="back" className="w-5 h-5" />
         </button>
       </div>
 
       <div className="flex flex-col items-center justify-center flex-1 w-full space-y-12">
-        <div className={`relative w-40 h-40 flex items-center justify-center ${isListening ? 'pulse-ring' : ''}`}>
+        <div className={`relative w-44 h-44 flex items-center justify-center ${isListening ? 'pulse-ring' : ''}`}>
            <div className="absolute inset-0 bg-indigo-500/10 rounded-full blur-[60px]"></div>
-           <div className="relative p-10 rounded-full shadow-2xl transition-all" style={{ backgroundColor: agent?.color || '#4f46e5' }}>
+           <div className="relative p-12 rounded-full shadow-2xl transition-all" style={{ backgroundColor: agent?.color || '#4f46e5' }}>
              <Icon name="mic" className="w-16 h-16 text-white" />
            </div>
         </div>
 
-        <div className="w-full max-w-md bg-slate-900/50 border border-slate-800/80 rounded-[2.5rem] p-8 h-80 overflow-y-auto no-scrollbar space-y-6 shadow-inner relative">
-           {isConnecting && <p className="text-slate-500 text-center font-bold text-xs uppercase tracking-widest animate-pulse">Establishing Secure Neural Link...</p>}
-           {!isConnecting && transcription.length === 0 && <p className="text-slate-500 text-center font-bold text-xs uppercase tracking-widest italic opacity-50">Brainstorming enabled...</p>}
+        <div className="w-full max-w-md bg-slate-900/40 border border-slate-800/60 rounded-[2.5rem] p-8 h-80 overflow-y-auto no-scrollbar space-y-6 shadow-inner relative">
+           {isConnecting && (
+             <div className="flex flex-col items-center justify-center h-full space-y-4">
+                <div className="w-8 h-8 border-2 border-indigo-500 border-t-transparent rounded-full animate-spin"></div>
+                <p className="text-slate-500 text-[10px] font-black uppercase tracking-widest animate-pulse">Syncing Neural Paths...</p>
+             </div>
+           )}
+           {!isConnecting && transcription.length === 0 && <p className="text-slate-600 text-center font-black text-xs uppercase tracking-[0.2em] italic opacity-40">Co-Founder is listening...</p>}
            
            {transcription && (
-             <div className="space-y-2">
-                <p className="text-[9px] font-black text-slate-500 uppercase tracking-widest">You</p>
-                <p className="text-slate-200 leading-relaxed font-medium">{transcription}</p>
+             <div className="space-y-2 animate-in fade-in slide-in-from-bottom-2">
+                <p className="text-[9px] font-black text-slate-500 uppercase tracking-widest">Thought Input</p>
+                <p className="text-slate-200 leading-relaxed font-bold">{transcription}</p>
              </div>
            )}
 
            {aiResponse && (
-             <div className="space-y-2 pt-4 border-t border-slate-800">
+             <div className="space-y-2 pt-4 border-t border-slate-800 animate-in fade-in">
                 <p className="text-[9px] font-black uppercase tracking-widest" style={{ color: agent?.color || '#4f46e5' }}>{agent?.name || 'Lumina'}</p>
                 <p className="text-slate-300 leading-relaxed text-sm italic font-medium">{aiResponse}</p>
              </div>
@@ -173,12 +186,12 @@ const VoiceLiveOverlay: React.FC<VoiceLiveOverlayProps> = ({ agent, notesContext
         </div>
       </div>
 
-      <div className="w-full max-w-md">
+      <div className="w-full max-w-md pb-6">
         <button 
           onClick={() => onClose(transcription)}
-          className="w-full bg-white text-[#020617] py-5 rounded-[2rem] font-black text-sm uppercase tracking-widest shadow-2xl active:scale-95 transition-all"
+          className="w-full bg-indigo-600 hover:bg-indigo-500 text-white py-5 rounded-[2rem] font-black text-sm uppercase tracking-widest shadow-2xl transition-all active:scale-95"
         >
-          Finalize Session
+          Finalize Capture
         </button>
       </div>
     </div>
