@@ -15,7 +15,8 @@ import {
   decodeAudioData, 
   decodeAudio,
   autoCorrectAndRestructure,
-  extractTasks
+  extractTasks,
+  processAudioFile
 } from './services/geminiService';
 
 const App: React.FC = () => {
@@ -51,6 +52,7 @@ const App: React.FC = () => {
   const [isAutoCorrectOn, setIsAutoCorrectOn] = useState(true);
   const chatEndRef = useRef<HTMLDivElement>(null);
   const audioContextRef = useRef<AudioContext | null>(null);
+  const audioFileInputRef = useRef<HTMLInputElement>(null);
 
   useEffect(() => {
     localStorage.setItem('lumina-workspace-v1', JSON.stringify(notes));
@@ -101,17 +103,59 @@ const App: React.FC = () => {
     setNotes(prev => prev.map(n => n.id === activeNote.id ? updatedNote : n));
   };
 
-  // Fixed: Added missing handleSaveAgent function
   const handleSaveAgent = (agent: VoiceAgent) => {
     setAgents(prev => {
       const exists = prev.find(a => a.id === agent.id);
-      if (exists) {
-        return prev.map(a => a.id === agent.id ? agent : a);
-      }
+      if (exists) return prev.map(a => a.id === agent.id ? agent : a);
       return [...prev, agent];
     });
     setEditingAgent(undefined);
     setView(AppView.AGENTS);
+  };
+
+  const handleAudioFileUpload = async (e: React.ChangeEvent<HTMLInputElement>) => {
+    const file = e.target.files?.[0];
+    if (!file) return;
+
+    setIsAiLoading(true);
+    try {
+      const reader = new FileReader();
+      reader.onload = async () => {
+        const base64 = (reader.result as string).split(',')[1];
+        const result = await processAudioFile(base64, file.type);
+        
+        const newNote: Note = {
+          id: Date.now().toString(),
+          title: `Audio Brief: ${file.name.split('.')[0]}`,
+          content: result.transcription + "\n\n[Executive Summary]:\n" + result.summary,
+          createdAt: Date.now(),
+          updatedAt: Date.now(),
+          tags: ['audio-import'],
+          todos: result.todos.map(t => ({
+            id: Math.random().toString(),
+            text: t.text,
+            completed: false,
+            priority: t.priority as Priority
+          })),
+          chatHistory: [],
+          category: 'Idea',
+          vibeColor: '#10b981',
+          status: 'TO_DO',
+          priority: 'MEDIUM'
+        };
+        
+        setNotes(prev => [newNote, ...prev]);
+        setActiveNote(newNote);
+        setView(AppView.EDITOR);
+      };
+      reader.readAsDataURL(file);
+    } catch (err) {
+      console.error(err);
+      alert("Failed to process audio intelligence.");
+    } finally {
+      setIsAiLoading(false);
+      if (audioFileInputRef.current) audioFileInputRef.current.value = '';
+    }
   };
 
   const handleSmartClean = async () => {
@@ -322,17 +366,42 @@ const App: React.FC = () => {
       </header>
 
       <main className="flex-1 overflow-hidden relative">
+        {isAiLoading && (
+          <div className="absolute inset-0 z-[60] bg-slate-950/80 backdrop-blur-md flex flex-col items-center justify-center space-y-4">
+             <div className="w-16 h-16 border-4 border-indigo-500 border-t-transparent rounded-full animate-spin"></div>
+             <div className="text-center space-y-1">
+               <p className="text-indigo-400 font-black uppercase tracking-widest text-xs animate-pulse">Analyzing Audio Neural Paths...</p>
+               <p className="text-slate-500 text-[10px] font-bold uppercase tracking-tighter">Gemini is transcribing & extracting intelligence</p>
+             </div>
+          </div>
+        )}
+
         {view === AppView.LIST && (
           <div className="p-6 h-full flex flex-col space-y-6 overflow-y-auto no-scrollbar">
-            <div className="relative group">
+            <div className="flex gap-3">
+              <div className="relative flex-1 group">
+                <input 
+                  type="text" 
+                  placeholder="Search workspace..." 
+                  value={searchTerm}
+                  onChange={(e) => setSearchTerm(e.target.value)}
+                  className="w-full bg-slate-950 border border-slate-800/50 rounded-2xl py-3.5 px-12 focus:ring-1 focus:ring-indigo-500 text-sm shadow-inner transition-all"
+                />
+                <Icon name="search" className="absolute left-4 top-3.5 w-4 h-4 text-slate-500" />
+              </div>
+              <button 
+                onClick={() => audioFileInputRef.current?.click()}
+                className="p-3.5 bg-slate-900 border border-slate-800 rounded-2xl hover:bg-slate-800 transition-all text-indigo-400 shadow-xl"
+              >
+                <Icon name="upload" className="w-5 h-5" />
+              </button>
               <input 
-                type="text" 
-                placeholder="Search notes & issues..." 
-                value={searchTerm}
-                onChange={(e) => setSearchTerm(e.target.value)}
-                className="w-full bg-slate-950 border border-slate-800/50 rounded-2xl py-3.5 px-12 focus:ring-1 focus:ring-indigo-500 text-sm shadow-inner transition-all"
+                type="file" 
+                className="hidden" 
+                ref={audioFileInputRef} 
+                accept="audio/*" 
+                onChange={handleAudioFileUpload} 
               />
-              <Icon name="search" className="absolute left-4 top-3.5 w-4 h-4 text-slate-500" />
             </div>
             
             <div className="grid gap-4 pb-24">
@@ -480,14 +549,6 @@ const App: React.FC = () => {
                 className="w-full bg-transparent resize-none focus:outline-none text-slate-300 text-lg leading-relaxed min-h-[200px] font-medium placeholder-slate-800"
                 placeholder="Start your narrative..."
               />
-              {isAiLoading && (
-                <div className="absolute inset-0 bg-slate-950/20 backdrop-blur-[2px] flex items-center justify-center rounded-2xl">
-                  <div className="bg-slate-900 border border-indigo-500/30 px-6 py-3 rounded-full flex items-center gap-3 shadow-2xl">
-                    <div className="w-4 h-4 border-2 border-indigo-500 border-t-transparent rounded-full animate-spin"></div>
-                    <span className="text-xs font-black uppercase tracking-widest text-indigo-400">Processing...</span>
-                  </div>
-                </div>
-              )}
             </div>
 
             {activeNote.todos && activeNote.todos.length > 0 && (

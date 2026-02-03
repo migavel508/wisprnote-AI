@@ -47,7 +47,6 @@ const VoiceLiveOverlay: React.FC<VoiceLiveOverlayProps> = ({ onClose }) => {
         streamRef.current = await navigator.mediaDevices.getUserMedia({ audio: true });
 
         const sessionPromise = ai.live.connect({
-          // Upgraded to latest native audio model for speed and accuracy
           model: 'gemini-2.5-flash-native-audio-preview-12-2025',
           callbacks: {
             onopen: () => {
@@ -78,16 +77,13 @@ const VoiceLiveOverlay: React.FC<VoiceLiveOverlayProps> = ({ onClose }) => {
               scriptProcessor.connect(audioContextRef.current!.destination);
             },
             onmessage: async (message: LiveServerMessage) => {
-              // Capture input transcription chunks instantly
               if (message.serverContent?.inputTranscription) {
                 setTranscription(prev => prev + message.serverContent!.inputTranscription!.text);
               }
-              // Capture AI feedback transcription
               if (message.serverContent?.outputTranscription) {
                 setAiResponse(prev => prev + message.serverContent!.outputTranscription!.text);
               }
 
-              // Handle audio feedback
               const base64Audio = message.serverContent?.modelTurn?.parts[0]?.inlineData?.data;
               if (base64Audio && outputAudioContextRef.current) {
                 const ctx = outputAudioContextRef.current;
@@ -119,7 +115,7 @@ const VoiceLiveOverlay: React.FC<VoiceLiveOverlayProps> = ({ onClose }) => {
             speechConfig: { voiceConfig: { prebuiltVoiceConfig: { voiceName: 'Kore' } } },
             inputAudioTranscription: {},
             outputAudioTranscription: {},
-            systemInstruction: "You are Lumina, a real-time project assistant. Listen carefully and transcribe accurately. If the user repeats themselves, just keep transcribing everything, as we will auto-correct later. Be supportive and brief in your audio responses.",
+            systemInstruction: "You are Lumina, a real-time multilingual project assistant. Listen for a mix of Tamil and English. Transcribe BOTH languages accurately. Do not skip Tamil parts. If the user code-switches between Tamil and English, capture the flow verbatim. Be brief and supportive.",
           },
         });
 
@@ -161,11 +157,11 @@ const VoiceLiveOverlay: React.FC<VoiceLiveOverlayProps> = ({ onClose }) => {
                <p className="text-slate-500 text-xs font-bold uppercase tracking-widest">Waking up Gemini...</p>
              </div>
            )}
-           {!isConnecting && transcription.length === 0 && <p className="text-slate-500 text-center font-bold text-xs uppercase tracking-widest italic opacity-50">Listening to your thoughts...</p>}
+           {!isConnecting && transcription.length === 0 && <p className="text-slate-500 text-center font-bold text-xs uppercase tracking-widest italic opacity-50">Listening to your thoughts (Tamil & English)...</p>}
            
            {transcription && (
              <div className="space-y-2 animate-in fade-in slide-in-from-bottom-2">
-                <p className="text-[9px] font-black text-indigo-500 uppercase tracking-widest">Transcription Stream</p>
+                <p className="text-[9px] font-black text-indigo-500 uppercase tracking-widest">Multilingual Transcription</p>
                 <p className="text-slate-200 leading-relaxed text-base font-medium">{transcription}</p>
              </div>
            )}
@@ -182,7 +178,7 @@ const VoiceLiveOverlay: React.FC<VoiceLiveOverlayProps> = ({ onClose }) => {
       <div className="w-full max-w-md space-y-4">
         <div className="flex items-center justify-center gap-3 py-2">
            <div className="w-2 h-2 rounded-full bg-emerald-500 animate-pulse"></div>
-           <span className="text-[10px] font-black text-slate-500 uppercase tracking-widest">Encrypted Real-time Processing</span>
+           <span className="text-[10px] font-black text-slate-500 uppercase tracking-widest">Multilingual Neural Processing</span>
         </div>
         <button 
           onClick={() => onClose(transcription)}
