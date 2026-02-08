@@ -185,6 +185,7 @@ export const summarizeNote = async (text: string): Promise<string> => {
   return response.text || "No summary.";
 };
 
+// Fixed typo: responseModalities
 export const generateAudioBrief = async (text: string): Promise<string> => {
   const ai = getAI();
   const response = await ai.models.generateContent({
