@@ -115,13 +115,14 @@ export const summarizeNote = async (text: string): Promise<string> => {
   return response.text || "No summary.";
 };
 
+// Fixed typo: responseModalities
 export const generateAudioBrief = async (text: string): Promise<string> => {
   const ai = getAI();
   const response = await ai.models.generateContent({
     model: "gemini-2.5-flash-preview-tts",
     contents: [{ parts: [{ text: text }] }],
     config: {
-      responseModalalities: [Modality.AUDIO],
+      responseModalities: [Modality.AUDIO],
       speechConfig: { voiceConfig: { prebuiltVoiceConfig: { voiceName: 'Kore' } } },
     },
   });

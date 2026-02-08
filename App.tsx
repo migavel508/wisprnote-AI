@@ -3,6 +3,7 @@ import React, { useState, useEffect, useMemo, useRef } from 'react';
 import { Note, AppView, Todo, ChatMessage, NoteStatus, Priority, NoteCategory, VoiceAgent } from './types';
 import { Icon } from './components/Icon';
 import VoiceLiveOverlay from './components/VoiceLiveOverlay';
+import VoiceNoteOverlay from './components/VoiceNoteOverlay';
 import ImageEditorOverlay from './components/ImageEditorOverlay';
 import AgentBuilderOverlay from './components/AgentBuilderOverlay';
 import { 
@@ -331,7 +332,7 @@ const App: React.FC = () => {
     <div className="flex flex-col h-screen bg-[#020617] text-slate-100 overflow-hidden max-w-lg mx-auto border-x border-slate-800/50 shadow-2xl relative">
       <header className="px-6 py-4 flex justify-between items-center border-b border-slate-800/40 bg-slate-900/60 backdrop-blur-2xl sticky top-0 z-30 h-16">
         <div className="flex items-center gap-4">
-          {view === AppView.EDITOR || view === AppView.AGENT_BUILDER || view === AppView.AGENTS ? (
+          {view === AppView.EDITOR || view === AppView.AGENT_BUILDER || view === AppView.AGENTS || view === AppView.VOICE_NOTE ? (
             <button onClick={() => setView(AppView.LIST)} className="p-2 -ml-2 hover:bg-slate-800/50 rounded-full transition-all">
               <Icon name="back" className="w-5 h-5" />
             </button>
@@ -389,6 +390,12 @@ const App: React.FC = () => {
                 />
                 <Icon name="search" className="absolute left-4 top-3.5 w-4 h-4 text-slate-500" />
               </div>
+              <button 
+                onClick={() => setView(AppView.VOICE_NOTE)}
+                className="p-3.5 bg-indigo-600/10 border border-indigo-500/20 rounded-2xl hover:bg-indigo-600/20 transition-all text-indigo-400 shadow-xl"
+              >
+                <Icon name="mic" className="w-5 h-5" />
+              </button>
               <button 
                 onClick={() => audioFileInputRef.current?.click()}
                 className="p-3.5 bg-slate-900 border border-slate-800 rounded-2xl hover:bg-slate-800 transition-all text-indigo-400 shadow-xl"
@@ -751,6 +758,36 @@ const App: React.FC = () => {
             }
             setView(AppView.EDITOR);
           }} 
+        />
+      )}
+
+      {view === AppView.VOICE_NOTE && (
+        <VoiceNoteOverlay 
+          onComplete={(result) => {
+            const newNote: Note = {
+              id: Date.now().toString(),
+              title: 'New Voice Note',
+              content: result.transcription + "\n\n[Executive Summary]:\n" + result.summary,
+              createdAt: Date.now(),
+              updatedAt: Date.now(),
+              tags: ['voice-note'],
+              todos: result.todos.map(t => ({
+                id: Math.random().toString(),
+                text: t.text,
+                completed: false,
+                priority: t.priority as Priority
+              })),
+              chatHistory: [],
+              category: 'Idea',
+              vibeColor: '#4f46e5',
+              status: 'TO_DO',
+              priority: 'MEDIUM'
+            };
+            setNotes(prev => [newNote, ...prev]);
+            setActiveNote(newNote);
+            setView(AppView.EDITOR);
+          }}
+          onClose={() => setView(AppView.LIST)}
         />
       )}
 
