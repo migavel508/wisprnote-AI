@@ -1,8 +1,5 @@
 {
-  "name": "Lumina AI Note Taker",
-  "description": "A sophisticated mobile-first AI note-taking application featuring live transcription, smart summarization, and advanced AI image editing powered by Gemini 2.5 Flash Image.",
-  "requestFramePermissions": [
-    "camera",
-    "microphone"
-  ]
+  "name": "AudioBatch AI",
+  "description": "Intelligent audio transcription and analysis with automatic batch processing for large files.",
+  "requestFramePermissions": ["microphone"]
 }
