@@ -39,3 +39,37 @@ export async function processAudioBatch(batch: AudioBatch, prompt: string): Prom
     endTime: batch.endTime,
   };
 }
+
+export async function generateSummary(text: string): Promise<string> {
+  const response = await ai.models.generateContent({
+    model: "gemini-3-flash-preview",
+    contents: [
+      {
+        parts: [
+          {
+            text: `Please provide a concise but comprehensive summary of the following transcription:\n\n${text}`
+          }
+        ]
+      }
+    ]
+  });
+  
+  return response.text || "";
+}
+
+export async function generateNotes(text: string): Promise<string> {
+  const response = await ai.models.generateContent({
+    model: "gemini-3-flash-preview",
+    contents: [
+      {
+        parts: [
+          {
+            text: `Please convert the following transcription into structured, Notion-style notes. Use markdown formatting with clear headings, bullet points for key takeaways, and bold text for important concepts:\n\n${text}`
+          }
+        ]
+      }
+    ]
+  });
+  
+  return response.text || "";
+}
