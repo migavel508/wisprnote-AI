@@ -1,4 +1,4 @@
-import React, { useState, useRef } from 'react';
+import React, { useState, useRef, useEffect } from 'react';
 import { 
   Upload, 
   FileAudio, 
@@ -9,14 +9,23 @@ import {
   Play,
   Layers,
   Clock,
-  FileText
+  FileText,
+  Save,
+  History,
+  ArrowLeft
 } from 'lucide-react';
 import { motion, AnimatePresence } from 'motion/react';
 import Markdown from 'react-markdown';
+import { format } from 'date-fns';
 import { splitAudio, AudioBatch } from './services/audioService';
-import { processAudioBatch, ProcessResult } from './services/geminiService';
+import { processAudioBatch, generateSummary, generateNotes, ProcessResult } from './services/geminiService';
+import { TabSwitch } from './components/TabSwitch';
+import { TabType } from './types/ui';
+import { saveTaskHistory, uploadAudioFile, getTaskHistory } from './api/tasks';
+import { TaskHistory } from './types';
 
-type Status = 'idle' | 'splitting' | 'processing' | 'completed' | 'error';
+type Status = 'idle' | 'splitting' | 'processing' | 'generating_extras' | 'completed' | 'error';
+type ViewMode = 'processing' | 'history';
 
 interface BatchStatus extends AudioBatch {
   status: 'pending' | 'processing' | 'completed' | 'error';
@@ -25,12 +34,39 @@ interface BatchStatus extends AudioBatch {
 }
 
 export default function App() {
+  const [viewMode, setViewMode] = useState<ViewMode>('processing');
+  const [historyTasks, setHistoryTasks] = useState<TaskHistory[]>([]);
+  const [isLoadingHistory, setIsLoadingHistory] = useState(false);
+  const [selectedHistoryTask, setSelectedHistoryTask] = useState<TaskHistory | null>(null);
+
   const [file, setFile] = useState<File | null>(null);
   const [status, setStatus] = useState<Status>('idle');
   const [batches, setBatches] = useState<BatchStatus[]>([]);
   const [prompt, setPrompt] = useState('Please provide a detailed transcription of this audio.');
   const [error, setError] = useState<string | null>(null);
+  const [activeTab, setActiveTab] = useState<TabType>('transcription');
+  const [summary, setSummary] = useState<string>('');
+  const [notes, setNotes] = useState<string>('');
+  const [processingTime, setProcessingTime] = useState<number>(0);
   const fileInputRef = useRef<HTMLInputElement>(null);
+
+  useEffect(() => {
+    if (viewMode === 'history') {
+      loadHistory();
+    }
+  }, [viewMode]);
+
+  const loadHistory = async () => {
+    try {
+      setIsLoadingHistory(true);
+      const tasks = await getTaskHistory();
+      setHistoryTasks(tasks);
+    } catch (err) {
+      console.error('Failed to load history:', err);
+    } finally {
+      setIsLoadingHistory(false);
+    }
+  };
 
   const handleFileChange = (e: React.ChangeEvent<HTMLInputElement>) => {
     const selectedFile = e.target.files?.[0];
@@ -39,15 +75,22 @@ export default function App() {
       setError(null);
       setStatus('idle');
       setBatches([]);
+      setSummary('');
+      setNotes('');
+      setActiveTab('transcription');
     }
   };
 
   const startProcessing = async () => {
     if (!file) return;
 
+    const startTime = Date.now();
     try {
       setStatus('splitting');
       setError(null);
+      setSummary('');
+      setNotes('');
+      setActiveTab('transcription');
       
       // Split audio into batches (max 15MB each to stay safe under 20MB limit)
       const audioBatches = await splitAudio(file, 15);
@@ -62,6 +105,7 @@ export default function App() {
 
       // Process batches sequentially to avoid hitting rate limits too hard
       const results: BatchStatus[] = [...initialBatches];
+      let fullTranscription = '';
       
       for (let i = 0; i < results.length; i++) {
         results[i].status = 'processing';
@@ -71,6 +115,7 @@ export default function App() {
           const result = await processAudioBatch(results[i], prompt);
           results[i].status = 'completed';
           results[i].result = result.text;
+          fullTranscription += result.text + '\n\n';
         } catch (err: any) {
           console.error(`Error processing batch ${i}:`, err);
           results[i].status = 'error';
@@ -78,6 +123,38 @@ export default function App() {
         }
         
         setBatches([...results]);
+      }
+
+      setStatus('generating_extras');
+      
+      // Generate Summary and Notes
+      try {
+        const [generatedSummary, generatedNotes, audioUrl] = await Promise.all([
+          generateSummary(fullTranscription),
+          generateNotes(fullTranscription),
+          uploadAudioFile(file)
+        ]);
+        
+        setSummary(generatedSummary);
+        setNotes(generatedNotes);
+        
+        const duration = Date.now() - startTime;
+        setProcessingTime(duration);
+        
+        // Save to Supabase
+        await saveTaskHistory({
+          filename: file.name,
+          transcription: fullTranscription.trim(),
+          summary: generatedSummary,
+          notes: generatedNotes,
+          audio_url: audioUrl,
+          status: 'completed',
+          duration: duration
+        });
+        
+      } catch (err) {
+        console.error('Error generating summary/notes or saving:', err);
+        // Continue even if extras fail
       }
 
       setStatus('completed');
@@ -97,22 +174,179 @@ export default function App() {
     .map(b => b.result)
     .join('\n\n---\n\n');
 
+  const getContentToCopy = () => {
+    switch(activeTab) {
+      case 'transcription': return combinedResult;
+      case 'summary': return summary;
+      case 'notes': return notes;
+      default: return combinedResult;
+    }
+  };
+
   return (
     <div className="min-h-screen bg-[#E4E3E0] text-[#141414] font-sans selection:bg-[#141414] selection:text-[#E4E3E0]">
       {/* Header */}
-      <header className="border-b border-[#141414] p-6 flex justify-between items-center">
-        <div className="flex items-center gap-3">
-          <Layers className="w-8 h-8" />
-          <h1 className="text-2xl font-bold tracking-tight uppercase">AudioBatch AI</h1>
+      <header className="border-b border-[#141414] p-6 flex justify-between items-center bg-white sticky top-0 z-50">
+        <div className="flex items-center gap-6">
+          <div className="flex items-center gap-3 cursor-pointer" onClick={() => setViewMode('processing')}>
+            <Layers className="w-8 h-8" />
+            <h1 className="text-2xl font-bold tracking-tight uppercase">AudioBatch AI</h1>
+          </div>
+          
+          <nav className="hidden md:flex items-center gap-4 ml-8 border-l border-[#141414]/20 pl-8">
+            <button 
+              onClick={() => setViewMode('processing')}
+              className={`text-sm font-medium uppercase tracking-wider transition-colors ${viewMode === 'processing' ? 'text-[#141414] font-bold' : 'text-[#141414]/50 hover:text-[#141414]'}`}
+            >
+              Process
+            </button>
+            <button 
+              onClick={() => setViewMode('history')}
+              className={`text-sm font-medium uppercase tracking-wider transition-colors flex items-center gap-2 ${viewMode === 'history' ? 'text-[#141414] font-bold' : 'text-[#141414]/50 hover:text-[#141414]'}`}
+            >
+              <History className="w-4 h-4" />
+              History
+            </button>
+          </nav>
         </div>
-        <div className="text-xs font-mono opacity-50 uppercase tracking-widest">
-          Status: {status}
-        </div>
+        
+        {viewMode === 'processing' && (
+          <div className="text-xs font-mono opacity-50 uppercase tracking-widest">
+            Status: {status}
+          </div>
+        )}
       </header>
 
-      <main className="max-w-6xl mx-auto p-6 grid grid-cols-1 lg:grid-cols-12 gap-8">
-        {/* Left Column: Controls & Batches */}
-        <div className="lg:col-span-5 space-y-6">
+      {viewMode === 'history' ? (
+        <main className="max-w-7xl mx-auto p-6 grid grid-cols-1 lg:grid-cols-12 gap-8">
+          {/* History List */}
+          <div className="lg:col-span-4 space-y-6">
+            <section className="border border-[#141414] bg-white shadow-[4px_4px_0px_0px_rgba(20,20,20,1)] flex flex-col h-[calc(100vh-140px)]">
+              <div className="p-4 border-b border-[#141414] bg-[#141414] text-[#E4E3E0] flex justify-between items-center">
+                <h2 className="font-serif italic text-sm uppercase tracking-wider">Past Tasks</h2>
+                <span className="font-mono text-[10px]">{historyTasks.length} total</span>
+              </div>
+              
+              <div className="flex-1 overflow-y-auto p-4 space-y-3">
+                {isLoadingHistory ? (
+                  <div className="flex justify-center items-center h-32">
+                    <Loader2 className="w-6 h-6 animate-spin opacity-50" />
+                  </div>
+                ) : historyTasks.length === 0 ? (
+                  <div className="text-center opacity-50 font-serif italic py-8">
+                    No history found. Process some audio first.
+                  </div>
+                ) : (
+                  historyTasks.map(task => (
+                    <div 
+                      key={task.id}
+                      onClick={() => {
+                        setSelectedHistoryTask(task);
+                        setActiveTab('transcription');
+                      }}
+                      className={`p-4 border border-[#141414] cursor-pointer transition-all ${selectedHistoryTask?.id === task.id ? 'bg-[#F5F5F5] shadow-[2px_2px_0px_0px_rgba(20,20,20,1)]' : 'hover:bg-[#F9F9F9]'}`}
+                    >
+                      <div className="flex items-start justify-between mb-2">
+                        <div className="font-mono text-xs font-bold truncate pr-4">{task.filename}</div>
+                        {task.status === 'completed' ? (
+                          <CheckCircle2 className="w-4 h-4 text-green-600 shrink-0" />
+                        ) : (
+                          <AlertCircle className="w-4 h-4 text-red-600 shrink-0" />
+                        )}
+                      </div>
+                      <div className="text-[10px] opacity-50 flex items-center justify-between font-mono">
+                        <span>{format(new Date(task.created_at), 'MMM d, h:mm a')}</span>
+                        <span>{Math.round(task.duration / 1000)}s</span>
+                      </div>
+                    </div>
+                  ))
+                )}
+              </div>
+            </section>
+          </div>
+
+          {/* History Details */}
+          <div className="lg:col-span-8">
+            <section className="border border-[#141414] bg-white h-[calc(100vh-140px)] shadow-[4px_4px_0px_0px_rgba(20,20,20,1)] flex flex-col">
+              {selectedHistoryTask ? (
+                <>
+                  <div className="p-4 border-b border-[#141414] flex justify-between items-center bg-[#F5F5F5] flex-wrap gap-4">
+                    <div className="flex items-center gap-2">
+                      <FileText className="w-5 h-5" />
+                      <h2 className="font-serif italic text-sm uppercase tracking-wider truncate max-w-[200px]">
+                        {selectedHistoryTask.filename}
+                      </h2>
+                    </div>
+                    
+                    <div className="flex-1 flex justify-center">
+                      <TabSwitch activeTab={activeTab} onChange={setActiveTab} />
+                    </div>
+
+                    <div className="flex items-center gap-4">
+                      {selectedHistoryTask.audio_url && (
+                        <a 
+                          href={selectedHistoryTask.audio_url} 
+                          target="_blank" 
+                          rel="noreferrer"
+                          className="flex items-center gap-1 text-[10px] font-mono uppercase underline hover:no-underline"
+                        >
+                          <Play className="w-3 h-3" /> Audio
+                        </a>
+                      )}
+                      <button 
+                        onClick={() => {
+                          const content = activeTab === 'transcription' ? selectedHistoryTask.transcription : 
+                                        activeTab === 'summary' ? selectedHistoryTask.summary : 
+                                        selectedHistoryTask.notes;
+                          navigator.clipboard.writeText(content || '');
+                          alert('Copied to clipboard!');
+                        }}
+                        className="text-[10px] font-mono uppercase underline hover:no-underline"
+                      >
+                        Copy {activeTab}
+                      </button>
+                    </div>
+                  </div>
+
+                  <div className="flex-1 p-8 overflow-y-auto prose prose-sm max-w-none prose-headings:font-serif prose-headings:italic prose-p:font-sans prose-p:leading-relaxed">
+                    {activeTab === 'transcription' && (
+                      <div className="markdown-body">
+                        <Markdown>{selectedHistoryTask.transcription}</Markdown>
+                      </div>
+                    )}
+                    {activeTab === 'summary' && (
+                      <div className="markdown-body">
+                        {selectedHistoryTask.summary ? (
+                          <Markdown>{selectedHistoryTask.summary}</Markdown>
+                        ) : (
+                          <p className="opacity-50 italic">No summary generated for this task.</p>
+                        )}
+                      </div>
+                    )}
+                    {activeTab === 'notes' && (
+                      <div className="markdown-body custom-notes-styling">
+                        {selectedHistoryTask.notes ? (
+                          <Markdown>{selectedHistoryTask.notes}</Markdown>
+                        ) : (
+                          <p className="opacity-50 italic">No notes generated for this task.</p>
+                        )}
+                      </div>
+                    )}
+                  </div>
+                </>
+              ) : (
+                <div className="h-full flex flex-col items-center justify-center opacity-20 grayscale">
+                  <History className="w-20 h-20 mb-4" />
+                  <p className="font-serif italic text-lg">Select a task to view details</p>
+                </div>
+              )}
+            </section>
+          </div>
+        </main>
+      ) : (
+        <main className="max-w-6xl mx-auto p-6 grid grid-cols-1 lg:grid-cols-12 gap-8">
+          {/* Left Column: Controls & Batches */}
+          <div className="lg:col-span-5 space-y-6">
           {/* Upload Section */}
           <section className="border border-[#141414] p-6 bg-white shadow-[4px_4px_0px_0px_rgba(20,20,20,1)]">
             <h2 className="font-serif italic text-sm uppercase opacity-50 mb-4 tracking-wider">01. Input Configuration</h2>
@@ -155,13 +389,13 @@ export default function App() {
 
             <button 
               onClick={startProcessing}
-              disabled={!file || status === 'processing' || status === 'splitting'}
+              disabled={!file || status === 'processing' || status === 'splitting' || status === 'generating_extras'}
               className="w-full mt-6 bg-[#141414] text-[#E4E3E0] py-4 font-bold uppercase tracking-widest hover:bg-[#333] disabled:opacity-30 disabled:cursor-not-allowed transition-all flex items-center justify-center gap-2"
             >
-              {(status === 'processing' || status === 'splitting') ? (
+              {(status === 'processing' || status === 'splitting' || status === 'generating_extras') ? (
                 <>
                   <Loader2 className="w-5 h-5 animate-spin" />
-                  Processing...
+                  {status === 'generating_extras' ? 'Generating Summary & Notes...' : 'Processing...'}
                 </>
               ) : (
                 <>
@@ -228,27 +462,32 @@ export default function App() {
         {/* Right Column: Results */}
         <div className="lg:col-span-7">
           <section className="border border-[#141414] bg-white h-full min-h-[600px] shadow-[4px_4px_0px_0px_rgba(20,20,20,1)] flex flex-col">
-            <div className="p-4 border-b border-[#141414] flex justify-between items-center bg-[#F5F5F5]">
+            <div className="p-4 border-b border-[#141414] flex justify-between items-center bg-[#F5F5F5] flex-wrap gap-4">
               <div className="flex items-center gap-2">
                 <FileText className="w-5 h-5" />
                 <h2 className="font-serif italic text-sm uppercase tracking-wider">03. Output Analysis</h2>
               </div>
+              
+              <div className="flex-1 flex justify-center">
+                <TabSwitch activeTab={activeTab} onChange={setActiveTab} />
+              </div>
+
               <div className="flex items-center gap-4">
-                {status === 'processing' && (
+                {(status === 'processing' || status === 'generating_extras') && (
                   <div className="flex items-center gap-2 text-[10px] font-mono animate-pulse">
                     <span className="w-2 h-2 rounded-full bg-blue-500" />
-                    Synthesizing...
+                    {status === 'generating_extras' ? 'Synthesizing...' : 'Processing...'}
                   </div>
                 )}
                 {status === 'completed' && (
                   <button 
                     onClick={() => {
-                      navigator.clipboard.writeText(combinedResult);
+                      navigator.clipboard.writeText(getContentToCopy());
                       alert('Copied to clipboard!');
                     }}
                     className="text-[10px] font-mono uppercase underline hover:no-underline"
                   >
-                    Copy All
+                    Copy {activeTab}
                   </button>
                 )}
               </div>
@@ -270,7 +509,8 @@ export default function App() {
                 </div>
               )}
 
-              {batches.length > 0 && (
+              {/* Transcription Tab */}
+              {activeTab === 'transcription' && batches.length > 0 && (
                 <div className="space-y-8">
                   {batches.map((batch, idx) => (
                     <div key={idx} className={batch.status === 'completed' ? 'opacity-100' : 'opacity-30'}>
@@ -299,10 +539,51 @@ export default function App() {
                   ))}
                 </div>
               )}
+
+              {/* Summary Tab */}
+              {activeTab === 'summary' && (
+                <div className="h-full">
+                  {status === 'generating_extras' || status === 'processing' ? (
+                    <div className="h-full flex flex-col items-center justify-center space-y-4">
+                      <Loader2 className="w-8 h-8 animate-spin opacity-50" />
+                      <p className="font-mono text-xs uppercase tracking-widest animate-pulse">Generating Summary...</p>
+                    </div>
+                  ) : summary ? (
+                    <div className="markdown-body">
+                      <Markdown>{summary}</Markdown>
+                    </div>
+                  ) : (
+                    <div className="h-full flex flex-col items-center justify-center opacity-30">
+                      <p className="font-serif italic">Process audio to view summary</p>
+                    </div>
+                  )}
+                </div>
+              )}
+
+              {/* Notes Tab */}
+              {activeTab === 'notes' && (
+                <div className="h-full">
+                  {status === 'generating_extras' || status === 'processing' ? (
+                    <div className="h-full flex flex-col items-center justify-center space-y-4">
+                      <Loader2 className="w-8 h-8 animate-spin opacity-50" />
+                      <p className="font-mono text-xs uppercase tracking-widest animate-pulse">Structuring Notes...</p>
+                    </div>
+                  ) : notes ? (
+                    <div className="markdown-body custom-notes-styling">
+                      <Markdown>{notes}</Markdown>
+                    </div>
+                  ) : (
+                    <div className="h-full flex flex-col items-center justify-center opacity-30">
+                      <p className="font-serif italic">Process audio to view notes</p>
+                    </div>
+                  )}
+                </div>
+              )}
             </div>
           </section>
         </div>
       </main>
+      )}
 
       {/* Footer */}
       <footer className="mt-12 border-t border-[#141414] p-6 text-center">
