@@ -108,7 +108,7 @@ export async function generateConceptImage(description: string): Promise<string 
 
 export async function generatePPTContent(text: string, slideCount: number = 5): Promise<any> {
   const response: GenerateContentResponse = await ai.models.generateContent({
-    model: "gemini-3-flash-preview",
+    model: "gemini-2.5-flash-image",
     contents: `Based on the following transcription, generate content for a ${slideCount}-slide PowerPoint presentation. 
     Include a title slide and content slides. 
     Return ONLY a raw JSON object with the following structure:
@@ -135,7 +135,7 @@ export async function generatePPTContent(text: string, slideCount: number = 5): 
 
 export async function generateReportContent(text: string): Promise<any> {
   const response: GenerateContentResponse = await ai.models.generateContent({
-    model: "gemini-3-flash-preview",
+    model: "gemini-2.5-flash-image",
     contents: `Based on the following transcription, generate a structured professional report.
     Return ONLY a raw JSON object with the following structure:
     {
@@ -156,50 +156,4 @@ export async function generateReportContent(text: string): Promise<any> {
     console.error("Failed to parse Report JSON:", e);
     return { title: "Report", sections: [] };
   }
-}
-
-export async function generateFollowUpEmail(text: string): Promise<any> {
-  const response: GenerateContentResponse = await ai.models.generateContent({
-    model: "gemini-3-flash-preview",
-    contents: `Based on the following meeting transcription, act as an AI Assistant and draft a professional follow-up email.
-    Identify any action items, key decisions, and next steps.
-    Return ONLY a raw JSON object with the following structure:
-    {
-      "subject": "Proposed Email Subject",
-      "body": "The main email body text (use line breaks \\n for formatting, keep it professional and engaging)",
-      "actionItems": ["Action item 1 (with assignee if mentioned)", "Action item 2"]
-    }
-    
-    Transcription: ${text}`,
-  });
-
-  const textResponse = response.text || "{}";
-  try {
-    const jsonMatch = textResponse.match(/\{[\s\S]*\}/);
-    return JSON.parse(jsonMatch ? jsonMatch[0] : textResponse);
-  } catch (e) {
-    console.error("Failed to parse Email JSON:", e);
-    return { subject: "Follow up", body: "Could not generate email body.", actionItems: [] };
-  }
-}
-
-export async function generateWikiPage(text: string): Promise<string> {
-  const response: GenerateContentResponse = await ai.models.generateContent({
-    model: "gemini-3-flash-preview",
-    contents: `Based on the following transcription, create a comprehensive, well-structured Knowledge Base / Wiki page in Markdown format.
-    Include a descriptive title, overview, key architectural/business decisions made, blocked items (if any), and a structured summary of the discussion.
-    Format it beautifully using markdown headers (##), bold text, and bullet points. Do not wrap the response in markdown code blocks, just return the raw markdown text.
-    
-    Transcription: ${text}`,
-  });
-  
-  // Clean up any potential markdown code block wrappers
-  let result = response.text || "";
-  if (result.startsWith("\`\`\`markdown")) {
-    result = result.replace(/^\`\`\`markdown\n?/, "").replace(/\n?\`\`\`$/, "");
-  } else if (result.startsWith("\`\`\`")) {
-    result = result.replace(/^\`\`\`\n?/, "").replace(/\n?\`\`\`$/, "");
-  }
-  
-  return result;
 }
