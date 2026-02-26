@@ -8,6 +8,7 @@ export const supabase = createClient(supabaseUrl, supabaseAnonKey);
 export interface TaskHistory {
   id?: string;
   created_at?: string;
+  user_id?: string;
   filename: string;
   transcription: string;
   summary?: string;
@@ -21,19 +22,17 @@ export interface TaskHistory {
 export interface GeneratedAsset {
   id?: string;
   created_at?: string;
+  user_id?: string;
   task_id: string;
-  type: 'ppt' | 'report' | 'email' | 'wiki';
+  type: 'ppt' | 'report';
   filename: string;
   content: any; // JSON structure for slides or report sections
 }
 
 export async function saveTask(task: TaskHistory) {
-  // Omit prompt from insert as it's not in the provided SQL schema
-  const { prompt, ...insertData } = task;
-  
   const { data, error } = await supabase
     .from('task_history')
-    .insert([insertData])
+    .insert([task])
     .select();
   
   if (error) {
