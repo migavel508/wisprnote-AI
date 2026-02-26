@@ -29,5 +29,12 @@
   .markdown-body blockquote {
     @apply border-l-2 border-[#141414] pl-4 italic my-4;
   }
+  .no-scrollbar::-webkit-scrollbar {
+    display: none;
+  }
+  .no-scrollbar {
+    -ms-overflow-style: none;
+    scrollbar-width: none;
+  }
 }
 

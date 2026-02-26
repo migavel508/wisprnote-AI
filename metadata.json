@@ -1,5 +1,5 @@
 {
-  "name": "AudioBatch AI",
+  "name": "Wisprnote AI",
   "description": "Intelligent audio transcription and analysis with automatic batch processing for large files.",
   "requestFramePermissions": ["microphone"]
 }
