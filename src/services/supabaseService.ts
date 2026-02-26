@@ -22,7 +22,7 @@ export interface GeneratedAsset {
   id?: string;
   created_at?: string;
   task_id: string;
-  type: 'ppt' | 'report';
+  type: 'ppt' | 'report' | 'email' | 'wiki';
   filename: string;
   content: any; // JSON structure for slides or report sections
 }
