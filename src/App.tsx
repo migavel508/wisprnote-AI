@@ -28,13 +28,11 @@ import {
   FileBox,
   Presentation,
   FileSpreadsheet,
-  File as FileIcon,
-  Mail,
-  BookTemplate,
-  Bot
+  File as FileIcon
 } from 'lucide-react';
 import { motion, AnimatePresence } from 'motion/react';
 import Markdown from 'react-markdown';
+import remarkGfm from 'remark-gfm';
 import PptxGenJS from 'pptxgenjs';
 import { Document, Packer, Paragraph, TextRun, HeadingLevel } from 'docx';
 import { saveAs } from 'file-saver';
@@ -46,9 +44,7 @@ import {
   chatWithNotes, 
   generateConceptImage,
   generatePPTContent,
-  generateReportContent,
-  generateFollowUpEmail,
-  generateWikiPage
+  generateReportContent
 } from './services/geminiService';
 import { 
   supabase, 
@@ -71,7 +67,7 @@ declare global {
   }
 }
 
-type View = 'process' | 'history' | 'notes' | 'assets' | 'agents';
+type View = 'process' | 'history' | 'notes' | 'assets';
 type Status = 'idle' | 'splitting' | 'processing' | 'completed' | 'error';
 type NoteTab = 'transcription' | 'summary' | 'notes' | 'chat';
 
@@ -107,7 +103,6 @@ export default function App() {
   const [selectedAsset, setSelectedAsset] = useState<GeneratedAsset | null>(null);
   const [slideCount, setSlideCount] = useState(5);
   const [isGeneratingAsset, setIsGeneratingAsset] = useState(false);
-  const [isGeneratingAgent, setIsGeneratingAgent] = useState(false);
   const fileInputRef = useRef<HTMLInputElement>(null);
   const chatEndRef = useRef<HTMLDivElement>(null);
 
@@ -240,38 +235,6 @@ export default function App() {
     }
   };
 
-  const handleGenerateEmail = async () => {
-    if (!selectedTask || isGeneratingAgent) return;
-    setIsGeneratingAgent(true);
-    try {
-      const content = await generateFollowUpEmail(selectedTask.transcription);
-      const filename = `${selectedTask.filename.split('.')[0]}_Email.json`;
-      const asset = await saveAsset({ task_id: selectedTask.id!, type: 'email', filename, content });
-      setAssetHistory([asset, ...assetHistory]);
-      setSelectedAsset(asset);
-    } catch (err) {
-      console.error('Email generation error:', err);
-    } finally {
-      setIsGeneratingAgent(false);
-    }
-  };
-
-  const handleGenerateWiki = async () => {
-    if (!selectedTask || isGeneratingAgent) return;
-    setIsGeneratingAgent(true);
-    try {
-      const content = await generateWikiPage(selectedTask.transcription);
-      const filename = `${selectedTask.filename.split('.')[0]}_Wiki.md`;
-      const asset = await saveAsset({ task_id: selectedTask.id!, type: 'wiki', filename, content: { markdown: content } });
-      setAssetHistory([asset, ...assetHistory]);
-      setSelectedAsset(asset);
-    } catch (err) {
-      console.error('Wiki generation error:', err);
-    } finally {
-      setIsGeneratingAgent(false);
-    }
-  };
-
   const downloadExistingAsset = async (asset: GeneratedAsset) => {
     if (asset.type === 'ppt') {
       const pptx = new PptxGenJS();
@@ -284,13 +247,6 @@ export default function App() {
         s.addText(slide.content.join('\n'), { x: 0.5, y: 1.5, w: '90%', h: '70%', fontSize: 18, bullet: true });
       });
       await pptx.writeFile({ fileName: asset.filename });
-    } else if (asset.type === 'wiki') {
-      const blob = new Blob([asset.content.markdown], { type: 'text/markdown;charset=utf-8' });
-      saveAs(blob, asset.filename);
-    } else if (asset.type === 'email') {
-      const emailContent = `Subject: ${asset.content.subject}\n\n${asset.content.body}\n\nAction Items:\n${asset.content.actionItems?.map((item: string) => `- ${item}`).join('\n') || 'None'}`;
-      const blob = new Blob([emailContent], { type: 'text/plain;charset=utf-8' });
-      saveAs(blob, asset.filename.replace('.json', '.txt'));
     } else {
       const doc = new Document({
         sections: [{
@@ -514,15 +470,6 @@ export default function App() {
             >
               Assets
             </button>
-            <button 
-              onClick={() => {
-                if (selectedTask) setCurrentView('agents');
-                else setCurrentView('history');
-              }}
-              className={`px-4 py-1.5 text-xs font-mono uppercase tracking-wider transition-colors flex-shrink-0 ${currentView === 'agents' ? 'bg-[#141414] text-[#E4E3E0]' : 'hover:bg-[#141414]/5'}`}
-            >
-              AI Agents
-            </button>
           </nav>
         </div>
         
@@ -543,9 +490,9 @@ export default function App() {
       </header>
 
       <div className="flex-1 flex overflow-hidden relative">
-        {/* Sidebar for History/Notes/Assets/Agents */}
+        {/* Sidebar for History/Notes */}
         <AnimatePresence initial={false}>
-          {isSidebarOpen && (currentView === 'history' || currentView === 'notes' || currentView === 'assets' || currentView === 'agents') && (
+          {isSidebarOpen && (currentView === 'history' || currentView === 'notes') && (
             <motion.aside 
               initial={{ width: 0, opacity: 0 }}
               animate={{ width: window.innerWidth < 640 ? '100%' : 256, opacity: 1 }}
@@ -582,7 +529,7 @@ export default function App() {
         </AnimatePresence>
 
         {/* Sidebar Toggle Button */}
-        {(currentView === 'history' || currentView === 'notes' || currentView === 'assets' || currentView === 'agents') && (
+        {(currentView === 'history' || currentView === 'notes') && (
           <button 
             onClick={() => setIsSidebarOpen(!isSidebarOpen)}
             className="fixed sm:absolute left-0 top-1/2 -translate-y-1/2 z-50 bg-[#141414] text-white p-1 rounded-r-md shadow-lg hover:bg-[#333] transition-all"
@@ -797,18 +744,18 @@ export default function App() {
                       >
                         {noteTab === 'transcription' && (
                           <div className="space-y-4">
-                            <Markdown>{selectedTask.transcription}</Markdown>
+                            <Markdown remarkPlugins={[remarkGfm]}>{selectedTask.transcription}</Markdown>
                           </div>
                         )}
                         {noteTab === 'summary' && (
                           <div className="bg-[#F5F5F5] p-4 sm:p-8 rounded-2xl border border-[#141414]/5">
                             <h3 className="text-xl font-serif italic mb-4">Key Summary</h3>
-                            <Markdown>{selectedTask.summary || 'No summary generated.'}</Markdown>
+                            <Markdown remarkPlugins={[remarkGfm]}>{selectedTask.summary || 'No summary generated.'}</Markdown>
                           </div>
                         )}
                         {noteTab === 'notes' && (
                           <div className="space-y-6">
-                            <Markdown>{selectedTask.notes || 'No structured notes generated.'}</Markdown>
+                            <Markdown remarkPlugins={[remarkGfm]}>{selectedTask.notes || 'No structured notes generated.'}</Markdown>
                           </div>
                         )}
                         {noteTab === 'chat' && (
@@ -830,7 +777,7 @@ export default function App() {
                                 >
                                   <div className={`max-w-[80%] p-4 rounded-2xl ${msg.role === 'user' ? 'bg-[#141414] text-white' : 'bg-white border border-[#141414]/10 shadow-sm'}`}>
                                     <div className="text-sm leading-relaxed">
-                                      <Markdown>{msg.text}</Markdown>
+                                      <Markdown remarkPlugins={[remarkGfm]}>{msg.text}</Markdown>
                                     </div>
                                     {msg.image && (
                                       <div className="mt-4 rounded-lg overflow-hidden border border-[#141414]/10">
@@ -1045,12 +992,12 @@ export default function App() {
                     <div className="space-y-6">
                       <h3 className="text-xs font-mono uppercase tracking-widest opacity-50">Generated Assets</h3>
                       <div className="space-y-3">
-                        {assetHistory.filter(a => a.type === 'ppt' || a.type === 'report').length === 0 && (
+                        {assetHistory.length === 0 && (
                           <div className="p-8 border border-dashed border-[#141414]/20 text-center rounded-xl">
                             <p className="text-[10px] font-mono opacity-40 uppercase">No assets yet</p>
                           </div>
                         )}
-                        {assetHistory.filter(a => a.type === 'ppt' || a.type === 'report').map((asset) => (
+                        {assetHistory.map((asset) => (
                           <div 
                             key={asset.id}
                             onClick={() => setSelectedAsset(asset)}
@@ -1070,147 +1017,6 @@ export default function App() {
                               }}
                               className={`p-2 rounded-lg transition-all ${selectedAsset?.id === asset.id ? 'hover:bg-white/10' : 'hover:bg-[#141414] hover:text-white'}`}
                             >
-                              <Download className="w-4 h-4" />
-                            </button>
-                          </div>
-                        ))}
-                      </div>
-                    </div>
-                  </div>
-                </div>
-              </motion.div>
-            )}
-            {currentView === 'agents' && selectedTask && (
-              <motion.div 
-                key="agents"
-                initial={{ opacity: 0 }}
-                animate={{ opacity: 1 }}
-                className="min-h-full bg-white p-4 sm:p-8"
-              >
-                <div className="max-w-5xl mx-auto">
-                  <div className="flex items-center gap-4 mb-8 opacity-50 text-sm overflow-x-auto no-scrollbar whitespace-nowrap">
-                    <Bot className="w-4 h-4 flex-shrink-0" />
-                    <span>Library</span>
-                    <span>/</span>
-                    <span className="truncate">{selectedTask.filename}</span>
-                    <span>/</span>
-                    <span>AI Agents</span>
-                  </div>
-
-                  <h1 className="text-3xl sm:text-4xl font-bold mb-12 tracking-tight">AI Autonomous Agents</h1>
-
-                  <div className="grid grid-cols-1 lg:grid-cols-3 gap-12">
-                    <div className="lg:col-span-2 space-y-8">
-                      <section className="grid grid-cols-1 md:grid-cols-2 gap-6">
-                        <div className="border border-[#141414] p-6 bg-white shadow-[4px_4px_0px_0px_rgba(20,20,20,1)] flex flex-col relative overflow-hidden">
-                          <div className="absolute top-0 right-0 p-2 bg-[#141414] text-white text-[10px] font-mono uppercase tracking-widest">Autopilot</div>
-                          <div className="flex items-center gap-3 mb-6">
-                            <div className="p-3 bg-purple-100 text-purple-600 rounded-xl"><Mail className="w-6 h-6" /></div>
-                            <div>
-                              <h3 className="font-bold">Follow-Up Agent</h3>
-                              <p className="text-[10px] opacity-50 uppercase font-mono">Email & Tasks</p>
-                            </div>
-                          </div>
-                          <div className="flex-1 mb-8">
-                            <p className="text-xs opacity-60 leading-relaxed">Analyzes the meeting to extract action items, decisions, and automatically drafts a personalized follow-up email.</p>
-                          </div>
-                          <button onClick={handleGenerateEmail} disabled={isGeneratingAgent} className="w-full py-3 border border-[#141414] font-bold uppercase tracking-widest text-xs hover:bg-[#141414] hover:text-white disabled:opacity-30 flex items-center justify-center gap-2 transition-all">
-                            {isGeneratingAgent ? <Loader2 className="w-4 h-4 animate-spin" /> : <Play className="w-4 h-4" />}
-                            Run Agent
-                          </button>
-                        </div>
-
-                        <div className="border border-[#141414] p-6 bg-white shadow-[4px_4px_0px_0px_rgba(20,20,20,1)] flex flex-col relative overflow-hidden">
-                          <div className="absolute top-0 right-0 p-2 bg-[#141414] text-white text-[10px] font-mono uppercase tracking-widest">Autopilot</div>
-                          <div className="flex items-center gap-3 mb-6">
-                            <div className="p-3 bg-emerald-100 text-emerald-600 rounded-xl"><BookTemplate className="w-6 h-6" /></div>
-                            <div>
-                              <h3 className="font-bold">Knowledge Base</h3>
-                              <p className="text-[10px] opacity-50 uppercase font-mono">Wiki / Notion</p>
-                            </div>
-                          </div>
-                          <div className="flex-1 mb-8">
-                            <p className="text-xs opacity-60 leading-relaxed">Structures the transcription into a comprehensive markdown document suitable for internal wikis or documentation.</p>
-                          </div>
-                          <button onClick={handleGenerateWiki} disabled={isGeneratingAgent} className="w-full py-3 border border-[#141414] font-bold uppercase tracking-widest text-xs hover:bg-[#141414] hover:text-white disabled:opacity-30 flex items-center justify-center gap-2 transition-all">
-                            {isGeneratingAgent ? <Loader2 className="w-4 h-4 animate-spin" /> : <Play className="w-4 h-4" />}
-                            Run Agent
-                          </button>
-                        </div>
-                      </section>
-
-                      <section className="border border-[#141414] bg-[#F5F5F5] p-4 sm:p-8 rounded-2xl min-h-[400px] flex flex-col">
-                        {!selectedAsset || (selectedAsset.type !== 'email' && selectedAsset.type !== 'wiki') ? (
-                          <div className="flex-1 flex flex-col items-center justify-center text-center">
-                            <Bot className="w-12 h-12 mb-4 opacity-10" />
-                            <h3 className="text-lg font-serif italic opacity-30">Agent Terminal</h3>
-                            <p className="text-xs opacity-30 mt-2">Run an agent to see its generated output here</p>
-                          </div>
-                        ) : (
-                          <div className="flex-1 overflow-y-auto">
-                            <div className="flex items-center justify-between mb-6 border-b border-[#141414]/10 pb-4">
-                              <div className="flex items-center gap-3">
-                                {selectedAsset.type === 'email' ? <Mail className="w-5 h-5 text-purple-600" /> : <BookTemplate className="w-5 h-5 text-emerald-600" />}
-                                <h3 className="font-bold text-sm">{selectedAsset.filename}</h3>
-                              </div>
-                              <button onClick={() => downloadExistingAsset(selectedAsset)} className="flex items-center gap-2 px-3 py-1.5 bg-[#141414] text-white text-[10px] font-mono uppercase tracking-widest hover:bg-[#333] transition-all">
-                                <Download className="w-3 h-3" /> Export
-                              </button>
-                            </div>
-                            <div className="bg-white p-6 sm:p-8 border border-[#141414]/5 shadow-sm rounded-xl">
-                              {selectedAsset.type === 'email' && (
-                                <div className="space-y-6 text-sm">
-                                  <div className="pb-4 border-b border-[#141414]/10">
-                                    <p className="font-mono text-xs opacity-50 uppercase mb-1">Subject</p>
-                                    <p className="font-bold text-lg">{selectedAsset.content.subject}</p>
-                                  </div>
-                                  <div>
-                                    <p className="font-mono text-xs opacity-50 uppercase mb-2">Body</p>
-                                    <div className="whitespace-pre-wrap opacity-80 leading-relaxed">{selectedAsset.content.body}</div>
-                                  </div>
-                                  {selectedAsset.content.actionItems?.length > 0 && (
-                                    <div className="bg-purple-50/50 p-4 rounded-lg">
-                                      <p className="font-mono text-xs font-bold text-purple-800 uppercase mb-3">Action Items Extracted</p>
-                                      <ul className="space-y-2">
-                                        {selectedAsset.content.actionItems.map((item: string, idx: number) => (
-                                          <li key={idx} className="flex items-start gap-2 text-sm text-purple-900">
-                                            <CheckCircle2 className="w-4 h-4 flex-shrink-0 mt-0.5 opacity-50" />{item}
-                                          </li>
-                                        ))}
-                                      </ul>
-                                    </div>
-                                  )}
-                                </div>
-                              )}
-                              {selectedAsset.type === 'wiki' && (
-                                <div className="prose prose-sm sm:prose-base max-w-none markdown-body">
-                                  <Markdown>{selectedAsset.content.markdown}</Markdown>
-                                </div>
-                              )}
-                            </div>
-                          </div>
-                        )}
-                      </section>
-                    </div>
-
-                    <div className="space-y-6">
-                      <h3 className="text-xs font-mono uppercase tracking-widest opacity-50">Agent History</h3>
-                      <div className="space-y-3">
-                        {assetHistory.filter(a => a.type === 'email' || a.type === 'wiki').length === 0 && (
-                          <div className="p-8 border border-dashed border-[#141414]/20 text-center rounded-xl">
-                            <p className="text-[10px] font-mono opacity-40 uppercase">No agent runs yet</p>
-                          </div>
-                        )}
-                        {assetHistory.filter(a => a.type === 'email' || a.type === 'wiki').map((asset) => (
-                          <div key={asset.id} onClick={() => setSelectedAsset(asset)} className={`p-4 border border-[#141414] shadow-[2px_2px_0px_0px_rgba(20,20,20,1)] flex items-center justify-between cursor-pointer transition-all ${selectedAsset?.id === asset.id ? 'bg-[#141414] text-white shadow-none translate-x-[2px] translate-y-[2px]' : 'bg-white hover:bg-[#F5F5F5]'}`}>
-                            <div className="flex items-center gap-3 overflow-hidden">
-                              {asset.type === 'email' ? <Mail className={`w-4 h-4 ${selectedAsset?.id === asset.id ? 'text-purple-400' : 'text-purple-600'}`} /> : <BookTemplate className={`w-4 h-4 ${selectedAsset?.id === asset.id ? 'text-emerald-400' : 'text-emerald-600'}`} />}
-                              <div className="overflow-hidden">
-                                <p className="text-xs font-bold truncate">{asset.filename}</p>
-                                <p className={`text-[8px] font-mono uppercase ${selectedAsset?.id === asset.id ? 'opacity-60' : 'opacity-40'}`}>{new Date(asset.created_at!).toLocaleDateString()}</p>
-                              </div>
-                            </div>
-                            <button onClick={(e) => { e.stopPropagation(); downloadExistingAsset(asset); }} className={`p-2 rounded-lg transition-all ${selectedAsset?.id === asset.id ? 'hover:bg-white/10' : 'hover:bg-[#141414] hover:text-white'}`}>
                               <Download className="w-4 h-4" />
                             </button>
                           </div>
