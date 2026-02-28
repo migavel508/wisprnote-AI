@@ -29,6 +29,18 @@
   .markdown-body blockquote {
     @apply border-l-2 border-[#141414] pl-4 italic my-4;
   }
+  .markdown-body table {
+    @apply w-full border-collapse border border-[#141414] my-6 text-xs sm:text-sm;
+  }
+  .markdown-body th {
+    @apply border border-[#141414] bg-[#141414] text-[#E4E3E0] px-4 py-2 text-left font-bold uppercase tracking-wider;
+  }
+  .markdown-body td {
+    @apply border border-[#141414] px-4 py-2 align-top;
+  }
+  .markdown-body tr:nth-child(even) {
+    @apply bg-[#141414]/5;
+  }
   .no-scrollbar::-webkit-scrollbar {
     display: none;
   }
