@@ -197,3 +197,90 @@ export async function deleteKnowledgeGraph(taskId: string) {
     throw error;
   }
 }
+
+// =====================================================
+// CHAT HISTORY FUNCTIONS
+// =====================================================
+
+export interface ChatMessage {
+  id?: string;
+  created_at?: string;
+  user_id?: string;
+  task_id: string;
+  role: 'user' | 'model';
+  text: string;
+  image?: string;
+}
+
+export async function saveChatMessage(message: ChatMessage) {
+  const { data: { user } } = await supabase.auth.getUser();
+  if (!user) throw new Error('User not authenticated');
+
+  const { data, error } = await supabase
+    .from('chat_history')
+    .insert({
+      user_id: user.id,
+      task_id: message.task_id,
+      role: message.role,
+      text: message.text,
+      image: message.image
+    })
+    .select()
+    .single();
+  
+  if (error) {
+    console.error('Error saving chat message:', error);
+    throw error;
+  }
+  return data as ChatMessage;
+}
+
+export async function saveChatMessages(messages: ChatMessage[]) {
+  const { data: { user } } = await supabase.auth.getUser();
+  if (!user) throw new Error('User not authenticated');
+
+  const records = messages.map(msg => ({
+    user_id: user.id,
+    task_id: msg.task_id,
+    role: msg.role,
+    text: msg.text,
+    image: msg.image
+  }));
+
+  const { data, error } = await supabase
+    .from('chat_history')
+    .insert(records)
+    .select();
+  
+  if (error) {
+    console.error('Error saving chat messages:', error);
+    throw error;
+  }
+  return data as ChatMessage[];
+}
+
+export async function getChatHistory(taskId: string) {
+  const { data, error } = await supabase
+    .from('chat_history')
+    .select('*')
+    .eq('task_id', taskId)
+    .order('created_at', { ascending: true });
+  
+  if (error) {
+    console.error('Error fetching chat history:', error);
+    throw error;
+  }
+  return data as ChatMessage[];
+}
+
+export async function deleteChatHistory(taskId: string) {
+  const { error } = await supabase
+    .from('chat_history')
+    .delete()
+    .eq('task_id', taskId);
+  
+  if (error) {
+    console.error('Error deleting chat history:', error);
+    throw error;
+  }
+}
