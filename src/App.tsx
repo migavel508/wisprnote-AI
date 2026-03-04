@@ -71,7 +71,10 @@ import {
   GeneratedAsset,
   saveKnowledgeGraphBatch,
   getKnowledgeGraph,
-  KnowledgeGraphEntry
+  KnowledgeGraphEntry,
+  saveChatMessage,
+  getChatHistory,
+  ChatMessage
 } from './services/supabaseService';
 import Auth from './components/Auth';
 import { Session } from '@supabase/supabase-js';
@@ -136,9 +139,41 @@ export default function App() {
   const [kgData, setKgData] = useState<any[]>([]);
   const [isLoadingKG, setIsLoadingKG] = useState(false);
   const [kgProgress, setKgProgress] = useState({ current: 0, total: 0 });
+  const [isExtractingNewKG, setIsExtractingNewKG] = useState(false); // Track background extraction
   const [selectedNode, setSelectedNode] = useState<any>(null);
   const [kgBuilt, setKgBuilt] = useState(false);
   const kgContainerRef = useRef<HTMLDivElement>(null);
+  const [kgDimensions, setKgDimensions] = useState({ width: 800, height: 600 });
+  const graphRef = useRef<any>(null); // To control graph camera
+
+  // Handle window resize for graph canvas using ResizeObserver
+  useEffect(() => {
+    if (!kgContainerRef.current) return;
+
+    let animationFrameId: number;
+
+    const observer = new ResizeObserver(entries => {
+      // Use requestAnimationFrame to avoid "ResizeObserver loop limit exceeded" errors
+      // and ensure layout is settled before reading width/height
+      animationFrameId = requestAnimationFrame(() => {
+        for (let entry of entries) {
+          // Destructure to ensure we're copying the primitive values,
+          // which avoids stale closures over the DOM element rect.
+          const { width, height } = entry.contentRect;
+          if (width > 0 && height > 0) {
+            setKgDimensions({ width, height });
+          }
+        }
+      });
+    });
+
+    observer.observe(kgContainerRef.current);
+    
+    return () => {
+      observer.disconnect();
+      cancelAnimationFrame(animationFrameId);
+    };
+  }, [currentView, kgBuilt, selectedNode]);
   
   const fileInputRef = useRef<HTMLInputElement>(null);
   const chatEndRef = useRef<HTMLDivElement>(null);
@@ -179,6 +214,7 @@ export default function App() {
   useEffect(() => {
     if (selectedTask) {
       fetchAssets(selectedTask.id!);
+      fetchChatHistory(selectedTask.id!);
     }
   }, [selectedTask]);
 
@@ -192,6 +228,22 @@ export default function App() {
       setAgentAssetHistory(agentAssets);
     } catch (err) {
       console.error('Failed to fetch assets:', err);
+    }
+  };
+
+  const fetchChatHistory = async (taskId: string) => {
+    try {
+      const data = await getChatHistory(taskId);
+      // Transform to Message format
+      const messages: Message[] = data.map(msg => ({
+        role: msg.role,
+        text: msg.text,
+        image: msg.image
+      }));
+      setChatMessages(messages);
+    } catch (err) {
+      console.error('Failed to fetch chat history:', err);
+      setChatMessages([]);
     }
   };
 
@@ -312,6 +364,62 @@ export default function App() {
       fetchKnowledgeGraph();
     }
   }, [session]);
+
+  // Auto-sync Knowledge Graph: check if any meetings in history are missing from KG
+  useEffect(() => {
+    // Only run if both history and kgData are loaded, and we're not already extracting
+    if (history.length > 0 && kgBuilt && !isExtractingNewKG) {
+      const syncMissingMeetingsToKG = async () => {
+        // Find tasks in history that don't have a corresponding entry in kgData
+        const kgTaskIds = new Set(kgData.map(kg => kg.meetingId));
+        const missingTasks = history.filter(task => task.id && !kgTaskIds.has(task.id) && task.status === 'completed');
+        
+        if (missingTasks.length === 0) return;
+        
+        console.log(`Found ${missingTasks.length} meetings missing from Knowledge Graph. Starting auto-sync...`);
+        setIsExtractingNewKG(true);
+        
+        try {
+          // Process missing tasks one by one
+          for (let i = 0; i < missingTasks.length; i++) {
+            const task = missingTasks[i];
+            console.log(`Auto-extracting KG for: ${task.filename}`);
+            
+            try {
+              const result = await extractKnowledgeGraph(task.id!, task.filename, task.transcription);
+              
+              const entryToSave: KnowledgeGraphEntry = {
+                task_id: result.meetingId,
+                meeting_title: result.meetingTitle,
+                topics: result.topics || [],
+                decisions: result.decisions || [],
+                people: result.people || [],
+                action_items: result.actionItems || [],
+                refs: result.references || []
+              };
+              
+              // Save to Supabase
+              await saveKnowledgeGraphBatch([entryToSave]);
+              
+              // Update local state
+              setKgData(prevData => [...prevData, result]);
+              
+              // Respect API rate limits
+              if (i < missingTasks.length - 1) {
+                await new Promise(resolve => setTimeout(resolve, 3000));
+              }
+            } catch (err) {
+              console.error(`Failed to auto-extract KG for ${task.filename}:`, err);
+            }
+          }
+        } finally {
+          setIsExtractingNewKG(false);
+        }
+      };
+      
+      syncMissingMeetingsToKG();
+    }
+  }, [history, kgData, kgBuilt, isExtractingNewKG]);
 
   const buildKnowledgeGraph = async () => {
     if (history.length === 0 || isLoadingKG) return;
@@ -929,11 +1037,19 @@ export default function App() {
     if (!chatInput.trim() || !selectedTask || isChatting) return;
 
     const userMessage: Message = { role: 'user', text: chatInput };
+    const userInput = chatInput;
     setChatMessages(prev => [...prev, userMessage]);
     setChatInput('');
     setIsChatting(true);
 
     try {
+      // Save user message to Supabase
+      await saveChatMessage({
+        task_id: selectedTask.id!,
+        role: 'user',
+        text: userInput
+      });
+
       const history = chatMessages.map(m => ({
         role: m.role,
         parts: [{ text: m.text }]
@@ -941,11 +1057,19 @@ export default function App() {
 
       const response = await chatWithNotes(
         selectedTask.transcription + '\n\n' + (selectedTask.summary || '') + '\n\n' + (selectedTask.notes || ''),
-        chatInput,
+        userInput,
         history
       );
 
-      setChatMessages(prev => [...prev, { role: 'model', text: response }]);
+      const modelMessage: Message = { role: 'model', text: response };
+      setChatMessages(prev => [...prev, modelMessage]);
+
+      // Save model response to Supabase
+      await saveChatMessage({
+        task_id: selectedTask.id!,
+        role: 'model',
+        text: response
+      });
     } catch (err) {
       console.error('Chat error:', err);
       setChatMessages(prev => [...prev, { role: 'model', text: 'Sorry, I encountered an error while processing your request.' }]);
@@ -955,7 +1079,7 @@ export default function App() {
   };
 
   const handleVisualize = async (description: string) => {
-    if (isGeneratingImage) return;
+    if (isGeneratingImage || !selectedTask) return;
     
     setIsGeneratingImage(true);
     setChatMessages(prev => [...prev, { role: 'model', text: `Generating visualization for: "${description}"...` }]);
@@ -963,10 +1087,18 @@ export default function App() {
     try {
       const imageUrl = await generateConceptImage(description);
       if (imageUrl) {
+        const visualMessage = { role: 'model' as const, text: `Here is the visualization for: "${description}"`, image: imageUrl };
         setChatMessages(prev => [
           ...prev.slice(0, -1), 
-          { role: 'model', text: `Here is the visualization for: "${description}"`, image: imageUrl }
+          visualMessage
         ]);
+        // Save visualization message to Supabase
+        await saveChatMessage({
+          task_id: selectedTask.id!,
+          role: 'model',
+          text: visualMessage.text,
+          image: imageUrl
+        });
       } else {
         setChatMessages(prev => [
           ...prev.slice(0, -1), 
@@ -988,6 +1120,7 @@ export default function App() {
     try {
       const data = await getTasks();
       setHistory(data);
+      // We will sync KG data after both history and KG data are loaded, handled by a separate useEffect
     } catch (err) {
       console.error('Failed to fetch history:', err);
     }
@@ -1066,6 +1199,41 @@ export default function App() {
       };
       
       const savedTask = await saveTask(newTask);
+      
+      // Attempt to immediately process knowledge graph data in the background
+      if (savedTask && savedTask.id) {
+        setIsExtractingNewKG(true);
+        // Run without blocking the main thread
+        extractKnowledgeGraph(savedTask.id, savedTask.filename, savedTask.transcription)
+          .then(async (result) => {
+            const entryToSave: KnowledgeGraphEntry = {
+              task_id: result.meetingId,
+              meeting_title: result.meetingTitle,
+              topics: result.topics || [],
+              decisions: result.decisions || [],
+              people: result.people || [],
+              action_items: result.actionItems || [],
+              refs: result.references || []
+            };
+            
+            // Save to Supabase
+            await saveKnowledgeGraphBatch([entryToSave]);
+            
+            // Update local state if we already have graph data loaded
+            setKgData(prevData => {
+              // If prevData is empty, we haven't built the graph yet, so no need to append
+              if (prevData.length === 0) return prevData;
+              
+              // Remove if already exists (just in case), then append
+              const filtered = prevData.filter(d => d.meetingId !== result.meetingId);
+              return [...filtered, result];
+            });
+            console.log('Automatically extracted and saved knowledge graph for new meeting');
+          })
+          .catch(err => console.error('Background KG extraction failed:', err))
+          .finally(() => setIsExtractingNewKG(false));
+      }
+
       setHistory([savedTask, ...history]);
       setSelectedTask(savedTask);
       setCurrentView('notes');
@@ -1184,7 +1352,6 @@ export default function App() {
                     onClick={() => {
                       setSelectedTask(task);
                       setCurrentView('notes');
-                      setChatMessages([]);
                     }}
                     className={`p-3 border-b border-[#141414]/5 cursor-pointer hover:bg-white transition-colors group ${selectedTask?.id === task.id ? 'bg-white' : ''}`}
                   >
@@ -1434,12 +1601,25 @@ export default function App() {
                         )}
                         {noteTab === 'chat' && (
                           <div className="flex flex-col h-[600px] border border-[#141414] bg-[#F9F9F9] rounded-2xl overflow-hidden shadow-inner">
+                            {/* Chat Header with history count */}
+                            <div className="px-6 py-3 bg-white border-b border-[#141414]/10 flex items-center justify-between">
+                              <div className="flex items-center gap-2">
+                                <MessageSquare className="w-4 h-4 opacity-60" />
+                                <span className="text-xs font-mono uppercase tracking-wider opacity-60">Chat with Notes</span>
+                              </div>
+                              {chatMessages.length > 0 && (
+                                <span className="text-[10px] font-mono bg-[#141414] text-white px-2 py-0.5 rounded-full">
+                                  {chatMessages.length} message{chatMessages.length !== 1 ? 's' : ''}
+                                </span>
+                              )}
+                            </div>
                             <div className="flex-1 overflow-y-auto p-6 space-y-6">
                               {chatMessages.length === 0 && (
                                 <div className="h-full flex flex-col items-center justify-center text-center p-8 opacity-40">
                                   <MessageSquare className="w-12 h-12 mb-4" />
                                   <p className="text-sm font-mono uppercase tracking-widest">Start chatting with your notes</p>
                                   <p className="text-xs mt-2">Ask questions or request visualizations</p>
+                                  <p className="text-[10px] mt-4 opacity-60">Your conversation will be saved automatically</p>
                                 </div>
                               )}
                               {chatMessages.map((msg, i) => (
@@ -2209,8 +2389,21 @@ export default function App() {
                   </button>
                 </div>
 
-                <div className="flex-1 flex relative overflow-hidden">
-                  {!kgBuilt ? (
+                <div className="flex-1 flex relative overflow-hidden w-full">
+                  {/* Background extraction indicator */}
+                  {isExtractingNewKG && kgBuilt && (
+                    <motion.div 
+                      initial={{ opacity: 0, y: -20 }}
+                      animate={{ opacity: 1, y: 0 }}
+                      exit={{ opacity: 0, y: -20 }}
+                      className="absolute top-4 left-1/2 transform -translate-x-1/2 z-50 bg-[#141414] text-white px-4 py-2 rounded-full shadow-lg flex items-center gap-3 text-xs font-mono"
+                    >
+                      <Loader2 className="w-3 h-3 animate-spin" />
+                      <span>Extracting latest meeting data...</span>
+                    </motion.div>
+                  )}
+                  
+                  {!kgBuilt && !isExtractingNewKG ? (
                     <div className="flex-1 flex flex-col items-center justify-center text-center p-8">
                       {isLoadingKG ? (
                         <div className="w-full max-w-md flex flex-col items-center">
@@ -2248,18 +2441,26 @@ export default function App() {
                   ) : (
                     <>
                       {/* Graph Canvas */}
-                      <div ref={kgContainerRef} className="flex-1 bg-[#FAFAFA]">
+                      <div ref={kgContainerRef} className="flex-1 bg-[#FAFAFA] relative h-full min-w-0">
                         <ForceGraph2D
+                          ref={graphRef}
                           graphData={buildGraphData()}
-                          width={kgContainerRef.current?.clientWidth || 800}
-                          height={kgContainerRef.current?.clientHeight || 600}
+                          width={kgDimensions.width}
+                          height={kgDimensions.height}
                           nodeLabel={(node: any) => `${node.type.toUpperCase()}: ${node.label}`}
                           nodeColor={(node: any) => node.color}
                           nodeVal={(node: any) => node.size}
                           linkColor={() => '#ccc'}
                           linkWidth={(link: any) => link.dashed ? 2 : 1}
                           linkLineDash={(link: any) => link.dashed ? [5, 5] : undefined}
-                          onNodeClick={(node: any) => setSelectedNode(node)}
+                          onNodeClick={(node: any) => {
+                            setSelectedNode(node);
+                            if (graphRef.current) {
+                              // Center and zoom on clicked node
+                              graphRef.current.centerAt(node.x, node.y, 1000);
+                              graphRef.current.zoom(2, 1000);
+                            }
+                          }}
                           nodeCanvasObject={(node: any, ctx: CanvasRenderingContext2D, globalScale: number) => {
                             const label = node.label;
                             const fontSize = node.type === 'meeting' ? 14 / globalScale : 11 / globalScale;
@@ -2294,7 +2495,7 @@ export default function App() {
                       </div>
 
                       {/* Legend */}
-                      <div className="absolute top-4 left-4 bg-white/90 backdrop-blur-sm border border-[#141414]/10 rounded-xl p-4 shadow-sm">
+                      <div className="absolute top-4 left-4 z-10 bg-white/90 backdrop-blur-sm border border-[#141414]/10 rounded-xl p-4 shadow-sm">
                         <h4 className="text-[10px] font-mono uppercase tracking-widest opacity-50 mb-3">Legend</h4>
                         <div className="space-y-2">
                           {[
@@ -2316,12 +2517,14 @@ export default function App() {
                       </div>
 
                       {/* Node Detail Panel */}
-                      {selectedNode && (
-                        <motion.div 
-                          initial={{ x: 300, opacity: 0 }}
-                          animate={{ x: 0, opacity: 1 }}
-                          className="w-80 bg-white border-l border-[#141414]/10 overflow-y-auto p-6"
-                        >
+                      <AnimatePresence>
+                        {selectedNode && (
+                          <motion.div 
+                            initial={{ x: 320, opacity: 0 }}
+                            animate={{ x: 0, opacity: 1 }}
+                            exit={{ x: 320, opacity: 0 }}
+                            className="w-80 flex-shrink-0 bg-white border-l border-[#141414]/10 overflow-y-auto h-full p-6 shadow-[-10px_0_15px_-3px_rgba(0,0,0,0.05)] z-20"
+                          >
                           <div className="flex items-center justify-between mb-4">
                             <span className={`px-2 py-1 rounded text-[10px] font-mono uppercase font-bold text-white`} style={{ backgroundColor: selectedNode.color }}>
                               {selectedNode.type}
@@ -2429,7 +2632,8 @@ export default function App() {
                             </div>
                           )}
                         </motion.div>
-                      )}
+                        )}
+                      </AnimatePresence>
                     </>
                   )}
                 </div>

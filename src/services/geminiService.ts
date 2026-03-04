@@ -256,9 +256,9 @@ export async function extractKnowledgeGraph(meetingId: string, meetingTitle: str
   // Use OpenRouter free model for knowledge graph extraction
   const openRouterApiKey = import.meta.env.VITE_OPENROUTER_API_KEY;
   
-  const systemPrompt = `You are a JSON-only API. You MUST respond with ONLY valid JSON, no text before or after. Never include explanations, greetings, or markdown. Output raw JSON only.`;
-  
-  const userPrompt = `Extract knowledge graph data from this meeting transcription. Return ONLY this JSON structure:
+  const combinedPrompt = `You are a JSON-only API. You MUST respond with ONLY valid JSON, no text before or after. Never include explanations, greetings, or markdown. Output raw JSON only.
+
+Extract knowledge graph data from this meeting transcription. Return ONLY this JSON structure:
 {"topics":[{"name":"lowercase topic","summary":"brief summary","status":"new"}],"decisions":[{"decision":"text","relatedTopic":"topic"}],"people":["name"],"actionItems":[{"task":"text","owner":"name","relatedTopic":"topic"}],"references":["text"]}
 
 Meeting: ${meetingTitle}
@@ -276,8 +276,7 @@ Transcription: ${text.substring(0, 8000)}`;
       body: JSON.stringify({
         model: 'openrouter/free',
         messages: [
-          { role: 'system', content: systemPrompt },
-          { role: 'user', content: userPrompt }
+          { role: 'user', content: combinedPrompt }
         ],
         temperature: 0.1
       })
