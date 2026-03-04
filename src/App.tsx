@@ -49,7 +49,11 @@ import {
   chatWithNotes, 
   generateConceptImage,
   generatePPTContent,
-  generateReportContent
+  generateReportContent,
+  generateEmailContent,
+  generateWikiContent,
+  generatePodcastScript,
+  chatWithPodcast
 } from './services/geminiService';
 import { 
   supabase, 
@@ -109,8 +113,25 @@ export default function App() {
   const [slideCount, setSlideCount] = useState(5);
   const [isGeneratingAsset, setIsGeneratingAsset] = useState(false);
   const [wikiStyle, setWikiStyle] = useState<'MECE' | 'PRD'>('MECE');
+  const [agentAssetHistory, setAgentAssetHistory] = useState<GeneratedAsset[]>([]);
+  const [selectedAgentAsset, setSelectedAgentAsset] = useState<GeneratedAsset | null>(null);
+  
+  // Podcast State
+  const [podcastDialogue, setPodcastDialogue] = useState<any[]>([]);
+  const [currentPodcastIndex, setCurrentPodcastIndex] = useState(-1);
+  const [isPlayingPodcast, setIsPlayingPodcast] = useState(false);
+  const [podcastInput, setPodcastInput] = useState('');
+  const [isPodcastThinking, setIsPodcastThinking] = useState(false);
+  
   const fileInputRef = useRef<HTMLInputElement>(null);
   const chatEndRef = useRef<HTMLDivElement>(null);
+  const podcastEndRef = useRef<HTMLDivElement>(null);
+
+  useEffect(() => {
+    if (podcastEndRef.current) {
+      podcastEndRef.current.scrollIntoView({ behavior: 'smooth' });
+    }
+  }, [podcastDialogue, currentPodcastIndex]);
 
   useEffect(() => {
     if (chatEndRef.current) {
@@ -147,7 +168,11 @@ export default function App() {
   const fetchAssets = async (taskId: string) => {
     try {
       const data = await getAssets(taskId);
-      setAssetHistory(data);
+      // Separate assets by type: ppt/report go to assetHistory, email/wiki go to agentAssetHistory
+      const regularAssets = data.filter(a => a.type === 'ppt' || a.type === 'report');
+      const agentAssets = data.filter(a => a.type === 'email' || a.type === 'wiki');
+      setAssetHistory(regularAssets);
+      setAgentAssetHistory(agentAssets);
     } catch (err) {
       console.error('Failed to fetch assets:', err);
     }
@@ -241,7 +266,89 @@ export default function App() {
     }
   };
 
-  const handleAgentAction = async (agentType: 'email' | 'wiki') => {
+  const playPodcastLine = (line: any) => {
+    if (!('speechSynthesis' in window) || !line) return;
+    
+    // Stop any ongoing speech
+    window.speechSynthesis.cancel();
+    
+    const utterance = new SpeechSynthesisUtterance(line.text);
+    
+    // Give them distinct voices (heuristic based on availability)
+    const voices = window.speechSynthesis.getVoices();
+    if (line.speaker === 'Alex') {
+      utterance.voice = voices.find(v => v.name.includes('Male') || v.name.includes('Daniel') || v.name.includes('David')) || voices[0];
+      utterance.pitch = 1.0;
+      utterance.rate = 1.05;
+    } else if (line.speaker === 'Sarah') {
+      utterance.voice = voices.find(v => v.name.includes('Female') || v.name.includes('Samantha') || v.name.includes('Karen') || v.name.includes('Victoria')) || voices[0];
+      utterance.pitch = 1.2;
+      utterance.rate = 1.05;
+    } else {
+      // Guest voice
+      utterance.voice = voices.find(v => v.name.includes('Google') || v.lang === 'en-GB') || voices[0];
+      utterance.pitch = 0.9;
+    }
+
+    utterance.onend = () => {
+      // Trigger the next line in the effect instead of directly to avoid stale state closures
+      setCurrentPodcastIndex(prev => prev + 1);
+    };
+
+    window.speechSynthesis.speak(utterance);
+  };
+
+  // Effect to handle sequential podcast playback
+  useEffect(() => {
+    if (isPlayingPodcast && currentPodcastIndex >= 0 && currentPodcastIndex < podcastDialogue.length) {
+      // Small delay between speakers
+      const timer = setTimeout(() => {
+        playPodcastLine(podcastDialogue[currentPodcastIndex]);
+      }, 500);
+      return () => clearTimeout(timer);
+    } else if (currentPodcastIndex >= podcastDialogue.length) {
+      setIsPlayingPodcast(false);
+    }
+  }, [currentPodcastIndex, isPlayingPodcast]);
+
+  const handlePodcastInputSubmit = async () => {
+    if (!podcastInput.trim() || !selectedTask) return;
+    
+    const userMsg = podcastInput;
+    setPodcastInput('');
+    setIsPodcastThinking(true);
+    
+    // Stop current playback to handle interruption
+    window.speechSynthesis.cancel();
+    setIsPlayingPodcast(false);
+    
+    // Add user message to dialogue
+    const newDialogue = [
+      ...podcastDialogue.slice(0, currentPodcastIndex + 1), // Keep history up to current point
+      { speaker: 'Guest', text: userMsg, emotion: 'eager' }
+    ];
+    setPodcastDialogue(newDialogue);
+    setCurrentPodcastIndex(newDialogue.length - 1);
+    
+    try {
+      const responseLines = await chatWithPodcast(
+        selectedTask.transcription,
+        newDialogue,
+        userMsg
+      );
+      
+      const updatedDialogue = [...newDialogue, ...responseLines];
+      setPodcastDialogue(updatedDialogue);
+      setIsPodcastThinking(false);
+      setIsPlayingPodcast(true);
+      setCurrentPodcastIndex(newDialogue.length); // Start playing the first response line
+    } catch (err) {
+      console.error('Podcast chat error:', err);
+      setIsPodcastThinking(false);
+    }
+  };
+
+  const handleAgentAction = async (agentType: 'email' | 'wiki' | 'podcast') => {
     if (!selectedTask || isGeneratingAsset) {
       if (!selectedTask) {
         setCurrentView('history');
@@ -251,32 +358,44 @@ export default function App() {
     }
     
     setIsGeneratingAsset(true);
-    setCurrentView('notes');
-    setNoteTab('chat');
-    setChatMessages(prev => [...prev, { role: 'model', text: `Agent is analyzing "${selectedTask.filename}"...` }]);
 
     try {
-      let result = '';
-      if (agentType === 'email') {
-        const emailPrompt = "You are a professional project manager. Draft a professional follow-up email based on this transcript. Include a clear, bulleted list of all tasks, owners (if mentioned), and deadlines. The email should be concise and action-oriented.";
-        result = await chatWithNotes(selectedTask.transcription, emailPrompt, []);
-      } else {
-        const wikiPrompt = wikiStyle === 'MECE' 
-          ? "Generate a detailed end-to-end report of this meeting using the MECE (Mutually Exclusive, Collectively Exhaustive) framework. Ensure all points are logically grouped and exhaustive. Use professional formatting with clear headings."
-          : "Generate a comprehensive Product Requirements Document (PRD) based on this meeting. Include detailed sections for: 1. UI/UX Requirements, 2. User Stories, 3. Developer Team Tasks, and 4. Competitor Analysis. The document must be well-structured and professional.";
-        result = await chatWithNotes(selectedTask.transcription, wikiPrompt, []);
+      if (agentType === 'podcast') {
+        const script = await generatePodcastScript(selectedTask.transcription);
+        setPodcastDialogue(script.dialogue);
+        setCurrentPodcastIndex(0);
+        setIsPlayingPodcast(true);
+        // We don't save podcast to DB yet, just play it
+        setIsGeneratingAsset(false);
+        playPodcastLine(script.dialogue[0]);
+        return;
       }
 
-      setChatMessages(prev => [
-        ...prev.slice(0, -1), 
-        { role: 'model', text: result }
-      ]);
+      let content: any;
+      let filename = '';
+      
+      if (agentType === 'email') {
+        content = await generateEmailContent(selectedTask.transcription);
+        filename = `${selectedTask.filename.split('.')[0]}_FollowUp_Email.html`;
+      } else {
+        content = await generateWikiContent(selectedTask.transcription, wikiStyle);
+        content.style = wikiStyle;
+        filename = `${selectedTask.filename.split('.')[0]}_Wiki_${wikiStyle}.docx`;
+      }
+
+      // Save to database like assets do
+      const asset = await saveAsset({
+        task_id: selectedTask.id!,
+        type: agentType,
+        filename,
+        content
+      });
+
+      setAgentAssetHistory([asset, ...agentAssetHistory]);
+      setSelectedAgentAsset(asset);
     } catch (err) {
       console.error('Agent error:', err);
-      setChatMessages(prev => [
-        ...prev.slice(0, -1), 
-        { role: 'model', text: 'Sorry, the agent encountered an error processing your request.' }
-      ]);
+      setError('Agent encountered an error processing your request.');
     } finally {
       setIsGeneratingAsset(false);
     }
@@ -294,7 +413,7 @@ export default function App() {
         s.addText(slide.content.join('\n'), { x: 0.5, y: 1.5, w: '90%', h: '70%', fontSize: 18, bullet: true });
       });
       await pptx.writeFile({ fileName: asset.filename });
-    } else {
+    } else if (asset.type === 'report') {
       const doc = new Document({
         sections: [{
           children: [
@@ -305,6 +424,178 @@ export default function App() {
             ]),
           ],
         }],
+      });
+      const blob = await Packer.toBlob(doc);
+      saveAs(blob, asset.filename);
+    } else if (asset.type === 'email') {
+      // Download as clean HTML email (client-compatible)
+      const emailHtml = `
+<!DOCTYPE html>
+<html>
+<head>
+  <meta charset="UTF-8">
+  <style>
+    body { font-family: Arial, Helvetica, sans-serif; max-width: 800px; margin: 0 auto; padding: 20px; color: #333; line-height: 1.6; }
+    h1 { color: #1a1a1a; border-bottom: 2px solid #eee; padding-bottom: 10px; margin-bottom: 20px; }
+    h2 { color: #2c3e50; font-size: 18px; margin-top: 30px; margin-bottom: 15px; border-bottom: 1px solid #eee; padding-bottom: 5px; }
+    h3 { color: #34495e; font-size: 16px; margin-top: 20px; margin-bottom: 10px; }
+    .greeting { font-size: 16px; margin-bottom: 20px; }
+    .objective { background: #f8f9fa; padding: 15px; border-left: 4px solid #6c757d; margin-bottom: 25px; }
+    .tasks-table { width: 100%; border-collapse: collapse; margin: 20px 0; font-size: 14px; }
+    .tasks-table th { background: #f4f6f8; color: #333; padding: 12px; text-align: left; border: 1px solid #ddd; font-weight: bold; }
+    .tasks-table td { padding: 12px; border: 1px solid #ddd; vertical-align: top; }
+    .priority-high { color: #d32f2f; font-weight: bold; }
+    .priority-medium { color: #f57c00; font-weight: bold; }
+    .priority-low { color: #388e3c; font-weight: bold; }
+    ul { margin-top: 0; padding-left: 20px; }
+    li { margin-bottom: 8px; }
+    .closing { margin-top: 40px; padding-top: 20px; border-top: 1px solid #eee; }
+  </style>
+</head>
+<body>
+  <h1>${asset.content.subject || 'Meeting Notes & Action Items'}</h1>
+  
+  <p class="greeting">${asset.content.greeting || 'Hi Team,'}</p>
+  
+  ${asset.content.meetingObjective ? `
+  <div class="objective">
+    <strong>Meeting Objective:</strong><br>
+    ${asset.content.meetingObjective}
+  </div>` : ''}
+  
+  ${asset.content.keyDecisions?.length ? `
+  <h2>Key Decisions</h2>
+  <ul>
+    ${asset.content.keyDecisions.map((d: string) => `<li>${d}</li>`).join('')}
+  </ul>` : ''}
+  
+  ${asset.content.discussionPoints?.length ? `
+  <h2>Discussion Points</h2>
+  ${asset.content.discussionPoints.map((point: any) => `
+    <h3>${point.topic}</h3>
+    <ul>
+      ${point.details.map((detail: string) => `<li>${detail}</li>`).join('')}
+    </ul>
+  `).join('')}` : ''}
+  
+  ${asset.content.tasks?.length ? `
+  <h2>Action Items</h2>
+  <table class="tasks-table">
+    <thead>
+      <tr>
+        <th style="width: 45%;">Task Details</th>
+        <th style="width: 20%;">Owner</th>
+        <th style="width: 20%;">Deadline</th>
+        <th style="width: 15%;">Priority</th>
+      </tr>
+    </thead>
+    <tbody>
+      ${asset.content.tasks.map((task: any) => `
+        <tr>
+          <td>
+            <strong>${task.task}</strong>
+            ${task.notes ? `<div style="font-size: 12px; color: #666; margin-top: 4px;">${task.notes}</div>` : ''}
+          </td>
+          <td>${task.owner}</td>
+          <td>${task.deadline}</td>
+          <td class="priority-${task.priority?.toLowerCase()}">${task.priority}</td>
+        </tr>
+      `).join('')}
+    </tbody>
+  </table>` : ''}
+  
+  ${asset.content.nextMeeting ? `
+  <h2>Next Steps</h2>
+  <p>${asset.content.nextMeeting}</p>` : ''}
+  
+  <div class="closing">
+    <p>${asset.content.closing || 'Best regards'}</p>
+  </div>
+</body>
+</html>`;
+      const blob = new Blob([emailHtml], { type: 'text/html' });
+      saveAs(blob, asset.filename);
+    } else if (asset.type === 'wiki') {
+      // Download as styled DOCX
+      const doc = new Document({
+        styles: {
+          paragraphStyles: [
+            {
+              id: "Title",
+              name: "Title",
+              basedOn: "Normal",
+              next: "Normal",
+              run: { size: 56, bold: true, color: "141414" },
+              paragraph: { spacing: { after: 300 } }
+            },
+            {
+              id: "Subtitle",
+              name: "Subtitle",
+              basedOn: "Normal",
+              next: "Normal",
+              run: { size: 28, italics: true, color: "666666" },
+              paragraph: { spacing: { after: 400 } }
+            }
+          ]
+        },
+        sections: [{
+          properties: {},
+          children: [
+            new Paragraph({
+              text: asset.content.title || 'Wiki Document',
+              heading: HeadingLevel.TITLE,
+              spacing: { after: 200 }
+            }),
+            new Paragraph({
+              children: [
+                new TextRun({ text: asset.content.subtitle || '', italics: true, color: "666666" })
+              ],
+              spacing: { after: 200 }
+            }),
+            new Paragraph({
+              children: [
+                new TextRun({ text: `Date: ${asset.content.date || new Date().toLocaleDateString()}`, size: 20, color: "999999" })
+              ],
+              spacing: { after: 400 }
+            }),
+            new Paragraph({
+              children: [new TextRun({ text: "─".repeat(50), color: "CCCCCC" })],
+              spacing: { after: 400 }
+            }),
+            ...(asset.content.sections || []).flatMap((section: any) => [
+              new Paragraph({
+                text: section.heading,
+                heading: HeadingLevel.HEADING_1,
+                spacing: { before: 400, after: 200 }
+              }),
+              new Paragraph({
+                children: [new TextRun({ text: section.content, size: 24 })],
+                spacing: { after: 200 }
+              }),
+              ...(section.bullets || []).map((bullet: string) => 
+                new Paragraph({
+                  children: [new TextRun({ text: `• ${bullet}`, size: 22 })],
+                  spacing: { after: 100 },
+                  indent: { left: 720 }
+                })
+              ),
+              new Paragraph({ text: "", spacing: { after: 200 } })
+            ]),
+            new Paragraph({
+              children: [new TextRun({ text: "─".repeat(50), color: "CCCCCC" })],
+              spacing: { before: 400, after: 200 }
+            }),
+            new Paragraph({
+              text: "Conclusion",
+              heading: HeadingLevel.HEADING_1,
+              spacing: { after: 200 }
+            }),
+            new Paragraph({
+              children: [new TextRun({ text: asset.content.conclusion || '', size: 24, italics: true })],
+              spacing: { after: 400 }
+            })
+          ]
+        }]
       });
       const blob = await Packer.toBlob(doc);
       saveAs(blob, asset.filename);
@@ -1086,121 +1377,478 @@ export default function App() {
                 key="agents"
                 initial={{ opacity: 0 }}
                 animate={{ opacity: 1 }}
-                className="p-4 sm:p-8 max-w-6xl mx-auto"
+                className="min-h-full bg-white p-4 sm:p-8"
               >
-                <div className="flex flex-col sm:flex-row items-start sm:items-center justify-between gap-4 mb-12">
-                  <div>
-                    <h2 className="text-4xl font-serif italic font-bold mb-2">AI Agents</h2>
-                    <p className="text-sm opacity-50 font-mono uppercase tracking-widest">Specialized intelligence for your audio data</p>
+                <div className="max-w-5xl mx-auto">
+                  <div className="flex items-center gap-4 mb-8 opacity-50 text-sm overflow-x-auto no-scrollbar whitespace-nowrap">
+                    <Bot className="w-4 h-4 flex-shrink-0" />
+                    <span>Agents</span>
+                    {selectedTask && (
+                      <>
+                        <span>/</span>
+                        <span className="truncate">{selectedTask.filename}</span>
+                      </>
+                    )}
                   </div>
-                  <div className="flex items-center gap-2 px-4 py-2 bg-[#141414] text-white rounded-full text-[10px] font-mono uppercase tracking-widest">
-                    <Sparkles className="w-3 h-3" /> 2 Agents Available
+
+                  <h1 className="text-3xl sm:text-4xl font-bold mb-12 tracking-tight">AI Agents</h1>
+
+                  <div className="grid grid-cols-1 lg:grid-cols-3 gap-12">
+                    <div className="lg:col-span-2 space-y-8">
+                      {/* Agent Options */}
+                      <section className="grid grid-cols-1 md:grid-cols-2 gap-6">
+                        {/* Follow-up Email Agent */}
+                        <div className="border border-[#141414] p-6 bg-white shadow-[4px_4px_0px_0px_rgba(20,20,20,1)] flex flex-col">
+                          <div className="flex items-center gap-3 mb-6">
+                            <div className="p-3 bg-blue-100 text-blue-600 rounded-xl">
+                              <Mail className="w-6 h-6" />
+                            </div>
+                            <div>
+                              <h3 className="font-bold">Follow-up Email</h3>
+                              <p className="text-[10px] opacity-50 uppercase font-mono">Markdown Format</p>
+                            </div>
+                          </div>
+                          
+                          <div className="flex-1 mb-8">
+                            <p className="text-xs opacity-60">Drafts a professional follow-up email with tasks, owners, and next steps.</p>
+                          </div>
+
+                          <button 
+                            onClick={() => handleAgentAction('email')}
+                            disabled={isGeneratingAsset || !selectedTask}
+                            className="w-full py-3 bg-[#141414] text-white font-bold uppercase tracking-widest text-xs hover:bg-[#333] disabled:opacity-30 flex items-center justify-center gap-2"
+                          >
+                            {isGeneratingAsset ? <Loader2 className="w-4 h-4 animate-spin" /> : <Send className="w-4 h-4" />}
+                            Generate Email
+                          </button>
+                        </div>
+
+                        {/* Wiki Agent */}
+                        <div className="border border-[#141414] p-6 bg-white shadow-[4px_4px_0px_0px_rgba(20,20,20,1)] flex flex-col">
+                          <div className="flex items-center gap-3 mb-6">
+                            <div className="p-3 bg-purple-100 text-purple-600 rounded-xl">
+                              <BookOpen className="w-6 h-6" />
+                            </div>
+                            <div>
+                              <h3 className="font-bold">Wiki Report</h3>
+                              <p className="text-[10px] opacity-50 uppercase font-mono">Markdown Format</p>
+                            </div>
+                          </div>
+                          
+                          <div className="flex-1 space-y-4 mb-8">
+                            <div className="flex gap-2 p-1 bg-[#F5F5F5] rounded-lg border border-[#141414]/5">
+                              <button 
+                                onClick={() => setWikiStyle('MECE')}
+                                className={`flex-1 py-2 text-[10px] font-mono uppercase tracking-widest rounded-md transition-all ${wikiStyle === 'MECE' ? 'bg-white shadow-sm text-[#141414] font-bold' : 'opacity-40 hover:opacity-100'}`}
+                              >
+                                MECE
+                              </button>
+                              <button 
+                                onClick={() => setWikiStyle('PRD')}
+                                className={`flex-1 py-2 text-[10px] font-mono uppercase tracking-widest rounded-md transition-all ${wikiStyle === 'PRD' ? 'bg-white shadow-sm text-[#141414] font-bold' : 'opacity-40 hover:opacity-100'}`}
+                              >
+                                PRD
+                              </button>
+                            </div>
+                            <p className="text-xs opacity-60">
+                              {wikiStyle === 'MECE' 
+                                ? "MECE framework for logical grouping."
+                                : "PRD with UI/UX, User Stories, Tasks."}
+                            </p>
+                          </div>
+
+                          <button 
+                            onClick={() => handleAgentAction('wiki')}
+                            disabled={isGeneratingAsset || !selectedTask}
+                            className="w-full py-3 bg-[#141414] text-white font-bold uppercase tracking-widest text-xs hover:bg-[#333] disabled:opacity-30 flex items-center justify-center gap-2"
+                          >
+                            {isGeneratingAsset ? <Loader2 className="w-4 h-4 animate-spin" /> : <Layout className="w-4 h-4" />}
+                            Generate Wiki
+                          </button>
+                        </div>
+                        
+                        {/* Podcast Agent */}
+                        <div className="border border-[#141414] p-6 bg-white shadow-[4px_4px_0px_0px_rgba(20,20,20,1)] flex flex-col md:col-span-2">
+                          <div className="flex items-center justify-between mb-6">
+                            <div className="flex items-center gap-3">
+                              <div className="p-3 bg-green-100 text-green-600 rounded-xl">
+                                <Bot className="w-6 h-6" />
+                              </div>
+                              <div>
+                                <h3 className="font-bold text-lg">Live Podcast Studio</h3>
+                                <p className="text-[10px] opacity-50 uppercase font-mono mt-1">Interactive Audio Experience</p>
+                              </div>
+                            </div>
+                            <div className="flex items-center gap-2">
+                              <span className="w-2 h-2 rounded-full bg-green-500 animate-pulse" />
+                              <span className="text-xs font-mono opacity-60">Hosts: Alex & Sarah</span>
+                            </div>
+                          </div>
+                          
+                          <div className="flex-1 mb-8">
+                            <p className="text-sm opacity-80 leading-relaxed max-w-2xl">
+                              Transform your meeting notes into an engaging, dynamic podcast. Two AI hosts (Alex & Sarah) will discuss the key points, banter, and break down complex topics. You can even join the studio live to interact with them and steer the conversation.
+                            </p>
+                          </div>
+
+                          <button 
+                            onClick={() => handleAgentAction('podcast' as any)}
+                            disabled={isGeneratingAsset || !selectedTask}
+                            className="w-full sm:w-auto py-3 px-8 bg-green-600 text-white font-bold uppercase tracking-widest text-xs hover:bg-green-700 transition-colors disabled:opacity-30 flex items-center justify-center gap-3 rounded-lg shadow-sm"
+                          >
+                            {isGeneratingAsset ? <Loader2 className="w-4 h-4 animate-spin" /> : <Play className="w-4 h-4 fill-current" />}
+                            Start Podcast Session
+                          </button>
+                        </div>
+                      </section>
+
+                      {/* Preview Area */}
+                      <section className="border border-[#141414] bg-[#F5F5F5] p-4 sm:p-8 rounded-2xl min-h-[400px] flex flex-col">
+                        {!selectedTask ? (
+                          <div className="flex-1 flex flex-col items-center justify-center text-center">
+                            <History className="w-12 h-12 mb-4 opacity-10" />
+                            <h3 className="text-lg font-serif italic opacity-30">Select a Task First</h3>
+                            <p className="text-xs opacity-30 mt-2">Go to History and select a task to use agents</p>
+                            <button 
+                              onClick={() => setCurrentView('history')}
+                              className="mt-4 px-4 py-2 border border-[#141414] text-xs font-mono uppercase tracking-widest hover:bg-[#141414] hover:text-white transition-all"
+                            >
+                              Go to History
+                            </button>
+                          </div>
+                        ) : podcastDialogue.length > 0 ? (
+                          <div className="flex-1 flex flex-col h-[600px] bg-white border border-[#141414]/10 rounded-xl overflow-hidden shadow-sm">
+                            <div className="bg-[#141414] text-white p-4 flex items-center justify-between">
+                              <div className="flex items-center gap-3">
+                                <Bot className="w-5 h-5 text-green-400" />
+                                <div>
+                                  <h3 className="font-bold text-sm">Live Podcast Studio</h3>
+                                  <p className="text-[10px] text-green-400 font-mono flex items-center gap-1">
+                                    <span className="w-1.5 h-1.5 rounded-full bg-green-400 animate-pulse" />
+                                    ON AIR
+                                  </p>
+                                </div>
+                              </div>
+                              <button 
+                                onClick={() => {
+                                  if (isPlayingPodcast) {
+                                    window.speechSynthesis.cancel();
+                                    setIsPlayingPodcast(false);
+                                  } else {
+                                    setIsPlayingPodcast(true);
+                                  }
+                                }}
+                                className="p-2 rounded-full hover:bg-white/10 transition-colors"
+                              >
+                                {isPlayingPodcast ? <span className="w-4 h-4 block bg-red-500 rounded-sm" /> : <Play className="w-4 h-4 fill-current" />}
+                              </button>
+                            </div>
+                            
+                            <div className="flex-1 overflow-y-auto p-6 space-y-6 bg-[#FAFAFA]">
+                              {podcastDialogue.map((line, idx) => (
+                                <motion.div 
+                                  key={idx}
+                                  initial={{ opacity: 0, y: 10 }}
+                                  animate={{ opacity: 1, y: 0 }}
+                                  className={`flex ${line.speaker === 'Guest' ? 'justify-end' : 'justify-start'}`}
+                                >
+                                  <div className={`flex max-w-[85%] gap-3 ${line.speaker === 'Guest' ? 'flex-row-reverse' : 'flex-row'}`}>
+                                    <div className={`w-8 h-8 rounded-full flex items-center justify-center text-[10px] font-bold shadow-sm shrink-0 ${
+                                      line.speaker === 'Alex' ? 'bg-blue-100 text-blue-700' :
+                                      line.speaker === 'Sarah' ? 'bg-purple-100 text-purple-700' :
+                                      'bg-[#141414] text-white'
+                                    }`}>
+                                      {line.speaker === 'Guest' ? 'ME' : line.speaker.substring(0, 1)}
+                                    </div>
+                                    <div className={`p-4 rounded-2xl shadow-sm ${
+                                      line.speaker === 'Guest' ? 'bg-[#141414] text-white' : 
+                                      idx === currentPodcastIndex && isPlayingPodcast ? 'bg-white border-2 border-green-400' : 'bg-white border border-[#141414]/5'
+                                    }`}>
+                                      <div className={`text-[10px] font-mono uppercase mb-1 ${line.speaker === 'Guest' ? 'text-gray-300' : 'text-gray-500'}`}>
+                                        {line.speaker} {line.emotion && <span className="italic normal-case opacity-70">({line.emotion})</span>}
+                                      </div>
+                                      <p className="text-sm leading-relaxed">{line.text}</p>
+                                    </div>
+                                  </div>
+                                </motion.div>
+                              ))}
+                              
+                              {isPodcastThinking && (
+                                <div className="flex justify-start">
+                                  <div className="bg-white border border-[#141414]/10 p-4 rounded-2xl shadow-sm flex items-center gap-3">
+                                    <Loader2 className="w-4 h-4 animate-spin opacity-40" />
+                                    <span className="text-xs font-mono opacity-50">Alex & Sarah are thinking...</span>
+                                  </div>
+                                </div>
+                              )}
+                              
+                              <div ref={podcastEndRef} />
+                            </div>
+                            
+                            <div className="p-4 bg-white border-t border-[#141414]/10">
+                              <div className="flex flex-col gap-2">
+                                <label className="text-[10px] font-mono uppercase text-gray-500">Join the Conversation</label>
+                                <div className="flex items-center gap-2">
+                                  <input 
+                                    type="text" 
+                                    value={podcastInput}
+                                    onChange={(e) => setPodcastInput(e.target.value)}
+                                    onKeyDown={(e) => e.key === 'Enter' && handlePodcastInputSubmit()}
+                                    placeholder="Ask a question or add a point..."
+                                    className="flex-1 bg-gray-50 border border-gray-200 rounded-lg text-sm px-4 py-2 outline-none focus:border-[#141414] transition-colors"
+                                  />
+                                  <button 
+                                    onClick={handlePodcastInputSubmit}
+                                    disabled={!podcastInput.trim() || isPodcastThinking}
+                                    className="p-2.5 bg-[#141414] text-white rounded-lg hover:bg-[#333] disabled:opacity-30 transition-colors"
+                                  >
+                                    <Send className="w-4 h-4" />
+                                  </button>
+                                </div>
+                              </div>
+                            </div>
+                          </div>
+                        ) : !selectedAgentAsset ? (
+                          <div className="flex-1 flex flex-col items-center justify-center text-center">
+                            <Sparkles className="w-12 h-12 mb-4 opacity-10" />
+                            <h3 className="text-lg font-serif italic opacity-30">Agent Output Preview</h3>
+                            <p className="text-xs opacity-30 mt-2">Generate or select an agent output to see it here</p>
+                          </div>
+                        ) : (
+                          <div className="flex-1 overflow-y-auto">
+                            <div className="flex items-center justify-between mb-6 border-b border-[#141414]/10 pb-4">
+                              <div className="flex items-center gap-3">
+                                {selectedAgentAsset.type === 'email' ? <Mail className="w-5 h-5 text-blue-600" /> : <BookOpen className="w-5 h-5 text-purple-600" />}
+                                <h3 className="font-bold text-sm">{selectedAgentAsset.filename}</h3>
+                              </div>
+                              <button 
+                                onClick={() => downloadExistingAsset(selectedAgentAsset)}
+                                className="flex items-center gap-2 px-3 py-1.5 bg-[#141414] text-white text-[10px] font-mono uppercase tracking-widest hover:bg-[#333] transition-all"
+                              >
+                                <Download className="w-3 h-3" />
+                                Download
+                              </button>
+                            </div>
+
+                            {selectedAgentAsset.type === 'email' ? (
+                              <div className="bg-white border border-[#141414]/10 rounded-xl overflow-hidden">
+                                {/* Email Header Actions */}
+                                <div className="bg-gray-50 border-b border-gray-200 p-4 flex items-center justify-between">
+                                  <div className="flex items-center gap-2 text-sm text-gray-500">
+                                    <Mail className="w-4 h-4" />
+                                    <span>Ready to send</span>
+                                  </div>
+                                  <a 
+                                    href={`mailto:?subject=${encodeURIComponent(selectedAgentAsset.content.subject || 'Follow-up Email')}&body=${encodeURIComponent(
+                                      `${selectedAgentAsset.content.greeting || 'Hi Team,'}\n\n` +
+                                      `Meeting Objective:\n${selectedAgentAsset.content.meetingObjective || ''}\n\n` +
+                                      (selectedAgentAsset.content.keyDecisions?.length ? `Key Decisions:\n${selectedAgentAsset.content.keyDecisions.map((d: string) => `• ${d}`).join('\n')}\n\n` : '') +
+                                      (selectedAgentAsset.content.discussionPoints?.length ? `Discussion Points:\n${selectedAgentAsset.content.discussionPoints.map((p: any) => `${p.topic}:\n${p.details.map((d: string) => `  - ${d}`).join('\n')}`).join('\n\n')}\n\n` : '') +
+                                      (selectedAgentAsset.content.tasks?.length ? `Action Items:\n${selectedAgentAsset.content.tasks.map((t: any) => `• [${t.priority}] ${t.task} (Owner: ${t.owner}, Due: ${t.deadline}) - ${t.notes}`).join('\n')}\n\n` : '') +
+                                      `Next Steps:\n${selectedAgentAsset.content.nextMeeting || ''}\n\n` +
+                                      `${selectedAgentAsset.content.closing || 'Best regards'}`
+                                    )}`}
+                                    className="flex items-center gap-2 px-4 py-2 bg-blue-600 text-white text-sm font-medium rounded-lg hover:bg-blue-700 transition-colors shadow-sm"
+                                  >
+                                    <Send className="w-4 h-4" />
+                                    Open in Email Client
+                                  </a>
+                                </div>
+
+                                {/* Email Content Preview */}
+                                <div className="p-8 space-y-8 text-gray-800">
+                                  <div>
+                                    <h2 className="text-2xl font-bold text-gray-900 mb-2">{selectedAgentAsset.content.subject}</h2>
+                                    <hr className="border-gray-200" />
+                                  </div>
+                                  
+                                  <p className="text-base">{selectedAgentAsset.content.greeting}</p>
+                                  
+                                  {/* Objective */}
+                                  {selectedAgentAsset.content.meetingObjective && (
+                                    <div className="bg-gray-50 p-4 rounded-lg border-l-4 border-gray-400">
+                                      <p className="text-sm font-medium text-gray-900 mb-1">Objective</p>
+                                      <p className="text-sm text-gray-700">{selectedAgentAsset.content.meetingObjective}</p>
+                                    </div>
+                                  )}
+
+                                  {/* Key Decisions */}
+                                  {selectedAgentAsset.content.keyDecisions && selectedAgentAsset.content.keyDecisions.length > 0 && (
+                                    <div>
+                                      <h3 className="text-sm font-bold uppercase tracking-wider text-gray-900 mb-3 border-b pb-2">Key Decisions</h3>
+                                      <ul className="list-disc pl-5 space-y-2">
+                                        {selectedAgentAsset.content.keyDecisions.map((decision: string, idx: number) => (
+                                          <li key={idx} className="text-sm text-gray-700">{decision}</li>
+                                        ))}
+                                      </ul>
+                                    </div>
+                                  )}
+
+                                  {/* Discussion Points */}
+                                  {selectedAgentAsset.content.discussionPoints && selectedAgentAsset.content.discussionPoints.length > 0 && (
+                                    <div>
+                                      <h3 className="text-sm font-bold uppercase tracking-wider text-gray-900 mb-3 border-b pb-2">Discussion Points</h3>
+                                      <div className="space-y-4">
+                                        {selectedAgentAsset.content.discussionPoints.map((point: any, idx: number) => (
+                                          <div key={idx}>
+                                            <h4 className="text-sm font-semibold text-gray-800 mb-2">{point.topic}</h4>
+                                            <ul className="list-disc pl-5 space-y-1">
+                                              {point.details.map((detail: string, didx: number) => (
+                                                <li key={didx} className="text-sm text-gray-600">{detail}</li>
+                                              ))}
+                                            </ul>
+                                          </div>
+                                        ))}
+                                      </div>
+                                    </div>
+                                  )}
+                                  
+                                  {/* Tasks Table */}
+                                  {selectedAgentAsset.content.tasks && selectedAgentAsset.content.tasks.length > 0 && (
+                                    <div>
+                                      <h3 className="text-sm font-bold uppercase tracking-wider text-gray-900 mb-3 border-b pb-2">Action Items</h3>
+                                      <div className="border rounded-lg overflow-hidden">
+                                        <table className="w-full text-sm text-left">
+                                          <thead className="bg-gray-50 text-gray-700 border-b">
+                                            <tr>
+                                              <th className="px-4 py-3 font-semibold w-1/2">Task & Notes</th>
+                                              <th className="px-4 py-3 font-semibold">Owner</th>
+                                              <th className="px-4 py-3 font-semibold">Deadline</th>
+                                              <th className="px-4 py-3 font-semibold text-center">Priority</th>
+                                            </tr>
+                                          </thead>
+                                          <tbody className="divide-y divide-gray-200">
+                                            {selectedAgentAsset.content.tasks.map((task: any, idx: number) => (
+                                              <tr key={idx} className="hover:bg-gray-50">
+                                                <td className="px-4 py-3">
+                                                  <div className="font-medium text-gray-900">{task.task}</div>
+                                                  {task.notes && <div className="text-xs text-gray-500 mt-1">{task.notes}</div>}
+                                                </td>
+                                                <td className="px-4 py-3">
+                                                  <span className="inline-flex items-center px-2.5 py-0.5 rounded-full text-xs font-medium bg-gray-100 text-gray-800">
+                                                    {task.owner}
+                                                  </span>
+                                                </td>
+                                                <td className="px-4 py-3 text-gray-600">{task.deadline}</td>
+                                                <td className="px-4 py-3 text-center">
+                                                  <span className={`inline-flex items-center px-2 py-1 rounded text-xs font-bold border ${
+                                                    task.priority?.toLowerCase() === 'high' ? 'bg-red-50 text-red-700 border-red-200' :
+                                                    task.priority?.toLowerCase() === 'medium' ? 'bg-orange-50 text-orange-700 border-orange-200' :
+                                                    'bg-green-50 text-green-700 border-green-200'
+                                                  }`}>
+                                                    {task.priority}
+                                                  </span>
+                                                </td>
+                                              </tr>
+                                            ))}
+                                          </tbody>
+                                        </table>
+                                      </div>
+                                    </div>
+                                  )}
+                                  
+                                  {/* Next Steps */}
+                                  {selectedAgentAsset.content.nextMeeting && (
+                                    <div>
+                                      <h3 className="text-sm font-bold uppercase tracking-wider text-gray-900 mb-3 border-b pb-2">Next Steps & Follow-up</h3>
+                                      <p className="text-sm text-gray-700">{selectedAgentAsset.content.nextMeeting}</p>
+                                    </div>
+                                  )}
+                                  
+                                  {/* Closing */}
+                                  <div className="pt-6">
+                                    <p className="text-base text-gray-600">{selectedAgentAsset.content.closing}</p>
+                                  </div>
+                                </div>
+                              </div>
+                            ) : (
+                              <div className="bg-white p-6 sm:p-8 border border-[#141414]/5 shadow-sm rounded-xl">
+                                {/* Wiki Header */}
+                                <div className="border-b border-gray-200 pb-6 mb-6">
+                                  <h2 className="text-3xl font-bold tracking-tight">{selectedAgentAsset.content.title}</h2>
+                                  {selectedAgentAsset.content.subtitle && (
+                                    <p className="text-gray-500 italic mt-2">{selectedAgentAsset.content.subtitle}</p>
+                                  )}
+                                  <p className="text-xs text-gray-400 mt-2 font-mono">
+                                    {selectedAgentAsset.content.date} • {selectedAgentAsset.content.style || 'MECE'} Format
+                                  </p>
+                                </div>
+                                
+                                {/* Wiki Sections */}
+                                <div className="space-y-8">
+                                  {(selectedAgentAsset.content.sections || []).map((section: any, idx: number) => (
+                                    <div key={idx} className="space-y-3">
+                                      <h3 className="text-lg font-bold text-[#141414] flex items-center gap-3">
+                                        <span className="w-8 h-8 rounded-full bg-purple-100 text-purple-700 flex items-center justify-center text-sm font-mono">
+                                          {idx + 1}
+                                        </span>
+                                        {section.heading}
+                                      </h3>
+                                      <p className="text-sm text-gray-600 leading-relaxed pl-11">{section.content}</p>
+                                      {section.bullets && section.bullets.length > 0 && (
+                                        <ul className="pl-11 space-y-2">
+                                          {section.bullets.map((bullet: string, bidx: number) => (
+                                            <li key={bidx} className="text-sm text-gray-700 flex items-start gap-2">
+                                              <span className="w-1.5 h-1.5 rounded-full bg-purple-400 mt-2 flex-shrink-0" />
+                                              {bullet}
+                                            </li>
+                                          ))}
+                                        </ul>
+                                      )}
+                                    </div>
+                                  ))}
+                                </div>
+                                
+                                {/* Conclusion */}
+                                {selectedAgentAsset.content.conclusion && (
+                                  <div className="mt-8 pt-6 border-t border-gray-200">
+                                    <h3 className="text-lg font-bold mb-3">Conclusion</h3>
+                                    <p className="text-sm text-gray-600 italic">{selectedAgentAsset.content.conclusion}</p>
+                                  </div>
+                                )}
+                              </div>
+                            )}
+                          </div>
+                        )}
+                      </section>
+                    </div>
+
+                    {/* Agent Asset History Sidebar */}
+                    <div className="space-y-6">
+                      <h3 className="text-xs font-mono uppercase tracking-widest opacity-50">Generated Outputs</h3>
+                      <div className="space-y-3">
+                        {agentAssetHistory.length === 0 && (
+                          <div className="p-8 border border-dashed border-[#141414]/20 text-center rounded-xl">
+                            <p className="text-[10px] font-mono opacity-40 uppercase">No outputs yet</p>
+                          </div>
+                        )}
+                        {agentAssetHistory.map((asset) => (
+                          <div 
+                            key={asset.id}
+                            onClick={() => setSelectedAgentAsset(asset)}
+                            className={`p-4 border border-[#141414] shadow-[2px_2px_0px_0px_rgba(20,20,20,1)] flex items-center justify-between group cursor-pointer transition-all ${selectedAgentAsset?.id === asset.id ? 'bg-[#141414] text-white shadow-none translate-x-[2px] translate-y-[2px]' : 'bg-white hover:bg-[#F5F5F5]'}`}
+                          >
+                            <div className="flex items-center gap-3 overflow-hidden">
+                              {asset.type === 'email' ? <Mail className={`w-4 h-4 ${selectedAgentAsset?.id === asset.id ? 'text-blue-400' : 'text-blue-600'}`} /> : <BookOpen className={`w-4 h-4 ${selectedAgentAsset?.id === asset.id ? 'text-purple-400' : 'text-purple-600'}`} />}
+                              <div className="overflow-hidden">
+                                <p className="text-xs font-bold truncate">{asset.filename}</p>
+                                <p className={`text-[8px] font-mono uppercase ${selectedAgentAsset?.id === asset.id ? 'opacity-60' : 'opacity-40'}`}>{new Date(asset.created_at!).toLocaleDateString()}</p>
+                              </div>
+                            </div>
+                            <button 
+                              onClick={(e) => {
+                                e.stopPropagation();
+                                downloadExistingAsset(asset);
+                              }}
+                              className={`p-2 rounded-lg transition-all ${selectedAgentAsset?.id === asset.id ? 'hover:bg-white/10' : 'hover:bg-[#141414] hover:text-white'}`}
+                            >
+                              <Download className="w-4 h-4" />
+                            </button>
+                          </div>
+                        ))}
+                      </div>
+                    </div>
                   </div>
-                </div>
-
-                <div className="grid grid-cols-1 md:grid-cols-2 gap-8">
-                  {/* Follow-up Email Agent */}
-                  <motion.div 
-                    whileHover={{ scale: 1.01 }}
-                    className="border border-[#141414] bg-white p-8 shadow-[8px_8px_0px_0px_rgba(20,20,20,1)] flex flex-col group"
-                  >
-                    <div className="flex items-center gap-4 mb-6">
-                      <div className="p-4 rounded-2xl bg-blue-100 text-blue-700">
-                        <Mail className="w-8 h-8" />
-                      </div>
-                      <div>
-                        <h3 className="text-xl font-bold">Follow-up Email Generator</h3>
-                        <div className="flex items-center gap-2 mt-1">
-                          <span className="w-2 h-2 rounded-full bg-green-500 animate-pulse" />
-                          <span className="text-[10px] font-mono uppercase opacity-40">Team Sync Ready</span>
-                        </div>
-                      </div>
-                    </div>
-                    
-                    <p className="text-sm opacity-60 leading-relaxed mb-8 flex-1">
-                      Drafts a professional follow-up email for your team, including a clear list of tasks, owners, and next steps extracted from the audio.
-                    </p>
-
-                    <div className="space-y-4">
-                      <div className="p-4 bg-[#F5F5F5] rounded-xl border border-[#141414]/5">
-                        <p className="text-[10px] font-mono uppercase opacity-40 mb-2">Core Directive</p>
-                        <p className="text-[11px] italic opacity-70 line-clamp-2">"Draft a professional follow-up email with a bulleted list of tasks and owners."</p>
-                      </div>
-                      
-                      <button 
-                        onClick={() => handleAgentAction('email')}
-                        disabled={isGeneratingAsset}
-                        className="w-full py-3 bg-[#141414] text-white font-bold uppercase tracking-widest text-xs hover:bg-[#333] transition-all flex items-center justify-center gap-2"
-                      >
-                        {isGeneratingAsset ? <Loader2 className="w-4 h-4 animate-spin" /> : <Send className="w-4 h-4" />}
-                        {selectedTask ? 'Run on Current Notes' : 'Generate Email'}
-                      </button>
-                    </div>
-                  </motion.div>
-
-                  {/* Wiki Agent */}
-                  <motion.div 
-                    whileHover={{ scale: 1.01 }}
-                    className="border border-[#141414] bg-white p-8 shadow-[8px_8px_0px_0px_rgba(20,20,20,1)] flex flex-col group"
-                  >
-                    <div className="flex items-center gap-4 mb-6">
-                      <div className="p-4 rounded-2xl bg-purple-100 text-purple-700">
-                        <BookOpen className="w-8 h-8" />
-                      </div>
-                      <div>
-                        <h3 className="text-xl font-bold">Wiki Agent</h3>
-                        <div className="flex items-center gap-2 mt-1">
-                          <span className="w-2 h-2 rounded-full bg-green-500 animate-pulse" />
-                          <span className="text-[10px] font-mono uppercase opacity-40">Knowledge Base Expert</span>
-                        </div>
-                      </div>
-                    </div>
-                    
-                    <p className="text-sm opacity-60 leading-relaxed mb-8 flex-1">
-                      Generates a comprehensive, end-to-end report of the meeting. Choose between structured MECE or detailed PRD formats.
-                    </p>
-
-                    <div className="space-y-4">
-                      <div className="flex gap-2 p-1 bg-[#F5F5F5] rounded-lg border border-[#141414]/5">
-                        <button 
-                          onClick={() => setWikiStyle('MECE')}
-                          className={`flex-1 py-2 text-[10px] font-mono uppercase tracking-widest rounded-md transition-all ${wikiStyle === 'MECE' ? 'bg-white shadow-sm text-[#141414] font-bold' : 'opacity-40 hover:opacity-100'}`}
-                        >
-                          MECE Structure
-                        </button>
-                        <button 
-                          onClick={() => setWikiStyle('PRD')}
-                          className={`flex-1 py-2 text-[10px] font-mono uppercase tracking-widest rounded-md transition-all ${wikiStyle === 'PRD' ? 'bg-white shadow-sm text-[#141414] font-bold' : 'opacity-40 hover:opacity-100'}`}
-                        >
-                          PRD Style
-                        </button>
-                      </div>
-
-                      <div className="p-4 bg-[#F5F5F5] rounded-xl border border-[#141414]/5">
-                        <p className="text-[10px] font-mono uppercase opacity-40 mb-2">Structure Details</p>
-                        <p className="text-[11px] opacity-70">
-                          {wikiStyle === 'MECE' 
-                            ? "Mutually Exclusive, Collectively Exhaustive framework for logical grouping."
-                            : "Includes UI/UX, User Stories, Developer Tasks, and Competitor Analysis."}
-                        </p>
-                      </div>
-                      
-                      <button 
-                        onClick={() => handleAgentAction('wiki')}
-                        disabled={isGeneratingAsset}
-                        className="w-full py-3 bg-[#141414] text-white font-bold uppercase tracking-widest text-xs hover:bg-[#333] transition-all flex items-center justify-center gap-2"
-                      >
-                        {isGeneratingAsset ? <Loader2 className="w-4 h-4 animate-spin" /> : <Layout className="w-4 h-4" />}
-                        {selectedTask ? 'Run on Current Notes' : 'Generate Wiki Report'}
-                      </button>
-                    </div>
-                  </motion.div>
-                </div>
-
-                <div className="mt-16 p-8 border border-dashed border-[#141414]/20 rounded-3xl text-center bg-white/50">
-                  <Plus className="w-8 h-8 mx-auto mb-4 opacity-20" />
-                  <h3 className="text-lg font-serif italic opacity-40">Custom Agent</h3>
-                  <p className="text-xs opacity-40 mt-2 max-w-md mx-auto">Coming soon: Create your own specialized AI agents with custom prompts and knowledge bases.</p>
                 </div>
               </motion.div>
             )}
