@@ -28,7 +28,12 @@ import {
   FileBox,
   Presentation,
   FileSpreadsheet,
-  File as FileIcon
+  File as FileIcon,
+  Users,
+  Bot,
+  Mail,
+  Layout,
+  FileSearch
 } from 'lucide-react';
 import { motion, AnimatePresence } from 'motion/react';
 import Markdown from 'react-markdown';
@@ -67,7 +72,7 @@ declare global {
   }
 }
 
-type View = 'process' | 'history' | 'notes' | 'assets';
+type View = 'process' | 'history' | 'notes' | 'assets' | 'agents';
 type Status = 'idle' | 'splitting' | 'processing' | 'completed' | 'error';
 type NoteTab = 'transcription' | 'summary' | 'notes' | 'chat';
 
@@ -103,6 +108,7 @@ export default function App() {
   const [selectedAsset, setSelectedAsset] = useState<GeneratedAsset | null>(null);
   const [slideCount, setSlideCount] = useState(5);
   const [isGeneratingAsset, setIsGeneratingAsset] = useState(false);
+  const [wikiStyle, setWikiStyle] = useState<'MECE' | 'PRD'>('MECE');
   const fileInputRef = useRef<HTMLInputElement>(null);
   const chatEndRef = useRef<HTMLDivElement>(null);
 
@@ -230,6 +236,47 @@ export default function App() {
       setSelectedAsset(asset);
     } catch (err) {
       console.error('Report generation error:', err);
+    } finally {
+      setIsGeneratingAsset(false);
+    }
+  };
+
+  const handleAgentAction = async (agentType: 'email' | 'wiki') => {
+    if (!selectedTask || isGeneratingAsset) {
+      if (!selectedTask) {
+        setCurrentView('history');
+        setError('Please select a task from history first to use agents.');
+      }
+      return;
+    }
+    
+    setIsGeneratingAsset(true);
+    setCurrentView('notes');
+    setNoteTab('chat');
+    setChatMessages(prev => [...prev, { role: 'model', text: `Agent is analyzing "${selectedTask.filename}"...` }]);
+
+    try {
+      let result = '';
+      if (agentType === 'email') {
+        const emailPrompt = "You are a professional project manager. Draft a professional follow-up email based on this transcript. Include a clear, bulleted list of all tasks, owners (if mentioned), and deadlines. The email should be concise and action-oriented.";
+        result = await chatWithNotes(selectedTask.transcription, emailPrompt, []);
+      } else {
+        const wikiPrompt = wikiStyle === 'MECE' 
+          ? "Generate a detailed end-to-end report of this meeting using the MECE (Mutually Exclusive, Collectively Exhaustive) framework. Ensure all points are logically grouped and exhaustive. Use professional formatting with clear headings."
+          : "Generate a comprehensive Product Requirements Document (PRD) based on this meeting. Include detailed sections for: 1. UI/UX Requirements, 2. User Stories, 3. Developer Team Tasks, and 4. Competitor Analysis. The document must be well-structured and professional.";
+        result = await chatWithNotes(selectedTask.transcription, wikiPrompt, []);
+      }
+
+      setChatMessages(prev => [
+        ...prev.slice(0, -1), 
+        { role: 'model', text: result }
+      ]);
+    } catch (err) {
+      console.error('Agent error:', err);
+      setChatMessages(prev => [
+        ...prev.slice(0, -1), 
+        { role: 'model', text: 'Sorry, the agent encountered an error processing your request.' }
+      ]);
     } finally {
       setIsGeneratingAsset(false);
     }
@@ -469,6 +516,12 @@ export default function App() {
               className={`px-4 py-1.5 text-xs font-mono uppercase tracking-wider transition-colors flex-shrink-0 ${currentView === 'assets' ? 'bg-[#141414] text-[#E4E3E0]' : 'hover:bg-[#141414]/5'}`}
             >
               Assets
+            </button>
+            <button 
+              onClick={() => setCurrentView('agents')}
+              className={`px-4 py-1.5 text-xs font-mono uppercase tracking-wider transition-colors flex-shrink-0 ${currentView === 'agents' ? 'bg-[#141414] text-[#E4E3E0]' : 'hover:bg-[#141414]/5'}`}
+            >
+              Agents
             </button>
           </nav>
         </div>
@@ -1024,6 +1077,130 @@ export default function App() {
                       </div>
                     </div>
                   </div>
+                </div>
+              </motion.div>
+            )}
+
+            {currentView === 'agents' && (
+              <motion.div 
+                key="agents"
+                initial={{ opacity: 0 }}
+                animate={{ opacity: 1 }}
+                className="p-4 sm:p-8 max-w-6xl mx-auto"
+              >
+                <div className="flex flex-col sm:flex-row items-start sm:items-center justify-between gap-4 mb-12">
+                  <div>
+                    <h2 className="text-4xl font-serif italic font-bold mb-2">AI Agents</h2>
+                    <p className="text-sm opacity-50 font-mono uppercase tracking-widest">Specialized intelligence for your audio data</p>
+                  </div>
+                  <div className="flex items-center gap-2 px-4 py-2 bg-[#141414] text-white rounded-full text-[10px] font-mono uppercase tracking-widest">
+                    <Sparkles className="w-3 h-3" /> 2 Agents Available
+                  </div>
+                </div>
+
+                <div className="grid grid-cols-1 md:grid-cols-2 gap-8">
+                  {/* Follow-up Email Agent */}
+                  <motion.div 
+                    whileHover={{ scale: 1.01 }}
+                    className="border border-[#141414] bg-white p-8 shadow-[8px_8px_0px_0px_rgba(20,20,20,1)] flex flex-col group"
+                  >
+                    <div className="flex items-center gap-4 mb-6">
+                      <div className="p-4 rounded-2xl bg-blue-100 text-blue-700">
+                        <Mail className="w-8 h-8" />
+                      </div>
+                      <div>
+                        <h3 className="text-xl font-bold">Follow-up Email Generator</h3>
+                        <div className="flex items-center gap-2 mt-1">
+                          <span className="w-2 h-2 rounded-full bg-green-500 animate-pulse" />
+                          <span className="text-[10px] font-mono uppercase opacity-40">Team Sync Ready</span>
+                        </div>
+                      </div>
+                    </div>
+                    
+                    <p className="text-sm opacity-60 leading-relaxed mb-8 flex-1">
+                      Drafts a professional follow-up email for your team, including a clear list of tasks, owners, and next steps extracted from the audio.
+                    </p>
+
+                    <div className="space-y-4">
+                      <div className="p-4 bg-[#F5F5F5] rounded-xl border border-[#141414]/5">
+                        <p className="text-[10px] font-mono uppercase opacity-40 mb-2">Core Directive</p>
+                        <p className="text-[11px] italic opacity-70 line-clamp-2">"Draft a professional follow-up email with a bulleted list of tasks and owners."</p>
+                      </div>
+                      
+                      <button 
+                        onClick={() => handleAgentAction('email')}
+                        disabled={isGeneratingAsset}
+                        className="w-full py-3 bg-[#141414] text-white font-bold uppercase tracking-widest text-xs hover:bg-[#333] transition-all flex items-center justify-center gap-2"
+                      >
+                        {isGeneratingAsset ? <Loader2 className="w-4 h-4 animate-spin" /> : <Send className="w-4 h-4" />}
+                        {selectedTask ? 'Run on Current Notes' : 'Generate Email'}
+                      </button>
+                    </div>
+                  </motion.div>
+
+                  {/* Wiki Agent */}
+                  <motion.div 
+                    whileHover={{ scale: 1.01 }}
+                    className="border border-[#141414] bg-white p-8 shadow-[8px_8px_0px_0px_rgba(20,20,20,1)] flex flex-col group"
+                  >
+                    <div className="flex items-center gap-4 mb-6">
+                      <div className="p-4 rounded-2xl bg-purple-100 text-purple-700">
+                        <BookOpen className="w-8 h-8" />
+                      </div>
+                      <div>
+                        <h3 className="text-xl font-bold">Wiki Agent</h3>
+                        <div className="flex items-center gap-2 mt-1">
+                          <span className="w-2 h-2 rounded-full bg-green-500 animate-pulse" />
+                          <span className="text-[10px] font-mono uppercase opacity-40">Knowledge Base Expert</span>
+                        </div>
+                      </div>
+                    </div>
+                    
+                    <p className="text-sm opacity-60 leading-relaxed mb-8 flex-1">
+                      Generates a comprehensive, end-to-end report of the meeting. Choose between structured MECE or detailed PRD formats.
+                    </p>
+
+                    <div className="space-y-4">
+                      <div className="flex gap-2 p-1 bg-[#F5F5F5] rounded-lg border border-[#141414]/5">
+                        <button 
+                          onClick={() => setWikiStyle('MECE')}
+                          className={`flex-1 py-2 text-[10px] font-mono uppercase tracking-widest rounded-md transition-all ${wikiStyle === 'MECE' ? 'bg-white shadow-sm text-[#141414] font-bold' : 'opacity-40 hover:opacity-100'}`}
+                        >
+                          MECE Structure
+                        </button>
+                        <button 
+                          onClick={() => setWikiStyle('PRD')}
+                          className={`flex-1 py-2 text-[10px] font-mono uppercase tracking-widest rounded-md transition-all ${wikiStyle === 'PRD' ? 'bg-white shadow-sm text-[#141414] font-bold' : 'opacity-40 hover:opacity-100'}`}
+                        >
+                          PRD Style
+                        </button>
+                      </div>
+
+                      <div className="p-4 bg-[#F5F5F5] rounded-xl border border-[#141414]/5">
+                        <p className="text-[10px] font-mono uppercase opacity-40 mb-2">Structure Details</p>
+                        <p className="text-[11px] opacity-70">
+                          {wikiStyle === 'MECE' 
+                            ? "Mutually Exclusive, Collectively Exhaustive framework for logical grouping."
+                            : "Includes UI/UX, User Stories, Developer Tasks, and Competitor Analysis."}
+                        </p>
+                      </div>
+                      
+                      <button 
+                        onClick={() => handleAgentAction('wiki')}
+                        disabled={isGeneratingAsset}
+                        className="w-full py-3 bg-[#141414] text-white font-bold uppercase tracking-widest text-xs hover:bg-[#333] transition-all flex items-center justify-center gap-2"
+                      >
+                        {isGeneratingAsset ? <Loader2 className="w-4 h-4 animate-spin" /> : <Layout className="w-4 h-4" />}
+                        {selectedTask ? 'Run on Current Notes' : 'Generate Wiki Report'}
+                      </button>
+                    </div>
+                  </motion.div>
+                </div>
+
+                <div className="mt-16 p-8 border border-dashed border-[#141414]/20 rounded-3xl text-center bg-white/50">
+                  <Plus className="w-8 h-8 mx-auto mb-4 opacity-20" />
+                  <h3 className="text-lg font-serif italic opacity-40">Custom Agent</h3>
+                  <p className="text-xs opacity-40 mt-2 max-w-md mx-auto">Coming soon: Create your own specialized AI agents with custom prompts and knowledge bases.</p>
                 </div>
               </motion.div>
             )}

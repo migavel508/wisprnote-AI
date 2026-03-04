@@ -108,25 +108,40 @@ export async function generateConceptImage(description: string): Promise<string 
 
 export async function generatePPTContent(text: string, slideCount: number = 5): Promise<any> {
   const response: GenerateContentResponse = await ai.models.generateContent({
-    model: "gemini-2.5-flash-image",
+    model: "gemini-3-flash-preview",
     contents: `Based on the following transcription, generate content for a ${slideCount}-slide PowerPoint presentation. 
-    Include a title slide and content slides. 
-    Return ONLY a raw JSON object with the following structure:
-    {
-      "title": "Main Title",
-      "slides": [
-        { "title": "Slide Title", "content": ["Bullet 1", "Bullet 2"] }
-      ]
-    }
+    Include a title slide and content slides.
     
     Transcription: ${text}`,
+    config: {
+      responseMimeType: "application/json",
+      responseSchema: {
+        type: Type.OBJECT,
+        properties: {
+          title: { type: Type.STRING, description: "The main title of the presentation" },
+          slides: {
+            type: Type.ARRAY,
+            items: {
+              type: Type.OBJECT,
+              properties: {
+                title: { type: Type.STRING, description: "The title of the slide" },
+                content: { 
+                  type: Type.ARRAY, 
+                  items: { type: Type.STRING },
+                  description: "Bullet points for the slide"
+                }
+              },
+              required: ["title", "content"]
+            }
+          }
+        },
+        required: ["title", "slides"]
+      }
+    }
   });
   
-  const textResponse = response.text || "{}";
   try {
-    // Attempt to extract JSON if model wraps it in markdown blocks
-    const jsonMatch = textResponse.match(/\{[\s\S]*\}/);
-    return JSON.parse(jsonMatch ? jsonMatch[0] : textResponse);
+    return JSON.parse(response.text || "{}");
   } catch (e) {
     console.error("Failed to parse PPT JSON:", e);
     return { title: "Presentation", slides: [] };
@@ -135,23 +150,35 @@ export async function generatePPTContent(text: string, slideCount: number = 5): 
 
 export async function generateReportContent(text: string): Promise<any> {
   const response: GenerateContentResponse = await ai.models.generateContent({
-    model: "gemini-2.5-flash-image",
+    model: "gemini-3-flash-preview",
     contents: `Based on the following transcription, generate a structured professional report.
-    Return ONLY a raw JSON object with the following structure:
-    {
-      "title": "Report Title",
-      "sections": [
-        { "heading": "Section Heading", "body": "Section body text..." }
-      ]
-    }
     
     Transcription: ${text}`,
+    config: {
+      responseMimeType: "application/json",
+      responseSchema: {
+        type: Type.OBJECT,
+        properties: {
+          title: { type: Type.STRING, description: "The title of the report" },
+          sections: {
+            type: Type.ARRAY,
+            items: {
+              type: Type.OBJECT,
+              properties: {
+                heading: { type: Type.STRING, description: "The heading of the section" },
+                body: { type: Type.STRING, description: "The detailed content of the section" }
+              },
+              required: ["heading", "body"]
+            }
+          }
+        },
+        required: ["title", "sections"]
+      }
+    }
   });
 
-  const textResponse = response.text || "{}";
   try {
-    const jsonMatch = textResponse.match(/\{[\s\S]*\}/);
-    return JSON.parse(jsonMatch ? jsonMatch[0] : textResponse);
+    return JSON.parse(response.text || "{}");
   } catch (e) {
     console.error("Failed to parse Report JSON:", e);
     return { title: "Report", sections: [] };
