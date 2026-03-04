@@ -33,7 +33,11 @@ import {
   Bot,
   Mail,
   Layout,
-  FileSearch
+  FileSearch,
+  Share2,
+  Network,
+  Circle,
+  X
 } from 'lucide-react';
 import { motion, AnimatePresence } from 'motion/react';
 import Markdown from 'react-markdown';
@@ -41,6 +45,7 @@ import remarkGfm from 'remark-gfm';
 import PptxGenJS from 'pptxgenjs';
 import { Document, Packer, Paragraph, TextRun, HeadingLevel } from 'docx';
 import { saveAs } from 'file-saver';
+import ForceGraph2D from 'react-force-graph-2d';
 import { splitAudio, AudioBatch } from './services/audioService';
 import { 
   processAudioBatch, 
@@ -53,7 +58,8 @@ import {
   generateEmailContent,
   generateWikiContent,
   generatePodcastScript,
-  chatWithPodcast
+  chatWithPodcast,
+  extractKnowledgeGraph
 } from './services/geminiService';
 import { 
   supabase, 
@@ -62,7 +68,10 @@ import {
   TaskHistory, 
   saveAsset, 
   getAssets, 
-  GeneratedAsset 
+  GeneratedAsset,
+  saveKnowledgeGraphBatch,
+  getKnowledgeGraph,
+  KnowledgeGraphEntry
 } from './services/supabaseService';
 import Auth from './components/Auth';
 import { Session } from '@supabase/supabase-js';
@@ -76,7 +85,7 @@ declare global {
   }
 }
 
-type View = 'process' | 'history' | 'notes' | 'assets' | 'agents';
+type View = 'process' | 'history' | 'notes' | 'assets' | 'agents' | 'knowledge';
 type Status = 'idle' | 'splitting' | 'processing' | 'completed' | 'error';
 type NoteTab = 'transcription' | 'summary' | 'notes' | 'chat';
 
@@ -122,6 +131,14 @@ export default function App() {
   const [isPlayingPodcast, setIsPlayingPodcast] = useState(false);
   const [podcastInput, setPodcastInput] = useState('');
   const [isPodcastThinking, setIsPodcastThinking] = useState(false);
+  
+  // Knowledge Graph State
+  const [kgData, setKgData] = useState<any[]>([]);
+  const [isLoadingKG, setIsLoadingKG] = useState(false);
+  const [kgProgress, setKgProgress] = useState({ current: 0, total: 0 });
+  const [selectedNode, setSelectedNode] = useState<any>(null);
+  const [kgBuilt, setKgBuilt] = useState(false);
+  const kgContainerRef = useRef<HTMLDivElement>(null);
   
   const fileInputRef = useRef<HTMLInputElement>(null);
   const chatEndRef = useRef<HTMLDivElement>(null);
@@ -264,6 +281,312 @@ export default function App() {
     } finally {
       setIsGeneratingAsset(false);
     }
+  };
+
+  // Load persisted knowledge graph from Supabase
+  const fetchKnowledgeGraph = async () => {
+    try {
+      const data = await getKnowledgeGraph();
+      if (data && data.length > 0) {
+        // Transform DB format to app format
+        const transformed = data.map(entry => ({
+          meetingId: entry.task_id,
+          meetingTitle: entry.meeting_title,
+          topics: entry.topics || [],
+          decisions: entry.decisions || [],
+          people: entry.people || [],
+          actionItems: entry.action_items || [],
+          references: entry.refs || []
+        }));
+        setKgData(transformed);
+        setKgBuilt(true);
+      }
+    } catch (err) {
+      console.error('Failed to fetch knowledge graph:', err);
+    }
+  };
+
+  // Load KG on mount
+  useEffect(() => {
+    if (session) {
+      fetchKnowledgeGraph();
+    }
+  }, [session]);
+
+  const buildKnowledgeGraph = async () => {
+    if (history.length === 0 || isLoadingKG) return;
+    setIsLoadingKG(true);
+    setSelectedNode(null);
+    setKgProgress({ current: 0, total: history.length });
+    
+    try {
+      const results = [];
+      // Process sequentially to avoid Gemini API 429 Too Many Requests rate limits
+      for (let i = 0; i < history.length; i++) {
+        const task = history[i];
+        try {
+          const result = await extractKnowledgeGraph(task.id!, task.filename, task.transcription);
+          results.push(result);
+        } catch (taskErr) {
+          console.error(`Failed to extract KG for meeting ${task.id}:`, taskErr);
+          // Push empty/fallback data so we don't drop the meeting entirely
+          results.push({ meetingId: task.id!, meetingTitle: task.filename, topics: [], decisions: [], people: [], actionItems: [], refs: [] });
+        }
+        setKgProgress({ current: i + 1, total: history.length });
+        
+        // Wait 3 seconds between requests to respect free tier rate limits (~15 RPM)
+        if (i < history.length - 1) {
+          await new Promise(resolve => setTimeout(resolve, 3000));
+        }
+      }
+      
+      // Persist to Supabase
+      const entriesToSave: KnowledgeGraphEntry[] = results.map(r => ({
+        task_id: r.meetingId,
+        meeting_title: r.meetingTitle,
+        topics: r.topics || [],
+        decisions: r.decisions || [],
+        people: r.people || [],
+        action_items: r.actionItems || [],
+        refs: r.references || []
+      }));
+      
+      try {
+        await saveKnowledgeGraphBatch(entriesToSave);
+        console.log('Knowledge graph persisted to Supabase');
+      } catch (saveErr) {
+        console.error('Failed to persist KG to Supabase:', saveErr);
+        // Continue anyway - we still have the data in memory
+      }
+      
+      setKgData(results);
+      setKgBuilt(true);
+    } catch (err) {
+      console.error('KG build error:', err);
+      setError('Failed to build knowledge graph.');
+    } finally {
+      setIsLoadingKG(false);
+      setKgProgress({ current: 0, total: 0 });
+    }
+  };
+
+  // Fuzzy string similarity using Jaccard index on word sets
+  const calculateSimilarity = (str1: string, str2: string): number => {
+    const normalize = (s: string) => s.toLowerCase().replace(/[^a-z0-9\s]/g, '').split(/\s+/).filter(w => w.length > 2);
+    const words1 = new Set(normalize(str1));
+    const words2 = new Set(normalize(str2));
+    if (words1.size === 0 || words2.size === 0) return 0;
+    
+    const intersection = new Set([...words1].filter(x => words2.has(x)));
+    const union = new Set([...words1, ...words2]);
+    return intersection.size / union.size;
+  };
+
+  // Find or create canonical topic ID using similarity matching
+  const findCanonicalTopicId = (topicName: string, existingTopics: Map<string, string>): string => {
+    const normalized = topicName.toLowerCase().replace(/\s+/g, '_');
+    const directId = `topic_${normalized}`;
+    
+    // Check for exact match first
+    if (existingTopics.has(directId)) {
+      return directId;
+    }
+    
+    // Check for similar topics (threshold: 0.5 Jaccard similarity)
+    for (const [existingId, existingName] of existingTopics.entries()) {
+      if (calculateSimilarity(topicName, existingName) >= 0.5) {
+        return existingId;
+      }
+    }
+    
+    // No match found, create new
+    existingTopics.set(directId, topicName);
+    return directId;
+  };
+
+  // Build graph nodes and links from kgData with smart similarity matching
+  const buildGraphData = () => {
+    const nodes: any[] = [];
+    const links: any[] = [];
+    const topicMap: Record<string, { meetingIds: string[]; statuses: string[]; summaries: string[] }> = {};
+    const existingTopics = new Map<string, string>(); // topicId -> displayName
+    const personMeetings: Record<string, string[]> = {}; // personId -> meetingIds[]
+
+    kgData.forEach((meeting) => {
+      // Meeting node with enhanced data
+      const meetingNodeId = `meeting_${meeting.meetingId}`;
+      nodes.push({
+        id: meetingNodeId,
+        label: meeting.meetingTitle?.replace(/\.[^.]+$/, '') || 'Meeting',
+        type: 'meeting',
+        data: meeting,
+        color: '#141414',
+        size: 20
+      });
+
+      // Topic nodes with similarity matching
+      (meeting.topics || []).forEach((topic: any) => {
+        const topicId = findCanonicalTopicId(topic.name, existingTopics);
+        
+        if (!nodes.find(n => n.id === topicId)) {
+          const statusColor = 
+            topic.status === 'resolved' ? '#22c55e' :
+            topic.status === 'off-track' ? '#ef4444' :
+            topic.status === 'revisited' ? '#f59e0b' :
+            topic.status === 'ongoing' ? '#3b82f6' : '#8b5cf6';
+          nodes.push({
+            id: topicId,
+            label: topic.name,
+            type: 'topic',
+            data: { ...topic, allStatuses: [topic.status], allSummaries: [topic.summary] },
+            color: statusColor,
+            size: 14
+          });
+        } else {
+          // Update existing topic node with additional status info
+          const existingNode = nodes.find(n => n.id === topicId);
+          if (existingNode && existingNode.data) {
+            existingNode.data.allStatuses = [...(existingNode.data.allStatuses || []), topic.status];
+            existingNode.data.allSummaries = [...(existingNode.data.allSummaries || []), topic.summary];
+            // Update color based on latest status or most critical
+            if (topic.status === 'off-track') existingNode.color = '#ef4444';
+            else if (topic.status === 'revisited' && existingNode.color !== '#ef4444') existingNode.color = '#f59e0b';
+            // Increase size for topics appearing in multiple meetings
+            existingNode.size = Math.min(existingNode.size + 3, 24);
+          }
+        }
+        
+        links.push({ source: meetingNodeId, target: topicId, type: 'meeting-topic' });
+        
+        // Track topic across meetings
+        if (!topicMap[topicId]) topicMap[topicId] = { meetingIds: [], statuses: [], summaries: [] };
+        topicMap[topicId].meetingIds.push(meeting.meetingId);
+        topicMap[topicId].statuses.push(topic.status);
+        topicMap[topicId].summaries.push(topic.summary);
+      });
+
+      // Decision nodes linked to topics
+      (meeting.decisions || []).forEach((dec: any, idx: number) => {
+        const decId = `decision_${meeting.meetingId}_${idx}`;
+        nodes.push({
+          id: decId,
+          label: dec.decision.length > 40 ? dec.decision.substring(0, 40) + '...' : dec.decision,
+          type: 'decision',
+          data: { ...dec, meetingId: meeting.meetingId, meetingTitle: meeting.meetingTitle },
+          color: '#f59e0b',
+          size: 9
+        });
+        
+        // Try to link to canonical topic
+        const topicId = findCanonicalTopicId(dec.relatedTopic || '', existingTopics);
+        if (nodes.find(n => n.id === topicId)) {
+          links.push({ source: topicId, target: decId, type: 'topic-decision' });
+        } else {
+          links.push({ source: meetingNodeId, target: decId, type: 'meeting-decision' });
+        }
+      });
+
+      // People nodes - shared across meetings
+      (meeting.people || []).forEach((person: string) => {
+        const personId = `person_${person.toLowerCase().replace(/\s+/g, '_')}`;
+        if (!nodes.find(n => n.id === personId)) {
+          nodes.push({
+            id: personId,
+            label: person,
+            type: 'person',
+            data: { name: person, meetings: [meeting.meetingTitle] },
+            color: '#06b6d4',
+            size: 11
+          });
+        } else {
+          // Track which meetings this person appears in
+          const existingNode = nodes.find(n => n.id === personId);
+          if (existingNode && existingNode.data) {
+            existingNode.data.meetings = [...(existingNode.data.meetings || []), meeting.meetingTitle];
+            existingNode.size = Math.min(existingNode.size + 2, 18);
+          }
+        }
+        links.push({ source: meetingNodeId, target: personId, type: 'meeting-person' });
+        
+        // Track for cross-meeting person connections
+        if (!personMeetings[personId]) personMeetings[personId] = [];
+        personMeetings[personId].push(meeting.meetingId);
+      });
+
+      // Action item nodes
+      (meeting.actionItems || []).forEach((item: any, idx: number) => {
+        const itemId = `action_${meeting.meetingId}_${idx}`;
+        nodes.push({
+          id: itemId,
+          label: item.task.length > 35 ? item.task.substring(0, 35) + '...' : item.task,
+          type: 'action',
+          data: { ...item, meetingId: meeting.meetingId, meetingTitle: meeting.meetingTitle },
+          color: '#ec4899',
+          size: 8
+        });
+        
+        const topicId = findCanonicalTopicId(item.relatedTopic || '', existingTopics);
+        if (nodes.find(n => n.id === topicId)) {
+          links.push({ source: topicId, target: itemId, type: 'topic-action' });
+        } else {
+          links.push({ source: meetingNodeId, target: itemId, type: 'meeting-action' });
+        }
+        
+        // Link action to person if owner matches
+        const ownerId = `person_${(item.owner || '').toLowerCase().replace(/\s+/g, '_')}`;
+        if (nodes.find(n => n.id === ownerId)) {
+          links.push({ source: ownerId, target: itemId, type: 'person-action' });
+        }
+      });
+    });
+
+    // Cross-meeting links via shared topics (dashed lines between meetings)
+    Object.entries(topicMap).forEach(([topicId, data]) => {
+      if (data.meetingIds.length > 1) {
+        // Create timeline-style connections between meetings sharing this topic
+        const uniqueMeetings = [...new Set(data.meetingIds)];
+        for (let i = 0; i < uniqueMeetings.length - 1; i++) {
+          const existingLink = links.find(l => 
+            (l.source === `meeting_${uniqueMeetings[i]}` && l.target === `meeting_${uniqueMeetings[i + 1]}`) ||
+            (l.source === `meeting_${uniqueMeetings[i + 1]}` && l.target === `meeting_${uniqueMeetings[i]}`)
+          );
+          if (!existingLink) {
+            links.push({
+              source: `meeting_${uniqueMeetings[i]}`,
+              target: `meeting_${uniqueMeetings[i + 1]}`,
+              type: 'cross-meeting',
+              dashed: true,
+              sharedTopic: topicId
+            });
+          }
+        }
+      }
+    });
+
+    // Cross-meeting links via shared people (lighter dashed lines)
+    Object.entries(personMeetings).forEach(([personId, meetingIds]) => {
+      if (meetingIds.length > 1) {
+        const uniqueMeetings = [...new Set(meetingIds)];
+        for (let i = 0; i < uniqueMeetings.length - 1; i++) {
+          const existingLink = links.find(l => 
+            l.type === 'cross-meeting' &&
+            ((l.source === `meeting_${uniqueMeetings[i]}` && l.target === `meeting_${uniqueMeetings[i + 1]}`) ||
+            (l.source === `meeting_${uniqueMeetings[i + 1]}` && l.target === `meeting_${uniqueMeetings[i]}`))
+          );
+          if (!existingLink) {
+            links.push({
+              source: `meeting_${uniqueMeetings[i]}`,
+              target: `meeting_${uniqueMeetings[i + 1]}`,
+              type: 'cross-meeting-person',
+              dashed: true,
+              sharedPerson: personId
+            });
+          }
+        }
+      }
+    });
+
+    return { nodes, links };
   };
 
   const playPodcastLine = (line: any) => {
@@ -813,6 +1136,13 @@ export default function App() {
               className={`px-4 py-1.5 text-xs font-mono uppercase tracking-wider transition-colors flex-shrink-0 ${currentView === 'agents' ? 'bg-[#141414] text-[#E4E3E0]' : 'hover:bg-[#141414]/5'}`}
             >
               Agents
+            </button>
+            <button 
+              onClick={() => setCurrentView('knowledge')}
+              className={`px-4 py-1.5 text-xs font-mono uppercase tracking-wider transition-colors flex-shrink-0 flex items-center gap-1.5 ${currentView === 'knowledge' ? 'bg-[#141414] text-[#E4E3E0]' : 'hover:bg-[#141414]/5'}`}
+            >
+              <Share2 className="w-3 h-3" />
+              Knowledge
             </button>
           </nav>
         </div>
@@ -1849,6 +2179,259 @@ export default function App() {
                       </div>
                     </div>
                   </div>
+                </div>
+              </motion.div>
+            )}
+
+            {currentView === 'knowledge' && (
+              <motion.div 
+                key="knowledge"
+                initial={{ opacity: 0 }}
+                animate={{ opacity: 1 }}
+                exit={{ opacity: 0 }}
+                className="h-full flex flex-col"
+              >
+                <div className="p-4 sm:p-6 border-b border-[#141414]/10 bg-white flex flex-col sm:flex-row items-start sm:items-center justify-between gap-4">
+                  <div>
+                    <h2 className="text-xl font-bold tracking-tight flex items-center gap-2">
+                      <Share2 className="w-5 h-5" />
+                      Knowledge Graph
+                    </h2>
+                    <p className="text-xs opacity-50 mt-1">Cross-meeting memory — see how topics, decisions, and people connect across all your meetings</p>
+                  </div>
+                  <button 
+                    onClick={buildKnowledgeGraph}
+                    disabled={isLoadingKG || history.length === 0}
+                    className="px-6 py-2.5 bg-[#141414] text-white text-xs font-mono uppercase tracking-widest hover:bg-[#333] disabled:opacity-30 flex items-center gap-2 rounded-lg transition-colors"
+                  >
+                    {isLoadingKG ? <Loader2 className="w-4 h-4 animate-spin" /> : <Network className="w-4 h-4" />}
+                    {kgBuilt ? 'Rebuild Graph' : 'Build Graph'}
+                  </button>
+                </div>
+
+                <div className="flex-1 flex relative overflow-hidden">
+                  {!kgBuilt ? (
+                    <div className="flex-1 flex flex-col items-center justify-center text-center p-8">
+                      {isLoadingKG ? (
+                        <div className="w-full max-w-md flex flex-col items-center">
+                          <Loader2 className="w-16 h-16 animate-spin opacity-20 mb-6" />
+                          <h3 className="text-lg font-bold opacity-80 mb-2">
+                            Analyzing Meeting {kgProgress.current} of {kgProgress.total}
+                          </h3>
+                          <div className="w-full bg-gray-200 rounded-full h-2.5 mb-4">
+                            <motion.div 
+                              className="bg-[#141414] h-2.5 rounded-full" 
+                              initial={{ width: 0 }}
+                              animate={{ width: `${(kgProgress.current / kgProgress.total) * 100}%` }}
+                              transition={{ duration: 0.5 }}
+                            />
+                          </div>
+                          <p className="text-xs opacity-50 mt-2">
+                            Extracting topics, decisions, people, and action items to build a connected knowledge graph.
+                            <br />
+                            <span className="italic mt-1 block">(Processing sequentially to respect API limits)</span>
+                          </p>
+                        </div>
+                      ) : (
+                        <>
+                          <Share2 className="w-16 h-16 opacity-10 mb-6" />
+                          <h3 className="text-lg font-serif italic opacity-30">No Graph Built Yet</h3>
+                          <p className="text-xs opacity-30 mt-2 max-w-md">
+                            {history.length === 0 
+                              ? 'Process some audio files first, then come back to build your knowledge graph.'
+                              : `You have ${history.length} meeting${history.length !== 1 ? 's' : ''} ready. Click "Build Graph" to analyze and connect them.`
+                            }
+                          </p>
+                        </>
+                      )}
+                    </div>
+                  ) : (
+                    <>
+                      {/* Graph Canvas */}
+                      <div ref={kgContainerRef} className="flex-1 bg-[#FAFAFA]">
+                        <ForceGraph2D
+                          graphData={buildGraphData()}
+                          width={kgContainerRef.current?.clientWidth || 800}
+                          height={kgContainerRef.current?.clientHeight || 600}
+                          nodeLabel={(node: any) => `${node.type.toUpperCase()}: ${node.label}`}
+                          nodeColor={(node: any) => node.color}
+                          nodeVal={(node: any) => node.size}
+                          linkColor={() => '#ccc'}
+                          linkWidth={(link: any) => link.dashed ? 2 : 1}
+                          linkLineDash={(link: any) => link.dashed ? [5, 5] : undefined}
+                          onNodeClick={(node: any) => setSelectedNode(node)}
+                          nodeCanvasObject={(node: any, ctx: CanvasRenderingContext2D, globalScale: number) => {
+                            const label = node.label;
+                            const fontSize = node.type === 'meeting' ? 14 / globalScale : 11 / globalScale;
+                            ctx.font = `${node.type === 'meeting' ? 'bold ' : ''}${fontSize}px Sans-Serif`;
+                            
+                            // Draw node circle
+                            const r = node.type === 'meeting' ? 8 : node.type === 'topic' ? 6 : 4;
+                            ctx.beginPath();
+                            ctx.arc(node.x, node.y, r, 0, 2 * Math.PI, false);
+                            ctx.fillStyle = node.color;
+                            ctx.fill();
+                            
+                            // Draw border for meeting nodes
+                            if (node.type === 'meeting') {
+                              ctx.strokeStyle = '#000';
+                              ctx.lineWidth = 2 / globalScale;
+                              ctx.stroke();
+                            }
+                            
+                            // Draw label
+                            ctx.textAlign = 'center';
+                            ctx.textBaseline = 'top';
+                            ctx.fillStyle = '#333';
+                            const maxLen = node.type === 'meeting' ? 20 : 15;
+                            const displayLabel = label.length > maxLen ? label.substring(0, maxLen) + '...' : label;
+                            ctx.fillText(displayLabel, node.x, node.y + r + 2);
+                          }}
+                          cooldownTicks={100}
+                          d3AlphaDecay={0.02}
+                          d3VelocityDecay={0.3}
+                        />
+                      </div>
+
+                      {/* Legend */}
+                      <div className="absolute top-4 left-4 bg-white/90 backdrop-blur-sm border border-[#141414]/10 rounded-xl p-4 shadow-sm">
+                        <h4 className="text-[10px] font-mono uppercase tracking-widest opacity-50 mb-3">Legend</h4>
+                        <div className="space-y-2">
+                          {[
+                            { color: '#141414', label: 'Meeting', shape: 'large' },
+                            { color: '#8b5cf6', label: 'New Topic', shape: 'medium' },
+                            { color: '#3b82f6', label: 'Ongoing', shape: 'medium' },
+                            { color: '#22c55e', label: 'Resolved', shape: 'medium' },
+                            { color: '#f59e0b', label: 'Decision / Revisited', shape: 'small' },
+                            { color: '#ef4444', label: 'Off-track', shape: 'medium' },
+                            { color: '#06b6d4', label: 'Person', shape: 'small' },
+                            { color: '#ec4899', label: 'Action Item', shape: 'small' }
+                          ].map(item => (
+                            <div key={item.label} className="flex items-center gap-2">
+                              <span className={`rounded-full ${item.shape === 'large' ? 'w-3.5 h-3.5' : item.shape === 'medium' ? 'w-2.5 h-2.5' : 'w-2 h-2'}`} style={{ backgroundColor: item.color }} />
+                              <span className="text-[10px] text-gray-600">{item.label}</span>
+                            </div>
+                          ))}
+                        </div>
+                      </div>
+
+                      {/* Node Detail Panel */}
+                      {selectedNode && (
+                        <motion.div 
+                          initial={{ x: 300, opacity: 0 }}
+                          animate={{ x: 0, opacity: 1 }}
+                          className="w-80 bg-white border-l border-[#141414]/10 overflow-y-auto p-6"
+                        >
+                          <div className="flex items-center justify-between mb-4">
+                            <span className={`px-2 py-1 rounded text-[10px] font-mono uppercase font-bold text-white`} style={{ backgroundColor: selectedNode.color }}>
+                              {selectedNode.type}
+                            </span>
+                            <button onClick={() => setSelectedNode(null)} className="p-1 hover:bg-gray-100 rounded">
+                              <X className="w-4 h-4" />
+                            </button>
+                          </div>
+                          
+                          <h3 className="font-bold text-base mb-4">{selectedNode.label}</h3>
+                          
+                          {selectedNode.type === 'meeting' && selectedNode.data && (
+                            <div className="space-y-4">
+                              <div>
+                                <h4 className="text-[10px] font-mono uppercase opacity-50 mb-2">Topics Discussed</h4>
+                                <div className="space-y-2">
+                                  {(selectedNode.data.topics || []).map((t: any, i: number) => (
+                                    <div key={i} className="p-2 bg-gray-50 rounded-lg">
+                                      <div className="flex items-center justify-between">
+                                        <span className="text-xs font-semibold">{t.name}</span>
+                                        <span className={`text-[9px] px-1.5 py-0.5 rounded font-mono ${
+                                          t.status === 'resolved' ? 'bg-green-100 text-green-700' :
+                                          t.status === 'off-track' ? 'bg-red-100 text-red-700' :
+                                          t.status === 'revisited' ? 'bg-yellow-100 text-yellow-700' :
+                                          t.status === 'ongoing' ? 'bg-blue-100 text-blue-700' : 'bg-purple-100 text-purple-700'
+                                        }`}>{t.status}</span>
+                                      </div>
+                                      <p className="text-[11px] text-gray-500 mt-1">{t.summary}</p>
+                                    </div>
+                                  ))}
+                                </div>
+                              </div>
+                              
+                              {(selectedNode.data.decisions || []).length > 0 && (
+                                <div>
+                                  <h4 className="text-[10px] font-mono uppercase opacity-50 mb-2">Decisions</h4>
+                                  <ul className="space-y-1">
+                                    {selectedNode.data.decisions.map((d: any, i: number) => (
+                                      <li key={i} className="text-xs text-gray-700 flex items-start gap-2">
+                                        <span className="w-1.5 h-1.5 rounded-full bg-yellow-500 mt-1.5 shrink-0" />
+                                        {d.decision}
+                                      </li>
+                                    ))}
+                                  </ul>
+                                </div>
+                              )}
+
+                              {(selectedNode.data.people || []).length > 0 && (
+                                <div>
+                                  <h4 className="text-[10px] font-mono uppercase opacity-50 mb-2">People</h4>
+                                  <div className="flex flex-wrap gap-1">
+                                    {selectedNode.data.people.map((p: string, i: number) => (
+                                      <span key={i} className="px-2 py-1 bg-cyan-50 text-cyan-700 text-[10px] rounded-full font-medium">{p}</span>
+                                    ))}
+                                  </div>
+                                </div>
+                              )}
+
+                              {(selectedNode.data.actionItems || []).length > 0 && (
+                                <div>
+                                  <h4 className="text-[10px] font-mono uppercase opacity-50 mb-2">Action Items</h4>
+                                  <ul className="space-y-2">
+                                    {selectedNode.data.actionItems.map((a: any, i: number) => (
+                                      <li key={i} className="text-xs p-2 bg-pink-50 rounded-lg">
+                                        <span className="font-medium text-pink-800">{a.task}</span>
+                                        <span className="block text-pink-500 text-[10px] mt-0.5">Owner: {a.owner}</span>
+                                      </li>
+                                    ))}
+                                  </ul>
+                                </div>
+                              )}
+                            </div>
+                          )}
+
+                          {selectedNode.type === 'topic' && selectedNode.data && (
+                            <div className="space-y-3">
+                              <div className={`px-2 py-1 rounded text-xs font-medium inline-block ${
+                                selectedNode.data.status === 'resolved' ? 'bg-green-100 text-green-700' :
+                                selectedNode.data.status === 'off-track' ? 'bg-red-100 text-red-700' :
+                                selectedNode.data.status === 'revisited' ? 'bg-yellow-100 text-yellow-700' :
+                                selectedNode.data.status === 'ongoing' ? 'bg-blue-100 text-blue-700' : 'bg-purple-100 text-purple-700'
+                              }`}>Status: {selectedNode.data.status}</div>
+                              <p className="text-sm text-gray-600">{selectedNode.data.summary}</p>
+                            </div>
+                          )}
+
+                          {selectedNode.type === 'decision' && selectedNode.data && (
+                            <div className="space-y-3">
+                              <p className="text-sm text-gray-600">{selectedNode.data.decision}</p>
+                              <p className="text-xs text-gray-400">Related to: {selectedNode.data.relatedTopic}</p>
+                            </div>
+                          )}
+
+                          {selectedNode.type === 'person' && selectedNode.data && (
+                            <div className="space-y-3">
+                              <p className="text-sm text-gray-600">Mentioned or present in connected meetings.</p>
+                            </div>
+                          )}
+
+                          {selectedNode.type === 'action' && selectedNode.data && (
+                            <div className="space-y-3">
+                              <p className="text-sm text-gray-600">{selectedNode.data.task}</p>
+                              <p className="text-xs text-gray-400">Owner: {selectedNode.data.owner}</p>
+                              <p className="text-xs text-gray-400">Related to: {selectedNode.data.relatedTopic}</p>
+                            </div>
+                          )}
+                        </motion.div>
+                      )}
+                    </>
+                  )}
                 </div>
               </motion.div>
             )}
