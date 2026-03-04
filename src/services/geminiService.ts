@@ -252,6 +252,122 @@ export async function generateEmailContent(text: string): Promise<any> {
   }
 }
 
+export async function extractKnowledgeGraph(meetingId: string, meetingTitle: string, text: string): Promise<any> {
+  // Use OpenRouter free model for knowledge graph extraction
+  const openRouterApiKey = import.meta.env.VITE_OPENROUTER_API_KEY;
+  
+  const systemPrompt = `You are a JSON-only API. You MUST respond with ONLY valid JSON, no text before or after. Never include explanations, greetings, or markdown. Output raw JSON only.`;
+  
+  const userPrompt = `Extract knowledge graph data from this meeting transcription. Return ONLY this JSON structure:
+{"topics":[{"name":"lowercase topic","summary":"brief summary","status":"new"}],"decisions":[{"decision":"text","relatedTopic":"topic"}],"people":["name"],"actionItems":[{"task":"text","owner":"name","relatedTopic":"topic"}],"references":["text"]}
+
+Meeting: ${meetingTitle}
+Transcription: ${text.substring(0, 8000)}`;
+
+  try {
+    const response = await fetch('https://openrouter.ai/api/v1/chat/completions', {
+      method: 'POST',
+      headers: {
+        'Authorization': `Bearer ${openRouterApiKey}`,
+        'Content-Type': 'application/json',
+        'HTTP-Referer': window.location.origin,
+        'X-Title': 'Wisprnote AI'
+      },
+      body: JSON.stringify({
+        model: 'openrouter/free',
+        messages: [
+          { role: 'system', content: systemPrompt },
+          { role: 'user', content: userPrompt }
+        ],
+        temperature: 0.1
+      })
+    });
+
+    if (!response.ok) {
+      const errorText = await response.text();
+      console.error('OpenRouter API error:', errorText);
+      throw new Error(`OpenRouter API error: ${response.status}`);
+    }
+
+    const data = await response.json();
+    const content = data.choices?.[0]?.message?.content || '{}';
+    
+    // Extract and repair JSON from response
+    let cleanContent = content.trim();
+    
+    // Remove markdown code blocks
+    if (cleanContent.startsWith('```json')) {
+      cleanContent = cleanContent.slice(7);
+    } else if (cleanContent.startsWith('```')) {
+      cleanContent = cleanContent.slice(3);
+    }
+    if (cleanContent.endsWith('```')) {
+      cleanContent = cleanContent.slice(0, -3);
+    }
+    cleanContent = cleanContent.trim();
+    
+    // Try to find JSON object in the response if it starts with text
+    const jsonMatch = cleanContent.match(/\{[\s\S]*\}/);
+    if (jsonMatch) {
+      cleanContent = jsonMatch[0];
+    }
+
+    // Attempt to repair common JSON issues
+    const repairJson = (str: string): string => {
+      let repaired = str;
+      // Fix trailing commas before ] or }
+      repaired = repaired.replace(/,\s*([}\]])/g, '$1');
+      // Fix missing commas between array elements
+      repaired = repaired.replace(/"\s*\n\s*"/g, '",\n"');
+      repaired = repaired.replace(/}\s*\n\s*{/g, '},\n{');
+      // Fix unescaped newlines in strings (replace with space)
+      repaired = repaired.replace(/([^\\])\\n/g, '$1 ');
+      return repaired;
+    };
+
+    // Try parsing, with repair fallback
+    let parsed;
+    try {
+      parsed = JSON.parse(cleanContent);
+    } catch {
+      try {
+        parsed = JSON.parse(repairJson(cleanContent));
+      } catch {
+        // Last resort: extract what we can manually
+        console.warn("JSON repair failed, extracting partial data");
+        parsed = {
+          topics: [],
+          decisions: [],
+          people: [],
+          actionItems: [],
+          references: []
+        };
+        
+        // Try to extract topics array
+        const topicsMatch = cleanContent.match(/"topics"\s*:\s*\[([\s\S]*?)\]/);
+        if (topicsMatch) {
+          try {
+            parsed.topics = JSON.parse(`[${topicsMatch[1]}]`.replace(/,\s*]/g, ']'));
+          } catch { /* ignore */ }
+        }
+        
+        // Try to extract people array
+        const peopleMatch = cleanContent.match(/"people"\s*:\s*\[([\s\S]*?)\]/);
+        if (peopleMatch) {
+          try {
+            parsed.people = JSON.parse(`[${peopleMatch[1]}]`.replace(/,\s*]/g, ']'));
+          } catch { /* ignore */ }
+        }
+      }
+    }
+    
+    return { meetingId, meetingTitle, ...parsed };
+  } catch (e) {
+    console.error("Failed to extract KG via OpenRouter:", e);
+    return { meetingId, meetingTitle, topics: [], decisions: [], people: [], actionItems: [], references: [] };
+  }
+}
+
 export async function generateWikiContent(text: string, style: 'MECE' | 'PRD'): Promise<any> {
   const prompt = style === 'MECE' 
     ? `Generate a detailed end-to-end report using the MECE (Mutually Exclusive, Collectively Exhaustive) framework. Ensure all points are logically grouped and exhaustive.`
