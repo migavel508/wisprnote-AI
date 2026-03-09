@@ -258,8 +258,19 @@ export async function extractKnowledgeGraph(meetingId: string, meetingTitle: str
   
   const combinedPrompt = `You are a JSON-only API. You MUST respond with ONLY valid JSON, no text before or after. Never include explanations, greetings, or markdown. Output raw JSON only.
 
-Extract knowledge graph data from this meeting transcription. Return ONLY this JSON structure:
-{"topics":[{"name":"lowercase topic","summary":"brief summary","status":"new"}],"decisions":[{"decision":"text","relatedTopic":"topic"}],"people":["name"],"actionItems":[{"task":"text","owner":"name","relatedTopic":"topic"}],"references":["text"]}
+Extract knowledge graph data from this meeting transcription. For each topic discussed, carefully analyze the conversation to determine its status:
+
+TOPIC STATUS RULES (you MUST use one of these exact values):
+- "new" = Topic mentioned for the first time, just introduced, no prior discussion implied
+- "ongoing" = Topic is actively being worked on, in progress, not yet finished. Look for phrases like "still working on", "in progress", "continuing", "we're looking into", "not done yet"
+- "resolved" = Topic has been completed, finished, or a final decision was reached. Look for phrases like "done", "completed", "finished", "signed off", "approved", "wrapped up", "closed"
+- "off-track" = Topic has problems, is delayed, blocked, or going wrong. Look for phrases like "delayed", "blocked", "issue with", "problem", "behind schedule", "stuck", "failing", "not working", "concerned about"
+- "revisited" = Topic was discussed before and is being brought up again. Look for phrases like "coming back to", "revisiting", "as we discussed before", "following up on", "update on"
+
+Return ONLY this JSON structure:
+{"topics":[{"name":"short topic name","summary":"1-2 sentence summary of what was said about this topic","status":"new|ongoing|resolved|off-track|revisited"}],"decisions":[{"decision":"what was decided","relatedTopic":"related topic name"}],"people":["Person Name"],"actionItems":[{"task":"what needs to be done","owner":"who is responsible","relatedTopic":"related topic name"}],"references":["any documents, tools, or resources mentioned"]}
+
+IMPORTANT: Do NOT default all statuses to "new". Carefully read the tone and context of the discussion for each topic. Most real meetings have a mix of statuses.
 
 Meeting: ${meetingTitle}
 Transcription: ${text.substring(0, 8000)}`;
