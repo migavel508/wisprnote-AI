@@ -491,7 +491,11 @@ export default function App() {
   };
 
   // Find or create canonical topic ID using similarity matching
-  const findCanonicalTopicId = (topicName: string, existingTopics: Map<string, string>): string => {
+  const findCanonicalTopicId = (topicName: string | undefined | null, existingTopics: Map<string, string>): string => {
+    if (!topicName || typeof topicName !== 'string') {
+      return `topic_unknown_${Math.random().toString(36).substring(7)}`;
+    }
+    
     const normalized = topicName.toLowerCase().replace(/\s+/g, '_');
     const directId = `topic_${normalized}`;
     
@@ -510,6 +514,92 @@ export default function App() {
     // No match found, create new
     existingTopics.set(directId, topicName);
     return directId;
+  };
+
+  // Find related meetings for a given meeting ID based on shared topics, people, decisions
+  const findRelatedMeetings = (meetingId: string) => {
+    const currentMeeting = kgData.find(m => m.meetingId === meetingId);
+    if (!currentMeeting) return [];
+
+    const relatedMeetings: Array<{
+      meetingId: string;
+      meetingTitle: string;
+      sharedTopics: Array<{ name: string; currentStatus: string; otherStatus: string; currentSummary: string; otherSummary: string }>;
+      sharedPeople: string[];
+      sharedDecisionThemes: string[];
+      relevanceScore: number;
+    }> = [];
+
+    const currentTopics = new Set((currentMeeting.topics || [])
+      .filter((t: any) => t && t.name)
+      .map((t: any) => t.name.toLowerCase()));
+    const currentPeople = new Set((currentMeeting.people || [])
+      .filter((p: string) => p)
+      .map((p: string) => p.toLowerCase()));
+
+    kgData.forEach(otherMeeting => {
+      if (otherMeeting.meetingId === meetingId) return;
+
+      const sharedTopics: Array<{ name: string; currentStatus: string; otherStatus: string; currentSummary: string; otherSummary: string }> = [];
+      const sharedPeople: string[] = [];
+      const sharedDecisionThemes: string[] = [];
+
+      // Find shared topics with fuzzy matching
+      (otherMeeting.topics || []).forEach((otherTopic: any) => {
+        if (!otherTopic || !otherTopic.name) return;
+        const otherName = otherTopic.name.toLowerCase();
+        // Check for exact or similar match
+        let matchedCurrentTopic: any = null;
+        (currentMeeting.topics || []).forEach((currentTopic: any) => {
+          if (!currentTopic || !currentTopic.name) return;
+          const similarity = calculateSimilarity(currentTopic.name, otherTopic.name);
+          if (similarity >= 0.4 || currentTopic.name.toLowerCase() === otherName) {
+            matchedCurrentTopic = currentTopic;
+          }
+        });
+        if (matchedCurrentTopic) {
+          sharedTopics.push({
+            name: otherTopic.name,
+            currentStatus: matchedCurrentTopic.status,
+            otherStatus: otherTopic.status,
+            currentSummary: matchedCurrentTopic.summary,
+            otherSummary: otherTopic.summary
+          });
+        }
+      });
+
+      // Find shared people
+      (otherMeeting.people || []).forEach((person: string) => {
+        if (person && currentPeople.has(person.toLowerCase())) {
+          sharedPeople.push(person);
+        }
+      });
+
+      // Find shared decision themes (fuzzy)
+      (otherMeeting.decisions || []).forEach((otherDec: any) => {
+        (currentMeeting.decisions || []).forEach((currentDec: any) => {
+          if (calculateSimilarity(currentDec.decision, otherDec.decision) >= 0.3) {
+            sharedDecisionThemes.push(otherDec.relatedTopic || 'General');
+          }
+        });
+      });
+
+      const relevanceScore = sharedTopics.length * 3 + sharedPeople.length * 2 + sharedDecisionThemes.length;
+      
+      if (relevanceScore > 0) {
+        relatedMeetings.push({
+          meetingId: otherMeeting.meetingId,
+          meetingTitle: otherMeeting.meetingTitle,
+          sharedTopics,
+          sharedPeople: [...new Set(sharedPeople)],
+          sharedDecisionThemes: [...new Set(sharedDecisionThemes)],
+          relevanceScore
+        });
+      }
+    });
+
+    // Sort by relevance score descending
+    return relatedMeetings.sort((a, b) => b.relevanceScore - a.relevanceScore);
   };
 
   // Build graph nodes and links from kgData with smart similarity matching
@@ -596,6 +686,7 @@ export default function App() {
 
       // People nodes - shared across meetings
       (meeting.people || []).forEach((person: string) => {
+        if (!person) return;
         const personId = `person_${person.toLowerCase().replace(/\s+/g, '_')}`;
         if (!nodes.find(n => n.id === personId)) {
           nodes.push({
@@ -642,7 +733,7 @@ export default function App() {
         
         // Link action to person if owner matches
         const ownerId = `person_${(item.owner || '').toLowerCase().replace(/\s+/g, '_')}`;
-        if (nodes.find(n => n.id === ownerId)) {
+        if (item.owner && nodes.find(n => n.id === ownerId)) {
           links.push({ source: ownerId, target: itemId, type: 'person-action' });
         }
       });
@@ -2442,6 +2533,21 @@ export default function App() {
                     <>
                       {/* Graph Canvas */}
                       <div ref={kgContainerRef} className="flex-1 bg-[#FAFAFA] relative h-full min-w-0">
+                        {/* Graph Controls */}
+                        <div className="absolute bottom-6 right-6 z-10 flex gap-2">
+                          <button 
+                            onClick={() => {
+                              if (graphRef.current) {
+                                graphRef.current.zoomToFit(400, 50);
+                              }
+                            }}
+                            className="bg-white/90 backdrop-blur-sm border border-[#141414]/10 p-2 rounded-lg shadow-sm hover:bg-white text-gray-700 transition-colors flex items-center gap-2 group"
+                            title="Reset View"
+                          >
+                            <Layout className="w-4 h-4" />
+                            <span className="text-[10px] font-mono uppercase font-semibold hidden group-hover:block transition-all">Fit View</span>
+                          </button>
+                        </div>
                         <ForceGraph2D
                           ref={graphRef}
                           graphData={buildGraphData()}
@@ -2453,6 +2559,8 @@ export default function App() {
                           linkColor={() => '#ccc'}
                           linkWidth={(link: any) => link.dashed ? 2 : 1}
                           linkLineDash={(link: any) => link.dashed ? [5, 5] : undefined}
+                          minZoom={0.5}
+                          maxZoom={8}
                           onNodeClick={(node: any) => {
                             setSelectedNode(node);
                             if (graphRef.current) {
@@ -2461,8 +2569,15 @@ export default function App() {
                               graphRef.current.zoom(2, 1000);
                             }
                           }}
+                          // Optional: Add drag limits so users can't throw nodes out of bounds
+                          onNodeDragEnd={(node: any) => {
+                            // Keep nodes within reasonable bounds
+                            const bounds = 2000;
+                            node.fx = Math.max(-bounds, Math.min(bounds, node.x));
+                            node.fy = Math.max(-bounds, Math.min(bounds, node.y));
+                          }}
                           nodeCanvasObject={(node: any, ctx: CanvasRenderingContext2D, globalScale: number) => {
-                            const label = node.label;
+                            const label = node.label || '';
                             const fontSize = node.type === 'meeting' ? 14 / globalScale : 11 / globalScale;
                             ctx.font = `${node.type === 'meeting' ? 'bold ' : ''}${fontSize}px Sans-Serif`;
                             
@@ -2470,7 +2585,7 @@ export default function App() {
                             const r = node.type === 'meeting' ? 8 : node.type === 'topic' ? 6 : 4;
                             ctx.beginPath();
                             ctx.arc(node.x, node.y, r, 0, 2 * Math.PI, false);
-                            ctx.fillStyle = node.color;
+                            ctx.fillStyle = node.color || '#888';
                             ctx.fill();
                             
                             // Draw border for meeting nodes
@@ -2520,117 +2635,557 @@ export default function App() {
                       <AnimatePresence>
                         {selectedNode && (
                           <motion.div 
-                            initial={{ x: 320, opacity: 0 }}
+                            initial={{ x: 350, opacity: 0 }}
                             animate={{ x: 0, opacity: 1 }}
-                            exit={{ x: 320, opacity: 0 }}
-                            className="w-80 flex-shrink-0 bg-white border-l border-[#141414]/10 overflow-y-auto h-full p-6 shadow-[-10px_0_15px_-3px_rgba(0,0,0,0.05)] z-20"
+                            exit={{ x: 350, opacity: 0 }}
+                            transition={{ type: "spring", damping: 25, stiffness: 200 }}
+                            className="w-[350px] flex-shrink-0 bg-white/95 backdrop-blur-md border-l border-[#141414]/10 overflow-y-auto h-full p-6 shadow-[-15px_0_30px_-5px_rgba(0,0,0,0.1)] z-20 flex flex-col"
                           >
-                          <div className="flex items-center justify-between mb-4">
-                            <span className={`px-2 py-1 rounded text-[10px] font-mono uppercase font-bold text-white`} style={{ backgroundColor: selectedNode.color }}>
-                              {selectedNode.type}
-                            </span>
-                            <button onClick={() => setSelectedNode(null)} className="p-1 hover:bg-gray-100 rounded">
+                          <div className="flex items-center justify-between mb-6 pb-4 border-b border-[#141414]/10">
+                            <div className="flex items-center gap-3">
+                              <span className={`w-3 h-3 rounded-full`} style={{ backgroundColor: selectedNode.color }} />
+                              <span className="text-[10px] font-mono uppercase font-bold text-gray-500 tracking-wider">
+                                {selectedNode.type} Node
+                              </span>
+                            </div>
+                            <button 
+                              onClick={() => setSelectedNode(null)} 
+                              className="p-1.5 hover:bg-gray-100 rounded-lg text-gray-400 hover:text-gray-800 transition-colors"
+                            >
                               <X className="w-4 h-4" />
                             </button>
                           </div>
                           
-                          <h3 className="font-bold text-base mb-4">{selectedNode.label}</h3>
-                          
-                          {selectedNode.type === 'meeting' && selectedNode.data && (
-                            <div className="space-y-4">
-                              <div>
-                                <h4 className="text-[10px] font-mono uppercase opacity-50 mb-2">Topics Discussed</h4>
-                                <div className="space-y-2">
-                                  {(selectedNode.data.topics || []).map((t: any, i: number) => (
-                                    <div key={i} className="p-2 bg-gray-50 rounded-lg">
-                                      <div className="flex items-center justify-between">
-                                        <span className="text-xs font-semibold">{t.name}</span>
-                                        <span className={`text-[9px] px-1.5 py-0.5 rounded font-mono ${
-                                          t.status === 'resolved' ? 'bg-green-100 text-green-700' :
-                                          t.status === 'off-track' ? 'bg-red-100 text-red-700' :
-                                          t.status === 'revisited' ? 'bg-yellow-100 text-yellow-700' :
-                                          t.status === 'ongoing' ? 'bg-blue-100 text-blue-700' : 'bg-purple-100 text-purple-700'
-                                        }`}>{t.status}</span>
+                          <div className="flex-1 overflow-y-auto pr-2 custom-scrollbar">
+                            <h3 className="font-bold text-lg mb-6 leading-tight text-gray-900">{selectedNode.label}</h3>
+                            
+                            {selectedNode.type === 'meeting' && selectedNode.data && (
+                              <div className="space-y-6">
+                                {/* This Meeting's Topics */}
+                                <div>
+                                  <h4 className="text-[10px] font-mono uppercase tracking-widest text-gray-400 mb-3 flex items-center gap-2">
+                                    <MessageSquare className="w-3 h-3" />
+                                    Topics Discussed
+                                  </h4>
+                                  <div className="space-y-2">
+                                    {(selectedNode.data.topics || []).map((t: any, i: number) => (
+                                      <div key={i} className="p-3 bg-gray-50/80 rounded-xl border border-gray-100 hover:border-gray-200 transition-colors">
+                                        <div className="flex items-start justify-between gap-3 mb-2">
+                                          <span className="text-sm font-semibold text-gray-800 leading-tight">{t.name}</span>
+                                          <span className={`text-[9px] px-2 py-1 rounded-md font-mono shrink-0 ${
+                                            t.status === 'resolved' ? 'bg-green-100 text-green-700' :
+                                            t.status === 'off-track' ? 'bg-red-100 text-red-700' :
+                                            t.status === 'revisited' ? 'bg-yellow-100 text-yellow-700' :
+                                            t.status === 'ongoing' ? 'bg-blue-100 text-blue-700' : 'bg-purple-100 text-purple-700'
+                                          }`}>{t.status}</span>
+                                        </div>
+                                        <p className="text-xs text-gray-500 leading-relaxed">{t.summary}</p>
                                       </div>
-                                      <p className="text-[11px] text-gray-500 mt-1">{t.summary}</p>
-                                    </div>
-                                  ))}
+                                    ))}
+                                  </div>
                                 </div>
+                                
+                                {(selectedNode.data.decisions || []).length > 0 && (
+                                  <div>
+                                    <h4 className="text-[10px] font-mono uppercase tracking-widest text-gray-400 mb-3 flex items-center gap-2">
+                                      <CheckCircle2 className="w-3 h-3" />
+                                      Decisions Made
+                                    </h4>
+                                    <ul className="space-y-2">
+                                      {selectedNode.data.decisions.map((d: any, i: number) => (
+                                        <li key={i} className="text-sm text-gray-700 flex items-start gap-3 bg-yellow-50/50 p-3 rounded-xl border border-yellow-100/50">
+                                          <span className="w-1.5 h-1.5 rounded-full bg-yellow-500 mt-1.5 shrink-0 shadow-sm" />
+                                          <span className="leading-snug">{d.decision}</span>
+                                        </li>
+                                      ))}
+                                    </ul>
+                                  </div>
+                                )}
+
+                                {(selectedNode.data.people || []).length > 0 && (
+                                  <div>
+                                    <h4 className="text-[10px] font-mono uppercase tracking-widest text-gray-400 mb-3 flex items-center gap-2">
+                                      <Users className="w-3 h-3" />
+                                      People Involved
+                                    </h4>
+                                    <div className="flex flex-wrap gap-1.5">
+                                      {selectedNode.data.people.map((p: string, i: number) => (
+                                        <span key={i} className="px-3 py-1.5 bg-cyan-50/80 border border-cyan-100 text-cyan-800 text-[11px] rounded-lg font-medium shadow-sm">{p}</span>
+                                      ))}
+                                    </div>
+                                  </div>
+                                )}
+
+                                {(selectedNode.data.actionItems || []).length > 0 && (
+                                  <div>
+                                    <h4 className="text-[10px] font-mono uppercase tracking-widest text-gray-400 mb-3 flex items-center gap-2">
+                                      <CheckCircle2 className="w-3 h-3" />
+                                      Action Items
+                                    </h4>
+                                    <ul className="space-y-2">
+                                      {selectedNode.data.actionItems.map((a: any, i: number) => (
+                                        <li key={i} className="p-3 bg-pink-50/50 border border-pink-100/50 rounded-xl">
+                                          <span className="text-sm font-medium text-pink-900 block mb-1.5">{a.task}</span>
+                                          <div className="flex items-center gap-1.5">
+                                            <span className="w-4 h-4 rounded-full bg-pink-200 flex items-center justify-center text-[8px] font-bold text-pink-700">{a.owner?.[0]?.toUpperCase()}</span>
+                                            <span className="text-[10px] text-pink-600 font-medium">{a.owner}</span>
+                                          </div>
+                                        </li>
+                                      ))}
+                                    </ul>
+                                  </div>
+                                )}
+
+                                {/* Related Meetings Section - Cross-Meeting Connections */}
+                                {(() => {
+                                  const relatedMeetings = findRelatedMeetings(selectedNode.data.meetingId);
+                                  if (relatedMeetings.length === 0) return null;
+                                  
+                                  // Create a component for the expandable card to manage its own state
+                                  const ExpandableMeetingCard = ({ related, idx }: { related: any, idx: number }) => {
+                                    const [isExpanded, setIsExpanded] = useState(false);
+                                    const relatedMeetingData = kgData.find(m => m.meetingId === related.meetingId);
+                                    if (!relatedMeetingData) return null;
+                                    
+                                    return (
+                                      <div key={idx} className="bg-gradient-to-br from-purple-50/80 to-blue-50/80 rounded-xl border border-purple-100/50 overflow-hidden transition-all duration-300 hover:shadow-md">
+                                        {/* Collapsed Header (Always visible) */}
+                                        <div 
+                                          className="p-3.5 flex items-center justify-between cursor-pointer hover:bg-white/40 transition-colors group"
+                                          onClick={() => setIsExpanded(!isExpanded)}
+                                        >
+                                          <div className="flex-1 min-w-0 pr-3">
+                                            <div className="flex items-center gap-2 mb-1.5">
+                                              <span className="text-sm font-bold text-gray-800 truncate group-hover:text-purple-700 transition-colors">
+                                                {related.meetingTitle?.replace(/\.[^.]+$/, '') || 'Meeting'}
+                                              </span>
+                                              <span className="text-[9px] px-2 py-0.5 bg-purple-200/50 text-purple-800 rounded-md font-mono shrink-0 font-medium">
+                                                {related.relevanceScore} pts
+                                              </span>
+                                            </div>
+                                            <div className="text-[10px] text-gray-500 truncate flex items-center gap-1.5">
+                                              {related.sharedTopics.length > 0 && (
+                                                <span className="flex items-center gap-1 bg-white/60 px-1.5 py-0.5 rounded text-gray-600">
+                                                  <MessageSquare className="w-3 h-3 text-purple-400" /> {related.sharedTopics.length}
+                                                </span>
+                                              )}
+                                              {related.sharedPeople.length > 0 && (
+                                                <span className="flex items-center gap-1 bg-white/60 px-1.5 py-0.5 rounded text-gray-600">
+                                                  <Users className="w-3 h-3 text-cyan-400" /> {related.sharedPeople.length}
+                                                </span>
+                                              )}
+                                            </div>
+                                          </div>
+                                          <div className={`shrink-0 p-1.5 bg-white/80 rounded-lg text-purple-600 shadow-sm transition-transform duration-300 ${isExpanded ? '-rotate-90 bg-purple-100' : 'rotate-90'}`}>
+                                            <ChevronRight className="w-3.5 h-3.5" />
+                                          </div>
+                                        </div>
+
+                                        {/* Expanded Content */}
+                                      {isExpanded && (
+                                        <div className="p-3 pt-0 border-t border-purple-100 bg-white/40">
+                                          <div className="pt-3">
+                                            {/* Why This Meeting is Connected */}
+                                            <div className="mb-3 p-2 bg-white/70 rounded border border-purple-200">
+                                              <span className="text-[9px] font-mono uppercase text-purple-700 block mb-1">🔗 Connection Details:</span>
+                                              <div className="text-[10px] text-gray-700">
+                                                {related.sharedTopics.length > 0 && (
+                                                  <span className="block mb-1">
+                                                    <strong>Topics:</strong> {related.sharedTopics.map((t:any) => t.name).join(', ')}
+                                                  </span>
+                                                )}
+                                                {related.sharedPeople.length > 0 && (
+                                                  <span className="block mb-1">
+                                                    <strong>People:</strong> {related.sharedPeople.join(', ')}
+                                                  </span>
+                                                )}
+                                              </div>
+                                            </div>
+                                            
+                                            {/* What Was Discussed in That Meeting - All Topics */}
+                                            {(relatedMeetingData.topics || []).length > 0 && (
+                                              <div className="mb-3">
+                                                <span className="text-[9px] font-mono uppercase text-indigo-700 block mb-2 flex items-center gap-1">
+                                                  <MessageSquare className="w-3 h-3" />
+                                                  What Was Discussed:
+                                                </span>
+                                                <div className="space-y-1.5">
+                                                  {(relatedMeetingData.topics || []).map((topic: any, tIdx: number) => {
+                                                    const isShared = related.sharedTopics.some((st:any) => 
+                                                      calculateSimilarity(st.name, topic.name) >= 0.4
+                                                    );
+                                                    const sharedTopic = related.sharedTopics.find((st:any) => 
+                                                      calculateSimilarity(st.name, topic.name) >= 0.4
+                                                    );
+                                                    
+                                                    return (
+                                                      <div key={tIdx} className={`p-2 rounded ${isShared ? 'bg-amber-50 border border-amber-200' : 'bg-white/80'}`}>
+                                                        <div className="flex items-start justify-between gap-2 mb-1">
+                                                          <span className="text-[10px] font-semibold text-gray-800 flex items-center gap-1">
+                                                            {isShared && <span className="text-amber-600" title="Shared with current meeting">⭐</span>}
+                                                            {topic.name}
+                                                          </span>
+                                                          <span className={`text-[8px] px-1 py-0.5 rounded font-mono shrink-0 ${
+                                                            topic.status === 'resolved' ? 'bg-green-100 text-green-700' :
+                                                            topic.status === 'off-track' ? 'bg-red-100 text-red-700' :
+                                                            topic.status === 'revisited' ? 'bg-yellow-100 text-yellow-700' :
+                                                            topic.status === 'ongoing' ? 'bg-blue-100 text-blue-700' : 'bg-purple-100 text-purple-700'
+                                                          }`}>{topic.status}</span>
+                                                        </div>
+                                                        <p className="text-[9px] text-gray-600 leading-relaxed line-clamp-2 hover:line-clamp-none transition-all">"{topic.summary}"</p>
+                                                        {isShared && sharedTopic && (
+                                                          <div className="mt-1 pt-1 border-t border-amber-200/50">
+                                                            <p className="text-[8px] text-amber-800">
+                                                              Status: {sharedTopic.otherStatus} → {sharedTopic.currentStatus}
+                                                            </p>
+                                                          </div>
+                                                        )}
+                                                      </div>
+                                                    );
+                                                  })}
+                                                </div>
+                                              </div>
+                                            )}
+                                            
+                                            {/* Decisions and Actions */}
+                                            <div className="grid grid-cols-1 gap-2 mt-3">
+                                              {(relatedMeetingData.decisions || []).length > 0 && (
+                                                <div className="bg-yellow-50/50 rounded p-2 border border-yellow-100">
+                                                  <span className="text-[9px] font-mono uppercase text-yellow-700 block mb-1">Decisions</span>
+                                                  <ul className="space-y-1">
+                                                    {(relatedMeetingData.decisions || []).slice(0, 2).map((dec: any, dIdx: number) => (
+                                                      <li key={dIdx} className="text-[9px] text-yellow-900 truncate">• {dec.decision}</li>
+                                                    ))}
+                                                  </ul>
+                                                </div>
+                                              )}
+                                              
+                                              {(relatedMeetingData.actionItems || []).length > 0 && (
+                                                <div className="bg-pink-50/50 rounded p-2 border border-pink-100">
+                                                  <span className="text-[9px] font-mono uppercase text-pink-700 block mb-1">Actions</span>
+                                                  <ul className="space-y-1">
+                                                    {(relatedMeetingData.actionItems || []).slice(0, 2).map((action: any, aIdx: number) => (
+                                                      <li key={aIdx} className="text-[9px] text-pink-900 truncate">
+                                                        <span className="font-medium">{action.owner}:</span> {action.task}
+                                                      </li>
+                                                    ))}
+                                                  </ul>
+                                                </div>
+                                              )}
+                                            </div>
+                                          </div>
+                                        </div>
+                                      )}
+                                    </div>
+                                  );
+                                };
+
+                                return (
+                                  <div className="border-t border-gray-200 pt-5 mt-5">
+                                    <h4 className="text-[10px] font-mono uppercase tracking-widest text-gray-400 mb-4 flex items-center gap-2">
+                                      <Share2 className="w-3 h-3" />
+                                      Connected Meetings ({relatedMeetings.length})
+                                    </h4>
+                                    <div className="space-y-3">
+                                      {relatedMeetings.slice(0, 5).map((related, idx) => (
+                                        <ExpandableMeetingCard key={idx} related={related} idx={idx} />
+                                      ))}
+                                    </div>
+                                    {relatedMeetings.length > 5 && (
+                                      <button className="w-full mt-3 py-2 text-[10px] font-mono uppercase tracking-wider text-gray-400 hover:text-gray-600 bg-gray-50 hover:bg-gray-100 rounded-lg transition-colors">
+                                        View {relatedMeetings.length - 5} More
+                                      </button>
+                                    )}
+                                  </div>
+                                );
+                              })()}
+                            </div>
+                          )}
+
+                          {selectedNode.type === 'topic' && selectedNode.data && (
+                            <div className="space-y-6">
+                              <div className="bg-white/60 p-4 rounded-xl border border-gray-100 shadow-sm">
+                                <div className={`px-2.5 py-1.5 rounded-lg text-xs font-semibold inline-flex items-center gap-1.5 mb-3 shadow-sm ${
+                                  selectedNode.data.status === 'resolved' ? 'bg-green-100 text-green-700 border border-green-200' :
+                                  selectedNode.data.status === 'off-track' ? 'bg-red-100 text-red-700 border border-red-200' :
+                                  selectedNode.data.status === 'revisited' ? 'bg-yellow-100 text-yellow-700 border border-yellow-200' :
+                                  selectedNode.data.status === 'ongoing' ? 'bg-blue-100 text-blue-700 border border-blue-200' : 'bg-purple-100 text-purple-700 border border-purple-200'
+                                }`}>
+                                  <span className="w-1.5 h-1.5 rounded-full bg-current" />
+                                  Current Status: {selectedNode.data.status}
+                                </div>
+                                <p className="text-sm text-gray-700 leading-relaxed font-medium">{selectedNode.data.summary}</p>
                               </div>
                               
-                              {(selectedNode.data.decisions || []).length > 0 && (
-                                <div>
-                                  <h4 className="text-[10px] font-mono uppercase opacity-50 mb-2">Decisions</h4>
-                                  <ul className="space-y-1">
-                                    {selectedNode.data.decisions.map((d: any, i: number) => (
-                                      <li key={i} className="text-xs text-gray-700 flex items-start gap-2">
-                                        <span className="w-1.5 h-1.5 rounded-full bg-yellow-500 mt-1.5 shrink-0" />
-                                        {d.decision}
-                                      </li>
-                                    ))}
-                                  </ul>
-                                </div>
-                              )}
-
-                              {(selectedNode.data.people || []).length > 0 && (
-                                <div>
-                                  <h4 className="text-[10px] font-mono uppercase opacity-50 mb-2">People</h4>
-                                  <div className="flex flex-wrap gap-1">
-                                    {selectedNode.data.people.map((p: string, i: number) => (
-                                      <span key={i} className="px-2 py-1 bg-cyan-50 text-cyan-700 text-[10px] rounded-full font-medium">{p}</span>
+                              {/* Topic Evolution Timeline */}
+                              {selectedNode.data.allStatuses && selectedNode.data.allStatuses.length > 1 && (
+                                <div className="border-t border-gray-200 pt-5">
+                                  <h4 className="text-[10px] font-mono uppercase tracking-widest text-gray-400 mb-4 flex items-center gap-2">
+                                    <Clock className="w-3 h-3" />
+                                    Topic Evolution Timeline
+                                  </h4>
+                                  <div className="space-y-0 relative before:absolute before:inset-0 before:ml-[11px] before:-translate-x-px md:before:mx-auto md:before:translate-x-0 before:h-full before:w-0.5 before:bg-gradient-to-b before:from-transparent before:via-slate-200 before:to-transparent">
+                                    {selectedNode.data.allStatuses.map((status: string, idx: number) => (
+                                      <div key={idx} className="relative flex items-start gap-4 mb-4 group">
+                                        <div className="flex flex-col items-center relative z-10 pt-1">
+                                          <span className={`w-6 h-6 rounded-full flex items-center justify-center border-2 border-white shadow-sm transition-transform group-hover:scale-110 ${
+                                            status === 'resolved' ? 'bg-green-500' :
+                                            status === 'off-track' ? 'bg-red-500' :
+                                            status === 'revisited' ? 'bg-yellow-500' :
+                                            status === 'ongoing' ? 'bg-blue-500' : 'bg-purple-500'
+                                          }`} />
+                                        </div>
+                                        <div className="flex-1 bg-white/60 p-3 rounded-xl border border-gray-100 shadow-sm group-hover:border-gray-200 transition-colors">
+                                          <span className={`text-[9px] px-2 py-0.5 rounded-md font-mono inline-block mb-1.5 ${
+                                            status === 'resolved' ? 'bg-green-100 text-green-700' :
+                                            status === 'off-track' ? 'bg-red-100 text-red-700' :
+                                            status === 'revisited' ? 'bg-yellow-100 text-yellow-700' :
+                                            status === 'ongoing' ? 'bg-blue-100 text-blue-700' : 'bg-purple-100 text-purple-700'
+                                          }`}>{status}</span>
+                                          <p className="text-xs text-gray-600 italic">
+                                            "{selectedNode.data.allSummaries?.[idx] || 'No summary'}"
+                                          </p>
+                                        </div>
+                                      </div>
                                     ))}
                                   </div>
                                 </div>
                               )}
 
-                              {(selectedNode.data.actionItems || []).length > 0 && (
-                                <div>
-                                  <h4 className="text-[10px] font-mono uppercase opacity-50 mb-2">Action Items</h4>
-                                  <ul className="space-y-2">
-                                    {selectedNode.data.actionItems.map((a: any, i: number) => (
-                                      <li key={i} className="text-xs p-2 bg-pink-50 rounded-lg">
-                                        <span className="font-medium text-pink-800">{a.task}</span>
-                                        <span className="block text-pink-500 text-[10px] mt-0.5">Owner: {a.owner}</span>
-                                      </li>
-                                    ))}
-                                  </ul>
-                                </div>
-                              )}
-                            </div>
-                          )}
-
-                          {selectedNode.type === 'topic' && selectedNode.data && (
-                            <div className="space-y-3">
-                              <div className={`px-2 py-1 rounded text-xs font-medium inline-block ${
-                                selectedNode.data.status === 'resolved' ? 'bg-green-100 text-green-700' :
-                                selectedNode.data.status === 'off-track' ? 'bg-red-100 text-red-700' :
-                                selectedNode.data.status === 'revisited' ? 'bg-yellow-100 text-yellow-700' :
-                                selectedNode.data.status === 'ongoing' ? 'bg-blue-100 text-blue-700' : 'bg-purple-100 text-purple-700'
-                              }`}>Status: {selectedNode.data.status}</div>
-                              <p className="text-sm text-gray-600">{selectedNode.data.summary}</p>
+                              {/* Meetings where this topic was discussed */}
+                              {(() => {
+                                const meetingsWithTopic = kgData.filter(m => 
+                                  (m.topics || []).some((t: any) => 
+                                    t && t.name && (calculateSimilarity(t.name, selectedNode.label) >= 0.4 || 
+                                    t.name.toLowerCase() === (selectedNode.label || '').toLowerCase())
+                                  )
+                                );
+                                if (meetingsWithTopic.length === 0) return null;
+                                return (
+                                  <div className="border-t border-gray-200 pt-5">
+                                    <h4 className="text-[10px] font-mono uppercase tracking-widest text-gray-400 mb-3 flex items-center gap-2">
+                                      <Share2 className="w-3 h-3" />
+                                      Discussed in {meetingsWithTopic.length} Meeting{meetingsWithTopic.length !== 1 ? 's' : ''}
+                                    </h4>
+                                    <div className="space-y-3">
+                                      {meetingsWithTopic.map((meeting, idx) => {
+                                        const topicInMeeting = (meeting.topics || []).find((t: any) => 
+                                          t && t.name && (calculateSimilarity(t.name, selectedNode.label) >= 0.4 || 
+                                          t.name.toLowerCase() === (selectedNode.label || '').toLowerCase())
+                                        );
+                                        return (
+                                          <div key={idx} className="p-3 bg-indigo-50/50 rounded-xl border border-indigo-100 hover:border-indigo-200 transition-colors group">
+                                            <div className="flex items-center justify-between mb-2">
+                                              <span className="text-sm font-semibold text-gray-800 truncate group-hover:text-indigo-700 transition-colors">
+                                                {meeting.meetingTitle?.replace(/\.[^.]+$/, '') || 'Meeting'}
+                                              </span>
+                                              <span className={`text-[9px] px-2 py-0.5 rounded-md font-mono shrink-0 font-medium ${
+                                                topicInMeeting?.status === 'resolved' ? 'bg-green-100 text-green-700' :
+                                                topicInMeeting?.status === 'off-track' ? 'bg-red-100 text-red-700' :
+                                                topicInMeeting?.status === 'revisited' ? 'bg-yellow-100 text-yellow-700' :
+                                                topicInMeeting?.status === 'ongoing' ? 'bg-blue-100 text-blue-700' : 'bg-purple-100 text-purple-700'
+                                              }`}>{topicInMeeting?.status}</span>
+                                            </div>
+                                            <div className="relative">
+                                              <p className="text-xs text-gray-600 leading-relaxed italic line-clamp-2 hover:line-clamp-none transition-all cursor-pointer">"{topicInMeeting?.summary}"</p>
+                                            </div>
+                                          </div>
+                                        );
+                                      })}
+                                    </div>
+                                  </div>
+                                );
+                              })()}
                             </div>
                           )}
 
                           {selectedNode.type === 'decision' && selectedNode.data && (
-                            <div className="space-y-3">
-                              <p className="text-sm text-gray-600">{selectedNode.data.decision}</p>
-                              <p className="text-xs text-gray-400">Related to: {selectedNode.data.relatedTopic}</p>
+                            <div className="space-y-6">
+                              <div className="p-4 bg-yellow-50/80 rounded-xl border border-yellow-200/50 shadow-sm relative overflow-hidden">
+                                <div className="absolute top-0 right-0 p-2 opacity-10">
+                                  <CheckCircle2 className="w-12 h-12" />
+                                </div>
+                                <h4 className="text-[10px] font-mono uppercase tracking-widest text-yellow-700 mb-2 relative z-10">Decision Made</h4>
+                                <p className="text-sm text-yellow-900 font-medium leading-relaxed relative z-10">{selectedNode.data.decision}</p>
+                              </div>
+                              
+                              <div className="flex items-center gap-3 p-3 bg-gray-50/80 rounded-xl border border-gray-100">
+                                <span className="p-2 bg-white rounded-lg shadow-sm">
+                                  <MessageSquare className="w-4 h-4 text-gray-400" />
+                                </span>
+                                <div>
+                                  <span className="text-[10px] font-mono uppercase tracking-widest text-gray-400 block mb-0.5">Related Topic</span>
+                                  <span className="text-xs font-semibold text-gray-700">{selectedNode.data.relatedTopic || 'General Discussion'}</span>
+                                </div>
+                              </div>
+                              
+                              {/* Meeting context */}
+                              {selectedNode.data.meetingTitle && (
+                                <div className="flex items-center gap-3 p-3 bg-gray-50/80 rounded-xl border border-gray-100">
+                                  <span className="p-2 bg-white rounded-lg shadow-sm">
+                                    <Presentation className="w-4 h-4 text-gray-400" />
+                                  </span>
+                                  <div>
+                                    <span className="text-[10px] font-mono uppercase tracking-widest text-gray-400 block mb-0.5">Made in Meeting</span>
+                                    <span className="text-xs font-semibold text-gray-700">
+                                      {selectedNode.data.meetingTitle?.replace(/\.[^.]+$/, '') || 'Meeting'}
+                                    </span>
+                                  </div>
+                                </div>
+                              )}
+                              
+                              {/* Find similar decisions in other meetings */}
+                              {(() => {
+                                const similarDecisions: Array<{ meeting: string; decision: string }> = [];
+                                kgData.forEach(m => {
+                                  if (m.meetingId === selectedNode.data.meetingId) return;
+                                  (m.decisions || []).forEach((d: any) => {
+                                    if (calculateSimilarity(d.decision, selectedNode.data.decision) >= 0.3) {
+                                      similarDecisions.push({ meeting: m.meetingTitle, decision: d.decision });
+                                    }
+                                  });
+                                });
+                                if (similarDecisions.length === 0) return null;
+                                return (
+                                  <div className="border-t border-gray-200 pt-5">
+                                    <h4 className="text-[10px] font-mono uppercase tracking-widest text-gray-400 mb-4 flex items-center gap-2">
+                                      <Share2 className="w-3 h-3" />
+                                      Similar Decisions ({similarDecisions.length})
+                                    </h4>
+                                    <div className="space-y-3">
+                                      {similarDecisions.slice(0, 3).map((sd, idx) => (
+                                        <div key={idx} className="p-3 bg-orange-50/50 rounded-xl border border-orange-100/50">
+                                          <span className="text-[9px] font-mono uppercase text-orange-600 block mb-1.5 font-semibold tracking-wider">
+                                            {sd.meeting?.replace(/\.[^.]+$/, '') || 'Meeting'}
+                                          </span>
+                                          <p className="text-xs text-orange-900 leading-relaxed">"{sd.decision}"</p>
+                                        </div>
+                                      ))}
+                                    </div>
+                                  </div>
+                                );
+                              })()}
                             </div>
                           )}
 
                           {selectedNode.type === 'person' && selectedNode.data && (
-                            <div className="space-y-3">
-                              <p className="text-sm text-gray-600">Mentioned or present in connected meetings.</p>
+                            <div className="space-y-6">
+                              <div className="flex items-center gap-4 mb-2">
+                                <div className="w-16 h-16 rounded-full bg-cyan-100 flex items-center justify-center border-4 border-cyan-50 shadow-sm text-cyan-600">
+                                  <Users className="w-8 h-8" />
+                                </div>
+                                <div>
+                                  <h3 className="font-bold text-xl text-gray-900">{selectedNode.label}</h3>
+                                  <p className="text-xs text-gray-500 font-mono mt-1">Participant Profile</p>
+                                </div>
+                              </div>
+                              
+                              {/* Meetings where this person appears */}
+                              {(() => {
+                                const personName = (selectedNode.label || '').toLowerCase();
+                                const meetingsWithPerson = kgData.filter(m => 
+                                  (m.people || []).some((p: string) => p && p.toLowerCase() === personName)
+                                );
+                                if (meetingsWithPerson.length === 0) return null;
+                                return (
+                                  <div className="space-y-4 pt-2">
+                                    <h4 className="text-[10px] font-mono uppercase tracking-widest text-gray-400 mb-2 flex items-center gap-2">
+                                      <Presentation className="w-3 h-3" />
+                                      Present in {meetingsWithPerson.length} Meeting{meetingsWithPerson.length !== 1 ? 's' : ''}
+                                    </h4>
+                                    {meetingsWithPerson.map((meeting, idx) => {
+                                      // Find action items assigned to this person
+                                      const assignedActions = (meeting.actionItems || []).filter((a: any) => 
+                                        a.owner && a.owner.toLowerCase() === personName
+                                      );
+                                      return (
+                                        <div key={idx} className="p-4 bg-cyan-50/30 rounded-xl border border-cyan-100 hover:border-cyan-200 transition-colors group">
+                                          <span className="text-sm font-semibold text-gray-800 block mb-3 group-hover:text-cyan-700 transition-colors">
+                                            {meeting.meetingTitle?.replace(/\.[^.]+$/, '') || 'Meeting'}
+                                          </span>
+                                          
+                                          {/* Topics discussed in this meeting */}
+                                          {(meeting.topics || []).length > 0 && (
+                                            <div className="mb-3">
+                                              <span className="text-[9px] font-mono uppercase text-cyan-600 block mb-1.5 tracking-wider">Topics Context:</span>
+                                              <div className="flex flex-wrap gap-1.5">
+                                                {(meeting.topics || []).slice(0, 3).map((t: any, tIdx: number) => (
+                                                  <span key={tIdx} className="text-[10px] px-2 py-1 bg-white border border-cyan-100/50 rounded-md text-gray-600 shadow-sm">{t.name}</span>
+                                                ))}
+                                                {(meeting.topics || []).length > 3 && (
+                                                  <span className="text-[10px] px-2 py-1 bg-gray-50 rounded-md text-gray-400">+{(meeting.topics || []).length - 3}</span>
+                                                )}
+                                              </div>
+                                            </div>
+                                          )}
+                                          
+                                          {/* Action items assigned to this person */}
+                                          {assignedActions.length > 0 && (
+                                            <div className="pt-2 border-t border-cyan-100/50">
+                                              <span className="text-[9px] font-mono uppercase text-pink-600 block mb-2 tracking-wider flex items-center gap-1.5">
+                                                <CheckCircle2 className="w-3 h-3" /> Assigned Tasks
+                                              </span>
+                                              <div className="space-y-1.5">
+                                                {assignedActions.map((a: any, aIdx: number) => (
+                                                  <div key={aIdx} className="text-[11px] text-pink-900 bg-pink-50/50 border border-pink-100/50 rounded-lg p-2.5 shadow-sm">
+                                                    {a.task}
+                                                  </div>
+                                                ))}
+                                              </div>
+                                            </div>
+                                          )}
+                                        </div>
+                                      );
+                                    })}
+                                  </div>
+                                );
+                              })()}
                             </div>
                           )}
 
                           {selectedNode.type === 'action' && selectedNode.data && (
-                            <div className="space-y-3">
-                              <p className="text-sm text-gray-600">{selectedNode.data.task}</p>
-                              <p className="text-xs text-gray-400">Owner: {selectedNode.data.owner}</p>
-                              <p className="text-xs text-gray-400">Related to: {selectedNode.data.relatedTopic}</p>
+                            <div className="space-y-4">
+                              <div className="p-4 bg-pink-50/80 rounded-xl border border-pink-200/50 shadow-sm relative overflow-hidden">
+                                <div className="absolute top-0 right-0 p-2 opacity-10">
+                                  <CheckCircle2 className="w-12 h-12 text-pink-500" />
+                                </div>
+                                <h4 className="text-[10px] font-mono uppercase tracking-widest text-pink-700 mb-2 relative z-10">Action Item</h4>
+                                <p className="text-sm text-pink-900 font-medium leading-relaxed relative z-10">{selectedNode.data.task}</p>
+                              </div>
+                              
+                              <div className="grid grid-cols-2 gap-3">
+                                <div className="p-3 bg-gray-50/80 rounded-xl border border-gray-100">
+                                  <span className="text-[9px] font-mono uppercase tracking-widest text-gray-400 block mb-1">Owner</span>
+                                  <div className="flex items-center gap-2">
+                                    <span className="w-5 h-5 rounded-full bg-cyan-100 flex items-center justify-center text-[10px] font-bold text-cyan-700">
+                                      {selectedNode.data.owner?.[0]?.toUpperCase()}
+                                    </span>
+                                    <span className="text-xs font-semibold text-gray-700 truncate">{selectedNode.data.owner}</span>
+                                  </div>
+                                </div>
+                                <div className="p-3 bg-gray-50/80 rounded-xl border border-gray-100">
+                                  <span className="text-[9px] font-mono uppercase tracking-widest text-gray-400 block mb-1">Related To</span>
+                                  <span className="text-xs font-semibold text-gray-700 line-clamp-1">{selectedNode.data.relatedTopic || 'General'}</span>
+                                </div>
+                              </div>
+                              
+                              {/* Meeting context */}
+                              {selectedNode.data.meetingTitle && (
+                                <div className="flex items-center gap-3 p-3 bg-gray-50/80 rounded-xl border border-gray-100">
+                                  <span className="p-2 bg-white rounded-lg shadow-sm">
+                                    <Presentation className="w-4 h-4 text-gray-400" />
+                                  </span>
+                                  <div>
+                                    <span className="text-[10px] font-mono uppercase tracking-widest text-gray-400 block mb-0.5">Assigned in Meeting</span>
+                                    <span className="text-xs font-semibold text-gray-700">
+                                      {selectedNode.data.meetingTitle?.replace(/\.[^.]+$/, '') || 'Meeting'}
+                                    </span>
+                                  </div>
+                                </div>
+                              )}
                             </div>
                           )}
+                          </div>
                         </motion.div>
                         )}
                       </AnimatePresence>
