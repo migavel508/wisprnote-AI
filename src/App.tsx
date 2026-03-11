@@ -37,7 +37,11 @@ import {
   Share2,
   Network,
   Circle,
-  X
+  X,
+  Mic,
+  StopCircle,
+  PauseCircle,
+  PlayCircle
 } from 'lucide-react';
 import { motion, AnimatePresence } from 'motion/react';
 import Markdown from 'react-markdown';
@@ -108,10 +112,19 @@ export default function App() {
   const [session, setSession] = useState<Session | null>(null);
   const [currentView, setCurrentView] = useState<View>('process');
   const [file, setFile] = useState<File | null>(null);
-  const [status, setStatus] = useState<Status>('idle');
+  const [prompt, setPrompt] = useState('Analyze this recording...');
+  const [status, setStatus] = useState<'idle' | 'splitting' | 'processing' | 'completed' | 'error'>('idle');
   const [batches, setBatches] = useState<BatchStatus[]>([]);
-  const [prompt, setPrompt] = useState('Please provide a detailed transcription of this audio.');
   const [error, setError] = useState<string | null>(null);
+  
+  // Recording State
+  const [inputMode, setInputMode] = useState<'upload' | 'record'>('upload');
+  const [isRecording, setIsRecording] = useState(false);
+  const [isPaused, setIsPaused] = useState(false);
+  const [recordingTime, setRecordingTime] = useState(0);
+  const mediaRecorderRef = useRef<MediaRecorder | null>(null);
+  const audioChunksRef = useRef<Blob[]>([]);
+  const timerRef = useRef<NodeJS.Timeout | null>(null);
   const [history, setHistory] = useState<TaskHistory[]>([]);
   const [selectedTask, setSelectedTask] = useState<TaskHistory | null>(null);
   const [noteTab, setNoteTab] = useState<NoteTab>('transcription');
@@ -284,6 +297,92 @@ export default function App() {
       console.error('PPT generation error:', err);
     } finally {
       setIsGeneratingAsset(false);
+    }
+  };
+
+  // Cleanup recording on unmount
+  useEffect(() => {
+    return () => {
+      if (timerRef.current) clearInterval(timerRef.current);
+      if (mediaRecorderRef.current && mediaRecorderRef.current.state === 'recording') {
+        mediaRecorderRef.current.stop();
+      }
+    };
+  }, []);
+
+  const formatTime = (seconds: number) => {
+    const m = Math.floor(seconds / 60);
+    const s = seconds % 60;
+    return `${m.toString().padStart(2, '0')}:${s.toString().padStart(2, '0')}`;
+  };
+
+  const startRecording = async () => {
+    try {
+      const stream = await navigator.mediaDevices.getUserMedia({ audio: true });
+      const mediaRecorder = new MediaRecorder(stream);
+      mediaRecorderRef.current = mediaRecorder;
+      audioChunksRef.current = [];
+
+      mediaRecorder.ondataavailable = (event) => {
+        if (event.data.size > 0) {
+          audioChunksRef.current.push(event.data);
+        }
+      };
+
+      mediaRecorder.onstop = () => {
+        const audioBlob = new Blob(audioChunksRef.current, { type: 'audio/webm' });
+        // Create a File object from the Blob so it fits the existing flow
+        const audioFile = new File([audioBlob], `Recording_${new Date().toISOString().replace(/[:.]/g, '-')}.webm`, { type: 'audio/webm' });
+        setFile(audioFile);
+        
+        // Stop all tracks to release microphone
+        stream.getTracks().forEach(track => track.stop());
+      };
+
+      mediaRecorder.start();
+      setIsRecording(true);
+      setIsPaused(false);
+      setRecordingTime(0);
+      setFile(null);
+      
+      timerRef.current = setInterval(() => {
+        setRecordingTime(prev => prev + 1);
+      }, 1000);
+      
+    } catch (err) {
+      console.error('Error accessing microphone:', err);
+      setError('Could not access microphone. Please check permissions.');
+    }
+  };
+
+  const pauseRecording = () => {
+    if (mediaRecorderRef.current && mediaRecorderRef.current.state === 'recording') {
+      mediaRecorderRef.current.pause();
+      setIsPaused(true);
+      if (timerRef.current) {
+        clearInterval(timerRef.current);
+      }
+    }
+  };
+
+  const resumeRecording = () => {
+    if (mediaRecorderRef.current && mediaRecorderRef.current.state === 'paused') {
+      mediaRecorderRef.current.resume();
+      setIsPaused(false);
+      timerRef.current = setInterval(() => {
+        setRecordingTime(prev => prev + 1);
+      }, 1000);
+    }
+  };
+
+  const stopRecording = () => {
+    if (mediaRecorderRef.current && (mediaRecorderRef.current.state === 'recording' || mediaRecorderRef.current.state === 'paused')) {
+      mediaRecorderRef.current.stop();
+      setIsRecording(false);
+      setIsPaused(false);
+      if (timerRef.current) {
+        clearInterval(timerRef.current);
+      }
     }
   };
 
@@ -665,10 +764,12 @@ export default function App() {
 
       // Decision nodes linked to topics
       (meeting.decisions || []).forEach((dec: any, idx: number) => {
+        if (!dec || !dec.decision) return;
         const decId = `decision_${meeting.meetingId}_${idx}`;
+        const decText = String(dec.decision);
         nodes.push({
           id: decId,
-          label: dec.decision.length > 40 ? dec.decision.substring(0, 40) + '...' : dec.decision,
+          label: decText.length > 40 ? decText.substring(0, 40) + '...' : decText,
           type: 'decision',
           data: { ...dec, meetingId: meeting.meetingId, meetingTitle: meeting.meetingTitle },
           color: '#f59e0b',
@@ -714,10 +815,12 @@ export default function App() {
 
       // Action item nodes
       (meeting.actionItems || []).forEach((item: any, idx: number) => {
+        if (!item || !item.task) return;
         const itemId = `action_${meeting.meetingId}_${idx}`;
+        const taskText = String(item.task);
         nodes.push({
           id: itemId,
-          label: item.task.length > 35 ? item.task.substring(0, 35) + '...' : item.task,
+          label: taskText.length > 35 ? taskText.substring(0, 35) + '...' : taskText,
           type: 'action',
           data: { ...item, meetingId: meeting.meetingId, meetingTitle: meeting.meetingTitle },
           color: '#ec4899',
@@ -739,51 +842,78 @@ export default function App() {
       });
     });
 
-    // Cross-meeting links via shared topics (dashed lines between meetings)
+    // Cross-meeting links via shared canonical topics — ALL pairs, not just sequential
     Object.entries(topicMap).forEach(([topicId, data]) => {
       if (data.meetingIds.length > 1) {
-        // Create timeline-style connections between meetings sharing this topic
         const uniqueMeetings = [...new Set(data.meetingIds)];
-        for (let i = 0; i < uniqueMeetings.length - 1; i++) {
-          const existingLink = links.find(l => 
-            (l.source === `meeting_${uniqueMeetings[i]}` && l.target === `meeting_${uniqueMeetings[i + 1]}`) ||
-            (l.source === `meeting_${uniqueMeetings[i + 1]}` && l.target === `meeting_${uniqueMeetings[i]}`)
-          );
-          if (!existingLink) {
-            links.push({
-              source: `meeting_${uniqueMeetings[i]}`,
-              target: `meeting_${uniqueMeetings[i + 1]}`,
-              type: 'cross-meeting',
-              dashed: true,
-              sharedTopic: topicId
-            });
+        for (let i = 0; i < uniqueMeetings.length; i++) {
+          for (let j = i + 1; j < uniqueMeetings.length; j++) {
+            const src = `meeting_${uniqueMeetings[i]}`;
+            const tgt = `meeting_${uniqueMeetings[j]}`;
+            const existingLink = links.find(l =>
+              (l.source === src && l.target === tgt) ||
+              (l.source === tgt && l.target === src)
+            );
+            if (!existingLink) {
+              links.push({ source: src, target: tgt, type: 'cross-meeting', dashed: true, sharedTopic: topicId });
+            }
           }
         }
       }
     });
 
-    // Cross-meeting links via shared people (lighter dashed lines)
+    // Cross-meeting links via shared people — ALL pairs, not just sequential
     Object.entries(personMeetings).forEach(([personId, meetingIds]) => {
       if (meetingIds.length > 1) {
         const uniqueMeetings = [...new Set(meetingIds)];
-        for (let i = 0; i < uniqueMeetings.length - 1; i++) {
-          const existingLink = links.find(l => 
-            l.type === 'cross-meeting' &&
-            ((l.source === `meeting_${uniqueMeetings[i]}` && l.target === `meeting_${uniqueMeetings[i + 1]}`) ||
-            (l.source === `meeting_${uniqueMeetings[i + 1]}` && l.target === `meeting_${uniqueMeetings[i]}`))
-          );
-          if (!existingLink) {
-            links.push({
-              source: `meeting_${uniqueMeetings[i]}`,
-              target: `meeting_${uniqueMeetings[i + 1]}`,
-              type: 'cross-meeting-person',
-              dashed: true,
-              sharedPerson: personId
-            });
+        for (let i = 0; i < uniqueMeetings.length; i++) {
+          for (let j = i + 1; j < uniqueMeetings.length; j++) {
+            const src = `meeting_${uniqueMeetings[i]}`;
+            const tgt = `meeting_${uniqueMeetings[j]}`;
+            const existingLink = links.find(l =>
+              (l.source === src && l.target === tgt) ||
+              (l.source === tgt && l.target === src)
+            );
+            if (!existingLink) {
+              links.push({
+                source: src,
+                target: tgt,
+                type: 'cross-meeting-person',
+                dashed: true,
+                sharedPerson: personId
+              });
+            }
           }
         }
       }
     });
+
+    // Content-similarity pass: catch meetings with relevant shared context whose topic NAMES
+    // didn't match (e.g. "revenue strategy" vs "sales growth plan" — same domain, different words).
+    // Compare each meeting's combined topic+summary text for a richer signal.
+    const meetingContent = (m: any) =>
+      (m.topics || []).filter((t: any) => t).map((t: any) => `${t.name || ''} ${t.summary || ''}`).join(' ');
+
+    for (let i = 0; i < kgData.length; i++) {
+      for (let j = i + 1; j < kgData.length; j++) {
+        const srcId = `meeting_${kgData[i].meetingId}`;
+        const tgtId = `meeting_${kgData[j].meetingId}`;
+        // Skip if already connected by a topic or person link
+        if (links.find(l =>
+          (l.source === srcId && l.target === tgtId) ||
+          (l.source === tgtId && l.target === srcId)
+        )) continue;
+
+        const contentSim = calculateSimilarity(meetingContent(kgData[i]), meetingContent(kgData[j]));
+        // Also check if they share >= 2 people (strong signal regardless of topic names)
+        const peopleA = new Set((kgData[i].people || []).map((p: string) => (p || '').toLowerCase()).filter(Boolean));
+        const sharedPeopleCount = (kgData[j].people || []).filter((p: string) => p && peopleA.has(p.toLowerCase())).length;
+
+        if (contentSim >= 0.12 || sharedPeopleCount >= 2) {
+          links.push({ source: srcId, target: tgtId, type: 'cross-meeting', dashed: true });
+        }
+      }
+    }
 
     return { nodes, links };
   };
@@ -1482,42 +1612,155 @@ export default function App() {
                 className="max-w-4xl mx-auto p-4 sm:p-8"
               >
                 <div className="grid grid-cols-1 md:grid-cols-2 gap-8">
-                  {/* Left: Upload */}
+                  {/* Left: Input Selection */}
                   <div className="space-y-6">
-                    <section className="border border-[#141414] p-6 bg-white shadow-[4px_4px_0px_0px_rgba(20,20,20,1)]">
-                      <h2 className="font-serif italic text-sm uppercase opacity-50 mb-4 tracking-wider">01. Input</h2>
-                      <div 
-                        onClick={() => fileInputRef.current?.click()}
-                        className={`border-2 border-dashed border-[#141414]/20 p-12 text-center cursor-pointer hover:bg-[#F5F5F5] transition-colors mb-4 ${file ? 'bg-[#F5F5F5]' : ''}`}
-                      >
-                        <input type="file" ref={fileInputRef} onChange={handleFileChange} className="hidden" accept="audio/*" />
-                        {file ? (
-                          <div className="flex flex-col items-center gap-2">
-                            <FileAudio className="w-12 h-12 mb-2" />
-                            <span className="font-mono text-sm font-bold">{file.name}</span>
-                            <span className="text-xs opacity-50">{(file.size / (1024 * 1024)).toFixed(2)} MB</span>
+                    <section className="border border-[#141414] p-6 bg-white shadow-[4px_4px_0px_0px_rgba(20,20,20,1)] flex flex-col">
+                      <div className="flex items-center justify-between mb-4">
+                        <h2 className="font-serif italic text-sm uppercase opacity-50 tracking-wider">01. Input Source</h2>
+                        
+                        {/* Toggle Upload/Record */}
+                        <div className="flex bg-[#F5F5F5] border border-[#141414]/10 rounded-md p-1">
+                          <button
+                            onClick={() => setInputMode('upload')}
+                            className={`flex items-center gap-2 px-3 py-1.5 text-xs font-mono uppercase tracking-widest rounded-sm transition-all ${inputMode === 'upload' ? 'bg-white shadow-sm font-bold text-[#141414]' : 'opacity-50 hover:opacity-100'}`}
+                          >
+                            <Upload className="w-3 h-3" /> File
+                          </button>
+                          <button
+                            onClick={() => setInputMode('record')}
+                            className={`flex items-center gap-2 px-3 py-1.5 text-xs font-mono uppercase tracking-widest rounded-sm transition-all ${inputMode === 'record' ? 'bg-white shadow-sm font-bold text-[#141414]' : 'opacity-50 hover:opacity-100'}`}
+                          >
+                            <Mic className="w-3 h-3" /> Record
+                          </button>
+                        </div>
+                      </div>
+
+                      {/* Content Area for Input */}
+                      <div className="min-h-[220px] flex flex-col justify-center">
+                        {inputMode === 'upload' ? (
+                          <div 
+                            onClick={() => fileInputRef.current?.click()}
+                            className={`flex-1 border-2 border-dashed border-[#141414]/20 flex flex-col items-center justify-center p-8 text-center cursor-pointer hover:bg-[#F5F5F5] transition-colors mb-4 ${file && !isRecording ? 'bg-[#F5F5F5]' : ''}`}
+                          >
+                            <input type="file" ref={fileInputRef} onChange={handleFileChange} className="hidden" accept="audio/*" />
+                            {file && !isRecording ? (
+                              <div className="flex flex-col items-center gap-2">
+                                <FileAudio className="w-12 h-12 mb-2" />
+                                <span className="font-mono text-sm font-bold">{file.name}</span>
+                                <span className="text-xs opacity-50">{(file.size / (1024 * 1024)).toFixed(2)} MB</span>
+                              </div>
+                            ) : (
+                              <div className="flex flex-col items-center gap-2">
+                                <Upload className="w-12 h-12 mb-2 opacity-30" />
+                                <span className="text-sm font-medium">Drop audio file here or click to browse</span>
+                              </div>
+                            )}
                           </div>
                         ) : (
-                          <div className="flex flex-col items-center gap-2">
-                            <Upload className="w-12 h-12 mb-2 opacity-30" />
-                            <span className="text-sm font-medium">Drop audio file here</span>
+                          <div className={`flex-1 border-2 border-[#141414]/10 flex flex-col items-center justify-center p-8 text-center mb-4 transition-all ${isRecording ? 'bg-red-50/50 border-red-200' : 'bg-[#FAFAFA]'}`}>
+                            {isRecording ? (
+                              <div className="flex flex-col items-center gap-6 w-full">
+                                <div className="text-3xl font-mono text-red-500 font-bold tracking-widest">
+                                  {formatTime(recordingTime)}
+                                </div>
+                                
+                                {/* Wave Animation */}
+                                <div className="flex items-end justify-center gap-1 h-12 w-full max-w-[200px]">
+                                  {[...Array(20)].map((_, i) => (
+                                    <motion.div
+                                      key={i}
+                                      animate={{ height: isPaused ? '20%' : ['20%', '100%', '20%'] }}
+                                      transition={isPaused ? { duration: 0.3 } : {
+                                        duration: 0.8,
+                                        repeat: Infinity,
+                                        delay: i * 0.05,
+                                        ease: "easeInOut"
+                                      }}
+                                      className={`w-1.5 rounded-t-sm opacity-80 ${isPaused ? 'bg-gray-400' : 'bg-red-500'}`}
+                                    />
+                                  ))}
+                                </div>
+
+                                <div className="flex items-center gap-4 mt-2">
+                                  {isPaused ? (
+                                    <button 
+                                      onClick={resumeRecording}
+                                      className="w-14 h-14 bg-[#141414] text-white rounded-full flex items-center justify-center hover:bg-[#333] hover:scale-105 transition-all shadow-md"
+                                      title="Resume"
+                                    >
+                                      <PlayCircle className="w-7 h-7" />
+                                    </button>
+                                  ) : (
+                                    <button 
+                                      onClick={pauseRecording}
+                                      className="w-14 h-14 bg-gray-200 text-gray-700 rounded-full flex items-center justify-center hover:bg-gray-300 hover:scale-105 transition-all shadow-md"
+                                      title="Pause"
+                                    >
+                                      <PauseCircle className="w-7 h-7" />
+                                    </button>
+                                  )}
+                                  
+                                  <button 
+                                    onClick={stopRecording}
+                                    className="w-16 h-16 bg-red-500 text-white rounded-full flex items-center justify-center hover:bg-red-600 hover:scale-105 transition-all shadow-lg"
+                                    title="Stop"
+                                  >
+                                    <StopCircle className="w-8 h-8" />
+                                  </button>
+                                </div>
+                                
+                                <span className={`text-xs font-mono uppercase tracking-widest font-bold ${isPaused ? 'text-gray-500' : 'text-red-500/70 animate-pulse'}`}>
+                                  {isPaused ? 'Recording Paused' : 'Recording Live...'}
+                                </span>
+                              </div>
+                            ) : file ? (
+                              <div className="flex flex-col items-center gap-4 w-full">
+                                <div className="p-4 bg-green-100 text-green-600 rounded-full mb-2">
+                                  <CheckCircle2 className="w-8 h-8" />
+                                </div>
+                                <span className="font-mono text-sm font-bold text-green-700">Recording Saved</span>
+                                <span className="text-xs opacity-50">{formatTime(recordingTime)}</span>
+                                <button 
+                                  onClick={() => { setFile(null); startRecording(); }}
+                                  className="mt-2 text-xs font-mono uppercase border-b border-[#141414] pb-0.5 hover:opacity-70"
+                                >
+                                  Record Again
+                                </button>
+                              </div>
+                            ) : (
+                              <div className="flex flex-col items-center gap-6">
+                                <div className="w-20 h-20 rounded-full bg-[#141414]/5 flex items-center justify-center">
+                                  <Mic className="w-10 h-10 opacity-40" />
+                                </div>
+                                <button 
+                                  onClick={startRecording}
+                                  className="px-8 py-3 bg-[#141414] text-white font-bold uppercase tracking-widest text-xs rounded-full hover:bg-[#333] hover:scale-105 transition-all shadow-md flex items-center gap-2"
+                                >
+                                  <span className="w-2 h-2 rounded-full bg-red-500"></span>
+                                  Start Recording
+                                </button>
+                              </div>
+                            )}
                           </div>
                         )}
                       </div>
-                      <textarea 
-                        value={prompt}
-                        onChange={(e) => setPrompt(e.target.value)}
-                        className="w-full border border-[#141414] p-3 text-sm font-mono focus:outline-none h-24 resize-none"
-                        placeholder="Instructions..."
-                      />
-                      <button 
-                        onClick={startProcessing}
-                        disabled={!file || status === 'processing' || status === 'splitting'}
-                        className="w-full mt-6 bg-[#141414] text-[#E4E3E0] py-4 font-bold uppercase tracking-widest hover:bg-[#333] disabled:opacity-30 flex items-center justify-center gap-2"
-                      >
-                        {status === 'processing' || status === 'splitting' ? <Loader2 className="w-5 h-5 animate-spin" /> : <Play className="w-5 h-5 fill-current" />}
-                        Start Processing
-                      </button>
+
+                      <div className="mt-auto">
+                        <textarea 
+                          value={prompt}
+                          onChange={(e) => setPrompt(e.target.value)}
+                          className="w-full border border-[#141414] p-3 text-sm font-mono focus:outline-none h-20 resize-none mb-4"
+                          placeholder="Instructions (optional)..."
+                        />
+                        <button 
+                          onClick={startProcessing}
+                          disabled={!file || isRecording || status === 'processing' || status === 'splitting'}
+                          className="w-full bg-[#141414] text-[#E4E3E0] py-4 font-bold uppercase tracking-widest hover:bg-[#333] disabled:opacity-30 flex items-center justify-center gap-2"
+                        >
+                          {status === 'processing' || status === 'splitting' ? <Loader2 className="w-5 h-5 animate-spin" /> : <Play className="w-5 h-5 fill-current" />}
+                          Start Processing
+                        </button>
+                      </div>
                     </section>
                   </div>
 
