@@ -4,10 +4,25 @@
 
 export interface AudioBatch {
   blob: Blob;
+  mimeType: string;
   index: number;
   total: number;
   startTime: number;
   endTime: number;
+}
+
+/**
+ * Normalise a browser MIME type string to what the Gemini API accepts.
+ */
+function normalizeMimeType(raw: string): string {
+  if (!raw) return 'audio/webm';
+  if (raw.startsWith('audio/webm'))  return 'audio/webm';
+  if (raw.startsWith('audio/ogg'))   return 'audio/ogg';
+  if (raw.startsWith('audio/mp4'))   return 'audio/mp4';
+  if (raw.startsWith('audio/mpeg'))  return 'audio/mpeg';
+  if (raw.startsWith('audio/wav'))   return 'audio/wav';
+  if (raw.startsWith('audio/flac'))  return 'audio/flac';
+  return raw;
 }
 
 /**
@@ -64,11 +79,41 @@ function encodeWAV(samples: Float32Array, sampleRate: number): Blob {
  * Since we can't easily predict the encoded size of a slice without encoding it,
  * we split by duration.
  */
+/**
+ * Returns a single-batch fallback using the raw file blob when
+ * AudioContext cannot decode it (e.g. MediaRecorder webm without seek index).
+ */
+function rawFallbackBatch(file: File): AudioBatch[] {
+  return [{
+    blob: file,
+    mimeType: normalizeMimeType(file.type),
+    index: 0,
+    total: 1,
+    startTime: 0,
+    endTime: 0
+  }];
+}
+
 export async function splitAudio(file: File, maxChunkSizeMB: number = 15): Promise<AudioBatch[]> {
   const audioCtx = new (window.AudioContext || (window as any).webkitAudioContext)();
-  const arrayBuffer = await file.arrayBuffer();
-  const audioBuffer = await audioCtx.decodeAudioData(arrayBuffer);
-  
+
+  let audioBuffer: AudioBuffer;
+  try {
+    const arrayBuffer = await file.arrayBuffer();
+    audioBuffer = await audioCtx.decodeAudioData(arrayBuffer);
+  } catch {
+    // AudioContext cannot decode this format (common for MediaRecorder .webm).
+    // Send the raw file as a single batch with its real MIME type.
+    await audioCtx.close();
+    return rawFallbackBatch(file);
+  }
+
+  // decodeAudioData sometimes succeeds but returns empty audio for recorded webm.
+  if (!audioBuffer || audioBuffer.duration === 0 || audioBuffer.length === 0) {
+    await audioCtx.close();
+    return rawFallbackBatch(file);
+  }
+
   const duration = audioBuffer.duration;
   const numChannels = audioBuffer.numberOfChannels;
   const sampleRate = audioBuffer.sampleRate;
@@ -105,6 +150,7 @@ export async function splitAudio(file: File, maxChunkSizeMB: number = 15): Promi
     const blob = encodeWAV(chunkSamples, sampleRate);
     batches.push({
       blob,
+      mimeType: 'audio/wav',
       index: i,
       total: totalChunks,
       startTime: startSec,

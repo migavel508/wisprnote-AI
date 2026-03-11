@@ -30,9 +30,12 @@ export interface GeneratedAsset {
 }
 
 export async function saveTask(task: TaskHistory) {
+  const { data: { user } } = await supabase.auth.getUser();
+  if (!user) throw new Error('User not authenticated');
+
   const { data, error } = await supabase
     .from('task_history')
-    .insert([task])
+    .insert([{ ...task, user_id: user.id }])
     .select();
   
   if (error) {
@@ -43,9 +46,13 @@ export async function saveTask(task: TaskHistory) {
 }
 
 export async function getTasks() {
+  const { data: { user } } = await supabase.auth.getUser();
+  if (!user) throw new Error('User not authenticated');
+
   const { data, error } = await supabase
     .from('task_history')
     .select('*')
+    .eq('user_id', user.id)
     .order('created_at', { ascending: false });
   
   if (error) {
@@ -56,9 +63,12 @@ export async function getTasks() {
 }
 
 export async function saveAsset(asset: GeneratedAsset) {
+  const { data: { user } } = await supabase.auth.getUser();
+  if (!user) throw new Error('User not authenticated');
+
   const { data, error } = await supabase
     .from('generated_assets')
-    .insert([asset])
+    .insert([{ ...asset, user_id: user.id }])
     .select();
   
   if (error) {
@@ -69,10 +79,14 @@ export async function saveAsset(asset: GeneratedAsset) {
 }
 
 export async function getAssets(taskId: string) {
+  const { data: { user } } = await supabase.auth.getUser();
+  if (!user) throw new Error('User not authenticated');
+
   const { data, error } = await supabase
     .from('generated_assets')
     .select('*')
     .eq('task_id', taskId)
+    .eq('user_id', user.id)
     .order('created_at', { ascending: false });
   
   if (error) {
@@ -119,7 +133,7 @@ export async function saveKnowledgeGraph(entry: KnowledgeGraphEntry) {
         action_items: entry.action_items,
         refs: entry.refs
       },
-      { onConflict: 'task_id' }
+      { onConflict: 'user_id,task_id' }
     )
     .select();
   
@@ -149,7 +163,7 @@ export async function saveKnowledgeGraphBatch(entries: KnowledgeGraphEntry[]) {
 
   const { data, error } = await supabase
     .from('knowledge_graph')
-    .upsert(records, { onConflict: 'task_id' })
+    .upsert(records, { onConflict: 'user_id,task_id' })
     .select();
   
   if (error) {
@@ -160,9 +174,13 @@ export async function saveKnowledgeGraphBatch(entries: KnowledgeGraphEntry[]) {
 }
 
 export async function getKnowledgeGraph() {
+  const { data: { user } } = await supabase.auth.getUser();
+  if (!user) throw new Error('User not authenticated');
+
   const { data, error } = await supabase
     .from('knowledge_graph')
     .select('*')
+    .eq('user_id', user.id)
     .order('created_at', { ascending: false });
   
   if (error) {
@@ -173,10 +191,14 @@ export async function getKnowledgeGraph() {
 }
 
 export async function getKnowledgeGraphForTask(taskId: string) {
+  const { data: { user } } = await supabase.auth.getUser();
+  if (!user) throw new Error('User not authenticated');
+
   const { data, error } = await supabase
     .from('knowledge_graph')
     .select('*')
     .eq('task_id', taskId)
+    .eq('user_id', user.id)
     .single();
   
   if (error && error.code !== 'PGRST116') { // PGRST116 = no rows found
@@ -187,10 +209,14 @@ export async function getKnowledgeGraphForTask(taskId: string) {
 }
 
 export async function deleteKnowledgeGraph(taskId: string) {
+  const { data: { user } } = await supabase.auth.getUser();
+  if (!user) throw new Error('User not authenticated');
+
   const { error } = await supabase
     .from('knowledge_graph')
     .delete()
-    .eq('task_id', taskId);
+    .eq('task_id', taskId)
+    .eq('user_id', user.id);
   
   if (error) {
     console.error('Error deleting knowledge graph:', error);
@@ -260,10 +286,14 @@ export async function saveChatMessages(messages: ChatMessage[]) {
 }
 
 export async function getChatHistory(taskId: string) {
+  const { data: { user } } = await supabase.auth.getUser();
+  if (!user) throw new Error('User not authenticated');
+
   const { data, error } = await supabase
     .from('chat_history')
     .select('*')
     .eq('task_id', taskId)
+    .eq('user_id', user.id)
     .order('created_at', { ascending: true });
   
   if (error) {
@@ -274,10 +304,14 @@ export async function getChatHistory(taskId: string) {
 }
 
 export async function deleteChatHistory(taskId: string) {
+  const { data: { user } } = await supabase.auth.getUser();
+  if (!user) throw new Error('User not authenticated');
+
   const { error } = await supabase
     .from('chat_history')
     .delete()
-    .eq('task_id', taskId);
+    .eq('task_id', taskId)
+    .eq('user_id', user.id);
   
   if (error) {
     console.error('Error deleting chat history:', error);

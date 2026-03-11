@@ -3,6 +3,32 @@ import { AudioBatch, blobToBase64 } from "./audioService";
 
 const ai = new GoogleGenAI({ apiKey: process.env.GEMINI_API_KEY || "" });
 
+// Utility to try a model and fallback if it fails (e.g. 503 Service Unavailable)
+async function generateWithFallback(
+  requestOptions: any,
+  fallbackModels: string[] = ["gemini-2.5-flash", "gemini-2.0-flash"]
+): Promise<GenerateContentResponse> {
+  let lastError;
+  const modelsToTry = [requestOptions.model, ...fallbackModels];
+
+  for (const model of modelsToTry) {
+    try {
+      return await ai.models.generateContent({
+        ...requestOptions,
+        model
+      });
+    } catch (error: any) {
+      console.warn(`Model ${model} failed:`, error.message);
+      lastError = error;
+      // Only fallback on 503 or 429 (overloaded/unavailable)
+      if (error.status !== 503 && error.status !== 429) {
+        throw error;
+      }
+    }
+  }
+  throw lastError;
+}
+
 export interface ProcessResult {
   text: string;
   batchIndex: number;
@@ -13,14 +39,14 @@ export interface ProcessResult {
 export async function processAudioBatch(batch: AudioBatch, prompt: string): Promise<ProcessResult> {
   const base64Data = await blobToBase64(batch.blob);
   
-  const response: GenerateContentResponse = await ai.models.generateContent({
+  const response = await generateWithFallback({
     model: "gemini-3-flash-preview",
     contents: [
       {
         parts: [
           {
             inlineData: {
-              mimeType: "audio/wav",
+              mimeType: batch.mimeType,
               data: base64Data,
             },
           },
@@ -41,7 +67,7 @@ export async function processAudioBatch(batch: AudioBatch, prompt: string): Prom
 }
 
 export async function generateSummary(text: string): Promise<string> {
-  const response: GenerateContentResponse = await ai.models.generateContent({
+  const response = await generateWithFallback({
     model: "gemini-3-flash-preview",
     contents: `Please provide a concise summary of the following transcription:\n\n${text}`,
   });
@@ -49,7 +75,7 @@ export async function generateSummary(text: string): Promise<string> {
 }
 
 export async function generateNotes(text: string): Promise<string> {
-  const response: GenerateContentResponse = await ai.models.generateContent({
+  const response = await generateWithFallback({
     model: "gemini-3-flash-preview",
     contents: `Please transform the following transcription into a structured set of notes (Notion-style). Use headings, bullet points, and highlight key takeaways:\n\n${text}`,
   });
@@ -57,7 +83,7 @@ export async function generateNotes(text: string): Promise<string> {
 }
 
 export async function chatWithNotes(context: string, message: string, history: { role: 'user' | 'model', parts: { text: string }[] }[]): Promise<string> {
-  const response: GenerateContentResponse = await ai.models.generateContent({
+  const response = await generateWithFallback({
     model: "gemini-3-flash-preview",
     contents: [
       ...history,
