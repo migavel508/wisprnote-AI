@@ -92,9 +92,9 @@ declare global {
   }
 }
 
-type View = 'process' | 'history' | 'notes' | 'assets' | 'agents' | 'knowledge';
+type View = 'process' | 'history' | 'notes' | 'chat' | 'assets' | 'agents' | 'knowledge';
 type Status = 'idle' | 'splitting' | 'processing' | 'completed' | 'error';
-type NoteTab = 'transcription' | 'summary' | 'notes' | 'chat';
+type NoteTab = 'transcription' | 'summary' | 'notes';
 
 interface Message {
   role: 'user' | 'model';
@@ -1511,6 +1511,15 @@ export default function App() {
             </button>
             <button 
               onClick={() => {
+                if (selectedTask) setCurrentView('chat');
+                else setCurrentView('history');
+              }}
+              className={`px-4 py-1.5 text-xs font-mono uppercase tracking-wider transition-colors flex-shrink-0 ${currentView === 'chat' ? 'bg-[#141414] text-[#E4E3E0]' : 'hover:bg-[#141414]/5'}`}
+            >
+              Chat
+            </button>
+            <button 
+              onClick={() => {
                 if (selectedTask) setCurrentView('assets');
                 else setCurrentView('history');
               }}
@@ -1553,7 +1562,7 @@ export default function App() {
       <div className="flex-1 flex overflow-hidden relative">
         {/* Sidebar for History/Notes */}
         <AnimatePresence initial={false}>
-          {isSidebarOpen && (currentView === 'history' || currentView === 'notes') && (
+          {isSidebarOpen && (currentView === 'history' || currentView === 'notes' || currentView === 'chat') && (
             <motion.aside 
               initial={{ width: 0, opacity: 0 }}
               animate={{ width: window.innerWidth < 640 ? '100%' : 256, opacity: 1 }}
@@ -1589,7 +1598,7 @@ export default function App() {
         </AnimatePresence>
 
         {/* Sidebar Toggle Button */}
-        {(currentView === 'history' || currentView === 'notes') && (
+        {(currentView === 'history' || currentView === 'notes' || currentView === 'chat') && (
           <button 
             onClick={() => setIsSidebarOpen(!isSidebarOpen)}
             className="fixed sm:absolute left-0 top-1/2 -translate-y-1/2 z-50 bg-[#141414] text-white p-1 rounded-r-md shadow-lg hover:bg-[#333] transition-all"
@@ -1876,7 +1885,7 @@ export default function App() {
 
                   {/* UI Switcher (Image Inspired) */}
                   <div className="flex justify-center mb-12 overflow-x-auto no-scrollbar">
-                    <div className="bg-[#141414]/5 p-1 rounded-xl flex items-center gap-1 min-w-max">
+                    <div className="flex gap-2 sm:gap-4 overflow-x-auto no-scrollbar">
                       <button 
                         onClick={() => setNoteTab('transcription')}
                         className={`px-4 sm:px-6 py-2 rounded-lg text-sm font-medium transition-all ${noteTab === 'transcription' ? 'bg-[#141414] text-white shadow-lg' : 'text-[#141414]/60 hover:text-[#141414]'}`}
@@ -1894,12 +1903,6 @@ export default function App() {
                         className={`px-4 sm:px-6 py-2 rounded-lg text-sm font-medium transition-all ${noteTab === 'notes' ? 'bg-[#141414] text-white shadow-lg' : 'text-[#141414]/60 hover:text-[#141414]'}`}
                       >
                         Notes
-                      </button>
-                      <button 
-                        onClick={() => setNoteTab('chat')}
-                        className={`px-4 sm:px-6 py-2 rounded-lg text-sm font-medium transition-all ${noteTab === 'chat' ? 'bg-[#141414] text-white shadow-lg' : 'text-[#141414]/60 hover:text-[#141414]'}`}
-                      >
-                        Chat
                       </button>
                     </div>
                   </div>
@@ -1931,89 +1934,213 @@ export default function App() {
                             <Markdown remarkPlugins={[remarkGfm]}>{selectedTask.notes || 'No structured notes generated.'}</Markdown>
                           </div>
                         )}
-                        {noteTab === 'chat' && (
-                          <div className="flex flex-col h-[600px] border border-[#141414] bg-[#F9F9F9] rounded-2xl overflow-hidden shadow-inner">
-                            {/* Chat Header with history count */}
-                            <div className="px-6 py-3 bg-white border-b border-[#141414]/10 flex items-center justify-between">
-                              <div className="flex items-center gap-2">
-                                <MessageSquare className="w-4 h-4 opacity-60" />
-                                <span className="text-xs font-mono uppercase tracking-wider opacity-60">Chat with Notes</span>
-                              </div>
-                              {chatMessages.length > 0 && (
-                                <span className="text-[10px] font-mono bg-[#141414] text-white px-2 py-0.5 rounded-full">
-                                  {chatMessages.length} message{chatMessages.length !== 1 ? 's' : ''}
-                                </span>
-                              )}
-                            </div>
-                            <div className="flex-1 overflow-y-auto p-6 space-y-6">
-                              {chatMessages.length === 0 && (
-                                <div className="h-full flex flex-col items-center justify-center text-center p-8 opacity-40">
-                                  <MessageSquare className="w-12 h-12 mb-4" />
-                                  <p className="text-sm font-mono uppercase tracking-widest">Start chatting with your notes</p>
-                                  <p className="text-xs mt-2">Ask questions or request visualizations</p>
-                                  <p className="text-[10px] mt-4 opacity-60">Your conversation will be saved automatically</p>
-                                </div>
-                              )}
-                              {chatMessages.map((msg, i) => (
-                                <motion.div 
-                                  key={i}
-                                  initial={{ opacity: 0, y: 5 }}
-                                  animate={{ opacity: 1, y: 0 }}
-                                  className={`flex ${msg.role === 'user' ? 'justify-end' : 'justify-start'}`}
-                                >
-                                  <div className={`max-w-[80%] p-4 rounded-2xl ${msg.role === 'user' ? 'bg-[#141414] text-white' : 'bg-white border border-[#141414]/10 shadow-sm'}`}>
-                                    <div className="text-sm leading-relaxed">
-                                      <Markdown remarkPlugins={[remarkGfm]}>{msg.text}</Markdown>
-                                    </div>
-                                    {msg.image && (
-                                      <div className="mt-4 rounded-lg overflow-hidden border border-[#141414]/10">
-                                        <img src={msg.image} alt="Concept Visualization" className="w-full h-auto" />
-                                      </div>
-                                    )}
-                                    {msg.role === 'model' && !msg.image && !isGeneratingImage && (
-                                      <button 
-                                        onClick={() => handleVisualize(msg.text.substring(0, 100))}
-                                        className="mt-3 flex items-center gap-2 text-[10px] font-mono uppercase tracking-wider opacity-50 hover:opacity-100 transition-opacity"
-                                      >
-                                        <Sparkles className="w-3 h-3" /> Visualize Concept
-                                      </button>
-                                    )}
-                                  </div>
-                                </motion.div>
-                              ))}
-                              {isChatting && (
-                                <div className="flex justify-start">
-                                  <div className="bg-white border border-[#141414]/10 p-4 rounded-2xl shadow-sm">
-                                    <Loader2 className="w-4 h-4 animate-spin opacity-40" />
-                                  </div>
-                                </div>
-                              )}
-                              <div ref={chatEndRef} />
-                            </div>
-                            
-                            <div className="p-4 bg-white border-t border-[#141414]">
-                              <div className="flex items-center gap-2">
-                                <input 
-                                  type="text" 
-                                  value={chatInput}
-                                  onChange={(e) => setChatInput(e.target.value)}
-                                  onKeyDown={(e) => e.key === 'Enter' && handleSendMessage()}
-                                  placeholder="Ask about your notes..."
-                                  className="flex-1 bg-transparent border-none outline-none text-sm font-sans px-2"
-                                />
-                                <button 
-                                  onClick={handleSendMessage}
-                                  disabled={!chatInput.trim() || isChatting}
-                                  className="p-2 bg-[#141414] text-white rounded-lg hover:bg-[#333] disabled:opacity-30 transition-colors"
-                                >
-                                  <Send className="w-4 h-4" />
-                                </button>
-                              </div>
-                            </div>
-                          </div>
-                        )}
                       </motion.div>
                     </AnimatePresence>
+                  </div>
+                </div>
+              </motion.div>
+            )}
+
+            {currentView === 'chat' && selectedTask && (
+              <motion.div 
+                key="chat"
+                initial={{ opacity: 0 }}
+                animate={{ opacity: 1 }}
+                className="h-full flex flex-col bg-white"
+              >
+                {/* Header breadcrumb */}
+                <div className="flex items-center gap-3 px-6 py-4 opacity-50 text-xs font-mono uppercase tracking-widest overflow-x-auto no-scrollbar whitespace-nowrap border-b border-[#141414]/10 bg-white sticky top-0 z-20">
+                  <MessageSquare className="w-4 h-4 flex-shrink-0" />
+                  <span className="truncate">{selectedTask.filename}</span>
+                  <span>/</span>
+                  <span className="font-bold text-[#141414]">AI Chat</span>
+                </div>
+
+                <div className="flex-1 overflow-y-auto bg-white scrollbar-thin relative flex flex-col">
+                  {/* Chat History & Empty State */}
+                  <div className="flex-1 max-w-3xl w-full mx-auto p-4 sm:p-8 flex flex-col">
+                    {chatMessages.length === 0 ? (
+                      <div className="flex-1 flex flex-col items-center justify-center text-center mt-10">
+                        <h1 className="text-4xl sm:text-5xl font-bold tracking-tight mb-4">Welcome to Chat</h1>
+                        <p className="text-base sm:text-lg text-[#141414]/60 max-w-xl mb-12">
+                          Ask anything about <span className="font-semibold text-[#141414]">{selectedTask.filename}</span>. Not sure where to start?
+                        </p>
+                        
+                        <div className="grid grid-cols-1 sm:grid-cols-2 gap-4 w-full max-w-2xl">
+                          <button 
+                            onClick={() => { setChatInput('Summarize the key decisions made in this meeting.'); handleSendMessage(); }}
+                            className="flex items-center justify-between p-4 border border-[#141414]/10 rounded-2xl hover:border-[#141414] hover:shadow-[4px_4px_0px_0px_rgba(20,20,20,1)] transition-all bg-white group text-left"
+                          >
+                            <div className="flex items-center gap-3">
+                              <div className="w-10 h-10 rounded-full bg-yellow-100 flex items-center justify-center text-yellow-600">
+                                <FileText className="w-5 h-5" />
+                              </div>
+                              <span className="font-medium text-sm">Summarize decisions</span>
+                            </div>
+                            <Plus className="w-4 h-4 opacity-30 group-hover:opacity-100 transition-opacity" />
+                          </button>
+
+                          <button 
+                            onClick={() => { setChatInput('What are my action items from this discussion?'); handleSendMessage(); }}
+                            className="flex items-center justify-between p-4 border border-[#141414]/10 rounded-2xl hover:border-[#141414] hover:shadow-[4px_4px_0px_0px_rgba(20,20,20,1)] transition-all bg-white group text-left"
+                          >
+                            <div className="flex items-center gap-3">
+                              <div className="w-10 h-10 rounded-full bg-blue-100 flex items-center justify-center text-blue-600">
+                                <CheckCircle2 className="w-5 h-5" />
+                              </div>
+                              <span className="font-medium text-sm">List action items</span>
+                            </div>
+                            <Plus className="w-4 h-4 opacity-30 group-hover:opacity-100 transition-opacity" />
+                          </button>
+
+                          <button 
+                            onClick={() => { setChatInput('Extract all the main topics discussed and generate a concept flowchart.'); handleSendMessage(); }}
+                            className="flex items-center justify-between p-4 border border-[#141414]/10 rounded-2xl hover:border-[#141414] hover:shadow-[4px_4px_0px_0px_rgba(20,20,20,1)] transition-all bg-white group text-left"
+                          >
+                            <div className="flex items-center gap-3">
+                              <div className="w-10 h-10 rounded-full bg-purple-100 flex items-center justify-center text-purple-600">
+                                <Network className="w-5 h-5" />
+                              </div>
+                              <span className="font-medium text-sm">Map concepts</span>
+                            </div>
+                            <Plus className="w-4 h-4 opacity-30 group-hover:opacity-100 transition-opacity" />
+                          </button>
+
+                          <button 
+                            onClick={() => { setChatInput('Generate a professional follow-up email to send to the team.'); handleSendMessage(); }}
+                            className="flex items-center justify-between p-4 border border-[#141414]/10 rounded-2xl hover:border-[#141414] hover:shadow-[4px_4px_0px_0px_rgba(20,20,20,1)] transition-all bg-white group text-left"
+                          >
+                            <div className="flex items-center gap-3">
+                              <div className="w-10 h-10 rounded-full bg-green-100 flex items-center justify-center text-green-600">
+                                <Mail className="w-5 h-5" />
+                              </div>
+                              <span className="font-medium text-sm">Draft follow-up email</span>
+                            </div>
+                            <Plus className="w-4 h-4 opacity-30 group-hover:opacity-100 transition-opacity" />
+                          </button>
+                        </div>
+                      </div>
+                    ) : (
+                      <div className="space-y-8 pb-8 pt-4">
+                        {chatMessages.map((msg, i) => (
+                          <motion.div 
+                            key={i}
+                            initial={{ opacity: 0, y: 10 }}
+                            animate={{ opacity: 1, y: 0 }}
+                            className={`flex ${msg.role === 'user' ? 'justify-end' : 'justify-start'}`}
+                          >
+                            <div className={`max-w-[90%] sm:max-w-[85%] ${
+                              msg.role === 'user' 
+                                ? 'bg-[#F5F5F5] text-[#141414] px-6 py-4 rounded-3xl rounded-tr-sm' 
+                                : 'bg-transparent text-[#141414]'
+                            }`}>
+                              {msg.role === 'model' && (
+                                <div className="flex items-center gap-3 mb-2">
+                                  <div className="w-8 h-8 rounded-full bg-[#141414] flex items-center justify-center shadow-sm">
+                                    <Sparkles className="w-4 h-4 text-white" />
+                                  </div>
+                                  <span className="font-bold text-sm">Lumina AI</span>
+                                </div>
+                              )}
+                              
+                              <div className={`prose prose-sm sm:prose-base max-w-none w-full ${
+                                msg.role === 'model' 
+                                  ? 'pl-11 prose-p:leading-loose prose-p:mb-6 prose-headings:font-bold prose-headings:mt-8 prose-headings:mb-4 prose-ul:my-6 prose-li:my-2 prose-li:leading-loose prose-strong:text-[#141414] text-[#141414]/90' 
+                                  : 'prose-p:leading-loose'
+                              }`}>
+                                <Markdown remarkPlugins={[remarkGfm]}>{msg.text}</Markdown>
+                              </div>
+                              
+                              {msg.image && (
+                                <div className={`mt-6 rounded-2xl overflow-hidden border border-[#141414]/10 shadow-sm ${msg.role === 'model' ? 'ml-11' : ''}`}>
+                                  <img src={msg.image} alt="Concept Visualization" className="w-full h-auto" />
+                                </div>
+                              )}
+                              
+                              {msg.role === 'model' && !msg.image && !isGeneratingImage && (
+                                <div className="mt-4 ml-11">
+                                  <button 
+                                    onClick={() => handleVisualize(msg.text.substring(0, 100))}
+                                    className="flex items-center gap-2 text-xs font-medium text-[#141414]/60 hover:text-[#141414] transition-colors bg-[#F5F5F5] hover:bg-[#EAEAEA] px-3 py-1.5 rounded-full"
+                                  >
+                                    <ImageIcon className="w-3 h-3" /> Visualize Response
+                                  </button>
+                                </div>
+                              )}
+                            </div>
+                          </motion.div>
+                        ))}
+                        
+                        {isChatting && (
+                          <motion.div 
+                            initial={{ opacity: 0 }} 
+                            animate={{ opacity: 1 }} 
+                            className="flex justify-start"
+                          >
+                            <div className="flex items-center gap-3">
+                              <div className="w-8 h-8 rounded-full bg-[#141414] flex items-center justify-center shadow-sm">
+                                <Sparkles className="w-4 h-4 text-white" />
+                              </div>
+                              <div className="flex items-center gap-1.5 px-4 py-3 bg-[#F5F5F5] rounded-3xl rounded-tl-sm">
+                                <motion.div className="w-1.5 h-1.5 bg-[#141414] rounded-full" animate={{ y: [0, -3, 0] }} transition={{ duration: 0.6, repeat: Infinity, delay: 0 }} />
+                                <motion.div className="w-1.5 h-1.5 bg-[#141414] rounded-full" animate={{ y: [0, -3, 0] }} transition={{ duration: 0.6, repeat: Infinity, delay: 0.2 }} />
+                                <motion.div className="w-1.5 h-1.5 bg-[#141414] rounded-full" animate={{ y: [0, -3, 0] }} transition={{ duration: 0.6, repeat: Infinity, delay: 0.4 }} />
+                              </div>
+                            </div>
+                          </motion.div>
+                        )}
+                        <div ref={chatEndRef} />
+                      </div>
+                    )}
+                  </div>
+                  
+                  {/* Sticky Chat Input Area */}
+                  <div className="sticky bottom-0 bg-gradient-to-t from-white via-white to-transparent pt-6 pb-6 px-4 sm:px-8 w-full z-10">
+                    <div className="max-w-3xl mx-auto">
+                      <div className="bg-white border border-[#141414]/20 rounded-2xl shadow-[0_8px_30px_rgb(0,0,0,0.04)] focus-within:border-[#141414] focus-within:shadow-[0_8px_30px_rgb(0,0,0,0.08)] transition-all overflow-hidden flex flex-col">
+                        <textarea 
+                          value={chatInput}
+                          onChange={(e) => setChatInput(e.target.value)}
+                          onKeyDown={(e) => {
+                            if (e.key === 'Enter' && !e.shiftKey) {
+                              e.preventDefault();
+                              handleSendMessage();
+                            }
+                          }}
+                          placeholder="Ask a question about the meeting..."
+                          className="w-full bg-transparent border-none outline-none px-5 py-4 text-base font-sans resize-none max-h-40 min-h-[60px]"
+                          rows={1}
+                        />
+                        
+                        <div className="px-3 pb-3 pt-1 flex items-center justify-between border-t border-[#141414]/5">
+                          <div className="flex items-center gap-1">
+                            <button className="flex items-center gap-1.5 px-3 py-1.5 rounded-lg text-xs font-medium text-[#141414]/60 hover:bg-[#F5F5F5] hover:text-[#141414] transition-colors">
+                              <ImageIcon className="w-3.5 h-3.5" /> Visualize
+                            </button>
+                            <button className="flex items-center gap-1.5 px-3 py-1.5 rounded-lg text-xs font-medium text-[#141414]/60 hover:bg-[#F5F5F5] hover:text-[#141414] transition-colors">
+                              <Sparkles className="w-3.5 h-3.5" /> Prompts
+                            </button>
+                          </div>
+                          
+                          <div className="flex items-center gap-3">
+                            <span className="text-[10px] font-mono text-[#141414]/40 hidden sm:block">
+                              {chatInput.length} / 4000
+                            </span>
+                            <button 
+                              onClick={handleSendMessage}
+                              disabled={!chatInput.trim() || isChatting}
+                              className="w-8 h-8 bg-[#141414] text-white flex items-center justify-center rounded-lg hover:bg-[#333] disabled:opacity-30 disabled:bg-[#141414]/50 transition-all"
+                            >
+                              <Send className="w-4 h-4" />
+                            </button>
+                          </div>
+                        </div>
+                      </div>
+                      
+                      <div className="text-center mt-3 text-[10px] text-[#141414]/40 font-medium">
+                        Lumina AI can make mistakes. Consider verifying important information.
+                      </div>
+                    </div>
                   </div>
                 </div>
               </motion.div>
