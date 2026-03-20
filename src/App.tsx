@@ -125,6 +125,7 @@ export default function App() {
   const mediaRecorderRef = useRef<MediaRecorder | null>(null);
   const audioChunksRef = useRef<Blob[]>([]);
   const timerRef = useRef<NodeJS.Timeout | null>(null);
+
   const [history, setHistory] = useState<TaskHistory[]>([]);
   const [selectedTask, setSelectedTask] = useState<TaskHistory | null>(null);
   const [noteTab, setNoteTab] = useState<NoteTab>('transcription');
@@ -331,11 +332,8 @@ export default function App() {
 
       mediaRecorder.onstop = () => {
         const audioBlob = new Blob(audioChunksRef.current, { type: 'audio/webm' });
-        // Create a File object from the Blob so it fits the existing flow
         const audioFile = new File([audioBlob], `Recording_${new Date().toISOString().replace(/[:.]/g, '-')}.webm`, { type: 'audio/webm' });
         setFile(audioFile);
-        
-        // Stop all tracks to release microphone
         stream.getTracks().forEach(track => track.stop());
       };
 
@@ -344,11 +342,11 @@ export default function App() {
       setIsPaused(false);
       setRecordingTime(0);
       setFile(null);
-      
+
       timerRef.current = setInterval(() => {
         setRecordingTime(prev => prev + 1);
       }, 1000);
-      
+
     } catch (err) {
       console.error('Error accessing microphone:', err);
       setError('Could not access microphone. Please check permissions.');
@@ -1665,7 +1663,7 @@ export default function App() {
                                 </div>
                                 
                                 {/* Wave Animation */}
-                                <div className="flex items-end justify-center gap-1 h-12 w-full max-w-[200px]">
+                                <div className="flex items-end justify-center gap-1 h-8 w-full max-w-[200px]">
                                   {[...Array(20)].map((_, i) => (
                                     <motion.div
                                       key={i}
