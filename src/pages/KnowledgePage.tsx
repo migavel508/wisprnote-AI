@@ -1,0 +1,1187 @@
+import { useState, useRef, useEffect, useCallback } from 'react';
+import { motion, AnimatePresence } from 'framer-motion';
+import ForceGraph2D from 'react-force-graph-2d';
+import { 
+  Search, 
+  Send, 
+  Loader2, 
+  X, 
+  Network, 
+  Layout, 
+  MessageSquare, 
+  Users, 
+  CheckCircle2, 
+  Share2, 
+  ChevronRight,
+  Presentation,
+  Clock,
+  Sparkles,
+  Filter,
+  ZoomIn,
+  ZoomOut,
+  Maximize2
+} from 'lucide-react';
+
+interface KnowledgePageProps {
+  kgData: any[];
+  isLoadingKG: boolean;
+  kgProgress: { current: number; total: number };
+  isExtractingNewKG: boolean;
+  kgBuilt: boolean;
+  buildKnowledgeGraph: () => void;
+  historyLength: number;
+}
+
+// Similarity calculation for topic matching
+const calculateSimilarity = (str1: string, str2: string): number => {
+  if (!str1 || !str2) return 0;
+  const s1 = str1.toLowerCase();
+  const s2 = str2.toLowerCase();
+  if (s1 === s2) return 1;
+  
+  const words1 = new Set(s1.split(/\s+/).filter(w => w.length > 2));
+  const words2 = new Set(s2.split(/\s+/).filter(w => w.length > 2));
+  
+  if (words1.size === 0 || words2.size === 0) return 0;
+  
+  let intersection = 0;
+  words1.forEach(w => { if (words2.has(w)) intersection++; });
+  
+  return intersection / Math.max(words1.size, words2.size);
+};
+
+// Find canonical topic ID with similarity matching
+const findCanonicalTopicId = (topicName: string | undefined | null, existingTopics: Map<string, string>): string => {
+  if (!topicName || typeof topicName !== 'string') {
+    return `topic_unknown_${Math.random().toString(36).substring(7)}`;
+  }
+  
+  const normalized = topicName.toLowerCase().replace(/\s+/g, '_');
+  const directId = `topic_${normalized}`;
+  
+  if (existingTopics.has(directId)) {
+    return directId;
+  }
+  
+  for (const [existingId, existingName] of existingTopics.entries()) {
+    if (calculateSimilarity(topicName, existingName) >= 0.5) {
+      return existingId;
+    }
+  }
+  
+  existingTopics.set(directId, topicName);
+  return directId;
+};
+
+export default function KnowledgePage({
+  kgData,
+  isLoadingKG,
+  kgProgress,
+  isExtractingNewKG,
+  kgBuilt,
+  buildKnowledgeGraph,
+  historyLength
+}: KnowledgePageProps) {
+  const [selectedNode, setSelectedNode] = useState<any>(null);
+  const [searchQuery, setSearchQuery] = useState('');
+  const [searchResults, setSearchResults] = useState<any[]>([]);
+  const [isSearching, setIsSearching] = useState(false);
+  const [chatMessages, setChatMessages] = useState<Array<{ role: 'user' | 'assistant'; content: string }>>([]);
+  const [chatInput, setChatInput] = useState('');
+  const [isChatting, setIsChatting] = useState(false);
+  const [showChat, setShowChat] = useState(false);
+  const [filterType, setFilterType] = useState<string | null>(null);
+  const [kgDimensions, setKgDimensions] = useState({ width: 800, height: 600 });
+  
+  const kgContainerRef = useRef<HTMLDivElement>(null);
+  const graphRef = useRef<any>(null);
+  const chatEndRef = useRef<HTMLDivElement>(null);
+
+  // Handle container resize
+  useEffect(() => {
+    if (!kgContainerRef.current) return;
+
+    const observer = new ResizeObserver(entries => {
+      requestAnimationFrame(() => {
+        for (let entry of entries) {
+          const { width, height } = entry.contentRect;
+          if (width > 0 && height > 0) {
+            setKgDimensions({ width, height });
+          }
+        }
+      });
+    });
+
+    observer.observe(kgContainerRef.current);
+    return () => observer.disconnect();
+  }, [kgBuilt]);
+
+  // Scroll chat to bottom
+  useEffect(() => {
+    if (chatEndRef.current) {
+      chatEndRef.current.scrollIntoView({ behavior: 'smooth' });
+    }
+  }, [chatMessages]);
+
+  // Build graph data with improved layout parameters
+  const buildGraphData = useCallback(() => {
+    const nodes: any[] = [];
+    const links: any[] = [];
+    const existingTopics = new Map<string, string>();
+
+    kgData.forEach((meeting) => {
+      const meetingNodeId = `meeting_${meeting.meetingId}`;
+      nodes.push({
+        id: meetingNodeId,
+        label: meeting.meetingTitle?.replace(/\.[^.]+$/, '') || 'Meeting',
+        type: 'meeting',
+        data: meeting,
+        color: '#141414',
+        size: 24
+      });
+
+      (meeting.topics || []).forEach((topic: any) => {
+        const topicId = findCanonicalTopicId(topic.name, existingTopics);
+        
+        if (!nodes.find(n => n.id === topicId)) {
+          const statusColor = 
+            topic.status === 'resolved' ? '#22c55e' :
+            topic.status === 'off-track' ? '#ef4444' :
+            topic.status === 'revisited' ? '#f59e0b' :
+            topic.status === 'ongoing' ? '#3b82f6' : '#8b5cf6';
+          nodes.push({
+            id: topicId,
+            label: topic.name,
+            type: 'topic',
+            data: { ...topic, allStatuses: [topic.status], allSummaries: [topic.summary] },
+            color: statusColor,
+            size: 16
+          });
+        } else {
+          const existingNode = nodes.find(n => n.id === topicId);
+          if (existingNode && existingNode.data) {
+            existingNode.data.allStatuses = [...(existingNode.data.allStatuses || []), topic.status];
+            existingNode.data.allSummaries = [...(existingNode.data.allSummaries || []), topic.summary];
+            if (topic.status === 'off-track') existingNode.color = '#ef4444';
+            else if (topic.status === 'revisited' && existingNode.color !== '#ef4444') existingNode.color = '#f59e0b';
+            existingNode.size = Math.min(existingNode.size + 4, 28);
+          }
+        }
+        
+        links.push({ source: meetingNodeId, target: topicId, type: 'meeting-topic' });
+      });
+
+      (meeting.decisions || []).forEach((dec: any, idx: number) => {
+        if (!dec || !dec.decision) return;
+        const decId = `decision_${meeting.meetingId}_${idx}`;
+        const decText = String(dec.decision);
+        nodes.push({
+          id: decId,
+          label: decText.length > 40 ? decText.substring(0, 40) + '...' : decText,
+          type: 'decision',
+          data: { ...dec, meetingId: meeting.meetingId, meetingTitle: meeting.meetingTitle },
+          color: '#f59e0b',
+          size: 10
+        });
+        
+        const topicId = findCanonicalTopicId(dec.relatedTopic || '', existingTopics);
+        if (nodes.find(n => n.id === topicId)) {
+          links.push({ source: topicId, target: decId, type: 'topic-decision' });
+        } else {
+          links.push({ source: meetingNodeId, target: decId, type: 'meeting-decision' });
+        }
+      });
+
+      (meeting.people || []).forEach((person: string) => {
+        if (!person) return;
+        const personId = `person_${person.toLowerCase().replace(/\s+/g, '_')}`;
+        if (!nodes.find(n => n.id === personId)) {
+          nodes.push({
+            id: personId,
+            label: person,
+            type: 'person',
+            data: { name: person, meetings: [meeting.meetingTitle] },
+            color: '#06b6d4',
+            size: 12
+          });
+        } else {
+          const existingNode = nodes.find(n => n.id === personId);
+          if (existingNode && existingNode.data) {
+            existingNode.data.meetings = [...(existingNode.data.meetings || []), meeting.meetingTitle];
+            existingNode.size = Math.min(existingNode.size + 2, 20);
+          }
+        }
+        links.push({ source: meetingNodeId, target: personId, type: 'meeting-person' });
+      });
+
+      (meeting.actionItems || []).forEach((item: any, idx: number) => {
+        if (!item || !item.task) return;
+        const itemId = `action_${meeting.meetingId}_${idx}`;
+        const taskText = String(item.task);
+        nodes.push({
+          id: itemId,
+          label: taskText.length > 35 ? taskText.substring(0, 35) + '...' : taskText,
+          type: 'action',
+          data: { ...item, meetingId: meeting.meetingId, meetingTitle: meeting.meetingTitle },
+          color: '#ec4899',
+          size: 9
+        });
+        
+        const topicId = findCanonicalTopicId(item.relatedTopic || '', existingTopics);
+        if (nodes.find(n => n.id === topicId)) {
+          links.push({ source: topicId, target: itemId, type: 'topic-action' });
+        } else {
+          links.push({ source: meetingNodeId, target: itemId, type: 'meeting-action' });
+        }
+        
+        const ownerId = `person_${(item.owner || '').toLowerCase().replace(/\s+/g, '_')}`;
+        if (item.owner && nodes.find(n => n.id === ownerId)) {
+          links.push({ source: ownerId, target: itemId, type: 'person-action' });
+        }
+      });
+    });
+
+    // Filter nodes if filter is active
+    let filteredNodes = nodes;
+    let filteredLinks = links;
+    
+    if (filterType) {
+      filteredNodes = nodes.filter(n => n.type === filterType || n.type === 'meeting');
+      const nodeIds = new Set(filteredNodes.map(n => n.id));
+      filteredLinks = links.filter(l => {
+        const sourceId = typeof l.source === 'object' ? l.source.id : l.source;
+        const targetId = typeof l.target === 'object' ? l.target.id : l.target;
+        return nodeIds.has(sourceId) && nodeIds.has(targetId);
+      });
+    }
+
+    return { nodes: filteredNodes, links: filteredLinks };
+  }, [kgData, filterType]);
+
+  // Search functionality
+  const handleSearch = useCallback((query: string) => {
+    setSearchQuery(query);
+    if (!query.trim()) {
+      setSearchResults([]);
+      return;
+    }
+
+    setIsSearching(true);
+    const lowerQuery = query.toLowerCase();
+    const results: any[] = [];
+
+    // Search through all nodes
+    const graphData = buildGraphData();
+    graphData.nodes.forEach(node => {
+      const labelMatch = node.label?.toLowerCase().includes(lowerQuery);
+      const typeMatch = node.type?.toLowerCase().includes(lowerQuery);
+      
+      let dataMatch = false;
+      if (node.data) {
+        if (node.type === 'meeting') {
+          dataMatch = (node.data.topics || []).some((t: any) => 
+            t.name?.toLowerCase().includes(lowerQuery) || 
+            t.summary?.toLowerCase().includes(lowerQuery)
+          );
+        } else if (node.type === 'topic') {
+          dataMatch = node.data.summary?.toLowerCase().includes(lowerQuery);
+        } else if (node.type === 'decision') {
+          dataMatch = node.data.decision?.toLowerCase().includes(lowerQuery);
+        } else if (node.type === 'action') {
+          dataMatch = node.data.task?.toLowerCase().includes(lowerQuery);
+        }
+      }
+
+      if (labelMatch || typeMatch || dataMatch) {
+        results.push(node);
+      }
+    });
+
+    setSearchResults(results.slice(0, 10));
+    setIsSearching(false);
+  }, [buildGraphData]);
+
+  // Focus on a node from search
+  const focusOnNode = (node: any) => {
+    setSelectedNode(node);
+    setSearchQuery('');
+    setSearchResults([]);
+    
+    // Find the node in the graph and center on it
+    if (graphRef.current) {
+      const graphData = buildGraphData();
+      const graphNode = graphData.nodes.find((n: any) => n.id === node.id);
+      if (graphNode && graphNode.x !== undefined && graphNode.y !== undefined) {
+        graphRef.current.centerAt(graphNode.x, graphNode.y, 1000);
+      }
+    }
+  };
+
+  // Find related meetings for a given meeting ID based on shared topics, people, decisions
+  const findRelatedMeetings = useCallback((meetingId: string) => {
+    const currentMeeting = kgData.find(m => m.meetingId === meetingId);
+    if (!currentMeeting) return [];
+
+    const relatedMeetings: Array<{
+      meetingId: string;
+      meetingTitle: string;
+      sharedTopics: Array<{ name: string; currentStatus: string; otherStatus: string; currentSummary: string; otherSummary: string }>;
+      sharedPeople: string[];
+      sharedDecisionThemes: string[];
+      relevanceScore: number;
+    }> = [];
+
+    const currentTopics = new Set((currentMeeting.topics || [])
+      .filter((t: any) => t && t.name)
+      .map((t: any) => t.name.toLowerCase()));
+    const currentPeople = new Set((currentMeeting.people || [])
+      .filter((p: string) => p)
+      .map((p: string) => p.toLowerCase()));
+
+    kgData.forEach(otherMeeting => {
+      if (otherMeeting.meetingId === meetingId) return;
+
+      const sharedTopics: Array<{ name: string; currentStatus: string; otherStatus: string; currentSummary: string; otherSummary: string }> = [];
+      const sharedPeople: string[] = [];
+      const sharedDecisionThemes: string[] = [];
+
+      // Find shared topics with fuzzy matching
+      (otherMeeting.topics || []).forEach((otherTopic: any) => {
+        if (!otherTopic || !otherTopic.name) return;
+        const otherName = otherTopic.name.toLowerCase();
+        // Check for exact or similar match
+        let matchedCurrentTopic: any = null;
+        (currentMeeting.topics || []).forEach((currentTopic: any) => {
+          if (!currentTopic || !currentTopic.name) return;
+          const similarity = calculateSimilarity(currentTopic.name, otherTopic.name);
+          if (similarity >= 0.4 || currentTopic.name.toLowerCase() === otherName) {
+            matchedCurrentTopic = currentTopic;
+          }
+        });
+        if (matchedCurrentTopic) {
+          sharedTopics.push({
+            name: otherTopic.name,
+            currentStatus: matchedCurrentTopic.status,
+            otherStatus: otherTopic.status,
+            currentSummary: matchedCurrentTopic.summary,
+            otherSummary: otherTopic.summary
+          });
+        }
+      });
+
+      // Find shared people
+      (otherMeeting.people || []).forEach((person: string) => {
+        if (person && currentPeople.has(person.toLowerCase())) {
+          sharedPeople.push(person);
+        }
+      });
+
+      // Find shared decision themes (fuzzy)
+      (otherMeeting.decisions || []).forEach((otherDec: any) => {
+        (currentMeeting.decisions || []).forEach((currentDec: any) => {
+          if (calculateSimilarity(currentDec.decision, otherDec.decision) >= 0.3) {
+            sharedDecisionThemes.push(otherDec.relatedTopic || 'General');
+          }
+        });
+      });
+
+      const relevanceScore = sharedTopics.length * 3 + sharedPeople.length * 2 + sharedDecisionThemes.length;
+      
+      if (relevanceScore > 0) {
+        relatedMeetings.push({
+          meetingId: otherMeeting.meetingId,
+          meetingTitle: otherMeeting.meetingTitle,
+          sharedTopics,
+          sharedPeople: [...new Set(sharedPeople)],
+          sharedDecisionThemes: [...new Set(sharedDecisionThemes)],
+          relevanceScore
+        });
+      }
+    });
+
+    // Sort by relevance score descending
+    return relatedMeetings.sort((a, b) => b.relevanceScore - a.relevanceScore);
+  }, [kgData]);
+
+  // Expandable Meeting Card Component
+  const ExpandableMeetingCard = ({ related, idx }: { related: any, idx: number }) => {
+    const [isExpanded, setIsExpanded] = useState(false);
+    const relatedMeetingData = kgData.find(m => m.meetingId === related.meetingId);
+    if (!relatedMeetingData) return null;
+    
+    return (
+      <div key={idx} className="bg-gradient-to-br from-purple-50/80 to-blue-50/80 rounded-xl border border-purple-100/50 overflow-hidden transition-all duration-300 hover:shadow-md">
+        {/* Collapsed Header (Always visible) */}
+        <div 
+          className="p-3.5 flex items-center justify-between cursor-pointer hover:bg-white/40 transition-colors group"
+          onClick={() => setIsExpanded(!isExpanded)}
+        >
+          <div className="flex-1 min-w-0 pr-3">
+            <div className="flex items-center gap-2 mb-1.5">
+              <span className="text-sm font-bold text-gray-800 truncate group-hover:text-purple-700 transition-colors">
+                {related.meetingTitle?.replace(/\.[^.]+$/, '') || 'Meeting'}
+              </span>
+              <span className="text-[9px] px-2 py-0.5 bg-purple-200/50 text-purple-800 rounded-md font-mono shrink-0 font-medium">
+                {related.relevanceScore} pts
+              </span>
+            </div>
+            <div className="text-[10px] text-gray-500 truncate flex items-center gap-1.5">
+              {related.sharedTopics.length > 0 && (
+                <span className="flex items-center gap-1 bg-white/60 px-1.5 py-0.5 rounded text-gray-600">
+                  <MessageSquare className="w-3 h-3 text-purple-400" /> {related.sharedTopics.length}
+                </span>
+              )}
+              {related.sharedPeople.length > 0 && (
+                <span className="flex items-center gap-1 bg-white/60 px-1.5 py-0.5 rounded text-gray-600">
+                  <Users className="w-3 h-3 text-cyan-400" /> {related.sharedPeople.length}
+                </span>
+              )}
+            </div>
+          </div>
+          <div className={`shrink-0 p-1.5 bg-white/80 rounded-lg text-purple-600 shadow-sm transition-transform duration-300 ${isExpanded ? '-rotate-90 bg-purple-100' : 'rotate-90'}`}>
+            <ChevronRight className="w-3.5 h-3.5" />
+          </div>
+        </div>
+
+        {/* Expanded Content */}
+        {isExpanded && (
+          <div className="p-3 pt-0 border-t border-purple-100 bg-white/40">
+            <div className="pt-3">
+              {/* Why This Meeting is Connected */}
+              <div className="mb-3 p-2 bg-white/70 rounded border border-purple-200">
+                <span className="text-[9px] font-mono uppercase text-purple-700 block mb-1">🔗 Connection Details:</span>
+                <div className="text-[10px] text-gray-700">
+                  {related.sharedTopics.length > 0 && (
+                    <span className="block mb-1">
+                      <strong>Topics:</strong> {related.sharedTopics.map((t:any) => t.name).join(', ')}
+                    </span>
+                  )}
+                  {related.sharedPeople.length > 0 && (
+                    <span className="block mb-1">
+                      <strong>People:</strong> {related.sharedPeople.join(', ')}
+                    </span>
+                  )}
+                </div>
+              </div>
+              
+              {/* What Was Discussed in That Meeting - All Topics */}
+              {(relatedMeetingData.topics || []).length > 0 && (
+                <div className="mb-3">
+                  <span className="text-[9px] font-mono uppercase text-indigo-700 block mb-2 flex items-center gap-1">
+                    <MessageSquare className="w-3 h-3" />
+                    What Was Discussed:
+                  </span>
+                  <div className="space-y-1.5">
+                    {(relatedMeetingData.topics || []).map((topic: any, tIdx: number) => {
+                      const isShared = related.sharedTopics.some((st:any) => 
+                        calculateSimilarity(st.name, topic.name) >= 0.4
+                      );
+                      const sharedTopic = related.sharedTopics.find((st:any) => 
+                        calculateSimilarity(st.name, topic.name) >= 0.4
+                      );
+                      
+                      return (
+                        <div key={tIdx} className={`p-2 rounded ${isShared ? 'bg-amber-50 border border-amber-200' : 'bg-white/80'}`}>
+                          <div className="flex items-start justify-between gap-2 mb-1">
+                            <span className="text-[10px] font-semibold text-gray-800 flex items-center gap-1">
+                              {isShared && <span className="text-amber-600" title="Shared with current meeting">⭐</span>}
+                              {topic.name}
+                            </span>
+                            <span className={`text-[8px] px-1 py-0.5 rounded font-mono shrink-0 ${
+                              topic.status === 'resolved' ? 'bg-green-100 text-green-700' :
+                              topic.status === 'off-track' ? 'bg-red-100 text-red-700' :
+                              topic.status === 'revisited' ? 'bg-yellow-100 text-yellow-700' :
+                              topic.status === 'ongoing' ? 'bg-blue-100 text-blue-700' : 'bg-purple-100 text-purple-700'
+                            }`}>{topic.status}</span>
+                          </div>
+                          <p className="text-[9px] text-gray-600 leading-relaxed line-clamp-2 hover:line-clamp-none transition-all">"{topic.summary}"</p>
+                          {isShared && sharedTopic && (
+                            <div className="mt-1 pt-1 border-t border-amber-200/50">
+                              <p className="text-[8px] text-amber-800">
+                                Status: {sharedTopic.otherStatus} → {sharedTopic.currentStatus}
+                              </p>
+                            </div>
+                          )}
+                        </div>
+                      );
+                    })}
+                  </div>
+                </div>
+              )}
+              
+              {/* Decisions and Actions */}
+              <div className="grid grid-cols-1 gap-2 mt-3">
+                {(relatedMeetingData.decisions || []).length > 0 && (
+                  <div className="bg-yellow-50/50 rounded p-2 border border-yellow-100">
+                    <span className="text-[9px] font-mono uppercase text-yellow-700 block mb-1">Decisions</span>
+                    <ul className="space-y-1">
+                      {(relatedMeetingData.decisions || []).slice(0, 2).map((dec: any, dIdx: number) => (
+                        <li key={dIdx} className="text-[9px] text-yellow-900 truncate">• {dec.decision}</li>
+                      ))}
+                    </ul>
+                  </div>
+                )}
+                
+                {(relatedMeetingData.actionItems || []).length > 0 && (
+                  <div className="bg-pink-50/50 rounded p-2 border border-pink-100">
+                    <span className="text-[9px] font-mono uppercase text-pink-700 block mb-1">Actions</span>
+                    <ul className="space-y-1">
+                      {(relatedMeetingData.actionItems || []).slice(0, 2).map((action: any, aIdx: number) => (
+                        <li key={aIdx} className="text-[9px] text-pink-900 truncate">
+                          <span className="font-medium">{action.owner}:</span> {action.task}
+                        </li>
+                      ))}
+                    </ul>
+                  </div>
+                )}
+              </div>
+            </div>
+          </div>
+        )}
+      </div>
+    );
+  };
+
+  // Chat with knowledge graph
+  const handleChatSubmit = async () => {
+    if (!chatInput.trim() || isChatting) return;
+
+    const userMessage = chatInput.trim();
+    setChatInput('');
+    setChatMessages(prev => [...prev, { role: 'user', content: userMessage }]);
+    setIsChatting(true);
+
+    try {
+      // Build context from knowledge graph
+      const context = kgData.map(meeting => ({
+        title: meeting.meetingTitle,
+        topics: meeting.topics?.map((t: any) => `${t.name} (${t.status}): ${t.summary}`).join('; '),
+        decisions: meeting.decisions?.map((d: any) => d.decision).join('; '),
+        people: meeting.people?.join(', '),
+        actions: meeting.actionItems?.map((a: any) => `${a.owner}: ${a.task}`).join('; ')
+      }));
+
+      const systemPrompt = `You are a helpful assistant that answers questions about the user's meeting knowledge graph. 
+You have access to the following meeting data:
+
+${context.map((m, i) => `
+Meeting ${i + 1}: ${m.title}
+- Topics: ${m.topics || 'None'}
+- Decisions: ${m.decisions || 'None'}
+- People: ${m.people || 'None'}
+- Action Items: ${m.actions || 'None'}
+`).join('\n')}
+
+Answer the user's question based on this data. Be concise and helpful. If you can't find relevant information, say so.`;
+
+      const geminiApiKey = import.meta.env.VITE_GEMINI_API_KEY || import.meta.env.GEMINI_API_KEY || "AIzaSyB1McBfQnEy2boqAHu5GrGYex5ZMzEpxCQ";
+      const response = await fetch(
+        `https://generativelanguage.googleapis.com/v1beta/models/gemini-3.1-flash-lite-preview:generateContent?key=${geminiApiKey}`,
+        {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({
+            contents: [
+              { role: 'user', parts: [{ text: systemPrompt }] },
+              { role: 'model', parts: [{ text: 'I understand. I will help answer questions about your meeting knowledge graph based on the data provided.' }] },
+              { role: 'user', parts: [{ text: userMessage }] }
+            ],
+            generationConfig: { temperature: 0.7, maxOutputTokens: 1024 }
+          })
+        }
+      );
+
+      const data = await response.json();
+      const assistantMessage = data.candidates?.[0]?.content?.parts?.[0]?.text || 'Sorry, I could not generate a response.';
+      
+      setChatMessages(prev => [...prev, { role: 'assistant', content: assistantMessage }]);
+    } catch (error) {
+      console.error('Chat error:', error);
+      setChatMessages(prev => [...prev, { role: 'assistant', content: 'Sorry, there was an error processing your question.' }]);
+    } finally {
+      setIsChatting(false);
+    }
+  };
+
+  // Node type colors for legend
+  const nodeTypes = [
+    { type: 'meeting', color: '#141414', label: 'Meeting', shape: 'large' },
+    { type: 'topic', color: '#8b5cf6', label: 'Topic', shape: 'medium' },
+    { type: 'person', color: '#06b6d4', label: 'Person', shape: 'small' },
+    { type: 'decision', color: '#f59e0b', label: 'Decision', shape: 'small' },
+    { type: 'action', color: '#ec4899', label: 'Action', shape: 'small' }
+  ];
+
+  return (
+    <div className="absolute inset-0 flex flex-col bg-white overflow-hidden">
+      {/* Header */}
+      <div className="flex-none bg-white border-b border-[#141414]/10 px-6 py-4">
+        <div className="flex items-center justify-between gap-4">
+          <div>
+            <h2 className="text-xl font-serif italic font-bold flex items-center gap-2">
+              <Network className="w-5 h-5" />
+              Knowledge Graph
+            </h2>
+            <p className="text-xs opacity-50 mt-0.5">Cross-meeting memory — see how topics, decisions, and people connect</p>
+          </div>
+          
+          <div className="flex items-center gap-3">
+            {/* Search */}
+            <div className="relative">
+              <div className="flex items-center gap-2 border border-[#141414]/20 bg-white px-3 py-2 rounded-lg w-64">
+                <Search className="w-4 h-4 opacity-40" />
+                <input
+                  type="text"
+                  placeholder="Search nodes..."
+                  value={searchQuery}
+                  onChange={(e) => handleSearch(e.target.value)}
+                  className="bg-transparent border-none outline-none text-sm w-full"
+                />
+                {searchQuery && (
+                  <button onClick={() => { setSearchQuery(''); setSearchResults([]); }}>
+                    <X className="w-3 h-3 opacity-40 hover:opacity-100" />
+                  </button>
+                )}
+              </div>
+              
+              {/* Search Results Dropdown */}
+              {searchResults.length > 0 && (
+                <div className="absolute top-full left-0 right-0 mt-1 bg-white border border-[#141414]/10 rounded-lg shadow-lg z-50 max-h-64 overflow-y-auto">
+                  {searchResults.map((result, idx) => (
+                    <button
+                      key={idx}
+                      onClick={() => focusOnNode(result)}
+                      className="w-full px-3 py-2 text-left hover:bg-gray-50 flex items-center gap-2 border-b border-gray-100 last:border-0"
+                    >
+                      <span 
+                        className="w-2 h-2 rounded-full flex-shrink-0" 
+                        style={{ backgroundColor: result.color }} 
+                      />
+                      <span className="text-xs font-medium truncate">{result.label}</span>
+                      <span className="text-[10px] text-gray-400 uppercase ml-auto">{result.type}</span>
+                    </button>
+                  ))}
+                </div>
+              )}
+            </div>
+
+            {/* Chat Toggle */}
+            <button
+              onClick={() => setShowChat(!showChat)}
+              className={`px-4 py-2 text-xs font-mono uppercase tracking-wider flex items-center gap-2 rounded-lg transition-colors ${
+                showChat ? 'bg-[#141414] text-white' : 'border border-[#141414]/20 hover:bg-gray-50'
+              }`}
+            >
+              <Sparkles className="w-4 h-4" />
+              Chat
+            </button>
+
+            {/* Build/Rebuild Button */}
+            <button 
+              onClick={buildKnowledgeGraph}
+              disabled={isLoadingKG || historyLength === 0}
+              className="px-4 py-2 bg-[#141414] text-white text-xs font-mono uppercase tracking-wider hover:bg-[#333] disabled:opacity-30 flex items-center gap-2 rounded-lg transition-colors"
+            >
+              {isLoadingKG ? <Loader2 className="w-4 h-4 animate-spin" /> : <Network className="w-4 h-4" />}
+              {kgBuilt ? 'Rebuild' : 'Build Graph'}
+            </button>
+          </div>
+        </div>
+      </div>
+
+      {/* Main Content */}
+      <div className="flex-1 flex overflow-hidden">
+        {/* Graph Area */}
+        <div className="flex-1 min-w-0 flex flex-col relative">
+          {/* Background extraction indicator */}
+          <AnimatePresence>
+            {isExtractingNewKG && kgBuilt && (
+              <motion.div 
+                initial={{ opacity: 0, y: -20 }}
+                animate={{ opacity: 1, y: 0 }}
+                exit={{ opacity: 0, y: -20 }}
+                className="absolute top-4 left-1/2 transform -translate-x-1/2 z-50 bg-[#141414] text-white px-4 py-2 rounded-full shadow-lg flex items-center gap-3 text-xs font-mono"
+              >
+                <Loader2 className="w-3 h-3 animate-spin" />
+                <span>Extracting latest meeting data...</span>
+              </motion.div>
+            )}
+          </AnimatePresence>
+
+          {!kgBuilt && !isExtractingNewKG ? (
+            <div className="flex-1 flex flex-col items-center justify-center text-center p-8 bg-[#FAFAFA]">
+              {isLoadingKG ? (
+                <div className="w-full max-w-md flex flex-col items-center">
+                  <Loader2 className="w-16 h-16 animate-spin opacity-20 mb-6" />
+                  <h3 className="text-lg font-bold opacity-80 mb-2">
+                    Analyzing Meeting {kgProgress.current} of {kgProgress.total}
+                  </h3>
+                  <div className="w-full bg-gray-200 rounded-full h-2.5 mb-4">
+                    <motion.div 
+                      className="bg-[#141414] h-2.5 rounded-full" 
+                      initial={{ width: 0 }}
+                      animate={{ width: `${(kgProgress.current / kgProgress.total) * 100}%` }}
+                      transition={{ duration: 0.5 }}
+                    />
+                  </div>
+                  <p className="text-xs opacity-50 mt-2">
+                    Extracting topics, decisions, people, and action items...
+                  </p>
+                </div>
+              ) : (
+                <>
+                  <Share2 className="w-16 h-16 opacity-10 mb-6" />
+                  <h3 className="text-lg font-serif italic opacity-30">No Graph Built Yet</h3>
+                  <p className="text-xs opacity-30 mt-2 max-w-md">
+                    {historyLength === 0 
+                      ? 'Process some audio files first, then come back to build your knowledge graph.'
+                      : `You have ${historyLength} meeting${historyLength !== 1 ? 's' : ''} ready. Click "Build Graph" to analyze and connect them.`
+                    }
+                  </p>
+                </>
+              )}
+            </div>
+          ) : (
+            <>
+              {/* Filter Bar */}
+              <div className="flex-none px-4 py-2 bg-[#FAFAFA] border-b border-gray-100 flex items-center gap-2">
+                <Filter className="w-3 h-3 opacity-40" />
+                <span className="text-[10px] font-mono uppercase opacity-40">Filter:</span>
+                <button
+                  onClick={() => setFilterType(null)}
+                  className={`px-2 py-1 text-[10px] rounded-md transition-colors ${
+                    !filterType ? 'bg-[#141414] text-white' : 'bg-white border border-gray-200 hover:bg-gray-50'
+                  }`}
+                >
+                  All
+                </button>
+                {nodeTypes.map(nt => (
+                  <button
+                    key={nt.type}
+                    onClick={() => setFilterType(filterType === nt.type ? null : nt.type)}
+                    className={`px-2 py-1 text-[10px] rounded-md transition-colors flex items-center gap-1 ${
+                      filterType === nt.type ? 'bg-[#141414] text-white' : 'bg-white border border-gray-200 hover:bg-gray-50'
+                    }`}
+                  >
+                    <span className="w-1.5 h-1.5 rounded-full" style={{ backgroundColor: nt.color }} />
+                    {nt.label}
+                  </button>
+                ))}
+              </div>
+
+              {/* Graph Canvas */}
+              <div ref={kgContainerRef} className="flex-1 bg-[#FAFAFA] relative min-h-0">
+                {/* Graph Controls */}
+                <div className="absolute bottom-4 right-4 z-10 flex flex-col gap-2">
+                  <button 
+                    onClick={() => graphRef.current?.zoom(graphRef.current.zoom() * 1.3, 300)}
+                    className="bg-white border border-gray-200 p-2 rounded-lg shadow-sm hover:bg-gray-50 transition-colors"
+                    title="Zoom In"
+                  >
+                    <ZoomIn className="w-4 h-4" />
+                  </button>
+                  <button 
+                    onClick={() => graphRef.current?.zoom(graphRef.current.zoom() / 1.3, 300)}
+                    className="bg-white border border-gray-200 p-2 rounded-lg shadow-sm hover:bg-gray-50 transition-colors"
+                    title="Zoom Out"
+                  >
+                    <ZoomOut className="w-4 h-4" />
+                  </button>
+                  <button 
+                    onClick={() => graphRef.current?.zoomToFit(400, 50)}
+                    className="bg-white border border-gray-200 p-2 rounded-lg shadow-sm hover:bg-gray-50 transition-colors"
+                    title="Fit View"
+                  >
+                    <Maximize2 className="w-4 h-4" />
+                  </button>
+                </div>
+
+                {/* Legend */}
+                <div className="absolute top-4 left-4 z-10 bg-white/95 backdrop-blur-sm border border-gray-200 rounded-lg p-3 shadow-sm">
+                  <h4 className="text-[10px] font-mono uppercase tracking-widest opacity-50 mb-2">Legend</h4>
+                  <div className="space-y-1.5">
+                    {nodeTypes.map(item => (
+                      <div key={item.label} className="flex items-center gap-2">
+                        <span 
+                          className={`rounded-full ${item.shape === 'large' ? 'w-3 h-3' : item.shape === 'medium' ? 'w-2.5 h-2.5' : 'w-2 h-2'}`} 
+                          style={{ backgroundColor: item.color }} 
+                        />
+                        <span className="text-[10px] text-gray-600">{item.label}</span>
+                      </div>
+                    ))}
+                  </div>
+                </div>
+
+                <ForceGraph2D
+                  ref={graphRef}
+                  graphData={buildGraphData()}
+                  width={kgDimensions.width}
+                  height={kgDimensions.height}
+                  nodeLabel={(node: any) => `${node.type.toUpperCase()}: ${node.label}`}
+                  nodeColor={(node: any) => node.color}
+                  nodeVal={(node: any) => node.size}
+                  linkColor={() => '#e5e5e5'}
+                  linkWidth={(link: any) => link.dashed ? 2 : 1.5}
+                  linkLineDash={(link: any) => link.dashed ? [5, 5] : undefined}
+                  minZoom={0.3}
+                  maxZoom={10}
+                  onNodeClick={(node: any) => {
+                    setSelectedNode(node);
+                    if (graphRef.current) {
+                      graphRef.current.centerAt(node.x, node.y, 800);
+                    }
+                  }}
+                  onNodeDragEnd={(node: any) => {
+                    const bounds = 2000;
+                    node.fx = Math.max(-bounds, Math.min(bounds, node.x));
+                    node.fy = Math.max(-bounds, Math.min(bounds, node.y));
+                  }}
+                  nodeCanvasObject={(node: any, ctx: CanvasRenderingContext2D, globalScale: number) => {
+                    const label = node.label || '';
+                    const fontSize = node.type === 'meeting' ? 12 / globalScale : 10 / globalScale;
+                    ctx.font = `${node.type === 'meeting' ? 'bold ' : ''}${fontSize}px Inter, system-ui, sans-serif`;
+                    
+                    // Draw node circle with better sizing
+                    const r = node.type === 'meeting' ? 10 : node.type === 'topic' ? 7 : 5;
+                    
+                    // Draw shadow for meetings
+                    if (node.type === 'meeting') {
+                      ctx.beginPath();
+                      ctx.arc(node.x + 1, node.y + 1, r, 0, 2 * Math.PI, false);
+                      ctx.fillStyle = 'rgba(0,0,0,0.1)';
+                      ctx.fill();
+                    }
+                    
+                    ctx.beginPath();
+                    ctx.arc(node.x, node.y, r, 0, 2 * Math.PI, false);
+                    ctx.fillStyle = node.color || '#888';
+                    ctx.fill();
+                    
+                    // Draw border for meeting nodes
+                    if (node.type === 'meeting') {
+                      ctx.strokeStyle = '#000';
+                      ctx.lineWidth = 2 / globalScale;
+                      ctx.stroke();
+                    }
+                    
+                    // Draw label with background for better readability
+                    const maxLen = node.type === 'meeting' ? 18 : 14;
+                    const displayLabel = label.length > maxLen ? label.substring(0, maxLen) + '...' : label;
+                    const textWidth = ctx.measureText(displayLabel).width;
+                    
+                    // Label background
+                    ctx.fillStyle = 'rgba(255,255,255,0.85)';
+                    ctx.fillRect(node.x - textWidth / 2 - 2, node.y + r + 1, textWidth + 4, fontSize + 2);
+                    
+                    // Label text
+                    ctx.textAlign = 'center';
+                    ctx.textBaseline = 'top';
+                    ctx.fillStyle = '#333';
+                    ctx.fillText(displayLabel, node.x, node.y + r + 2);
+                  }}
+                  cooldownTicks={150}
+                  d3AlphaDecay={0.015}
+                  d3VelocityDecay={0.25}
+                  d3AlphaMin={0.001}
+                  warmupTicks={50}
+                />
+              </div>
+            </>
+          )}
+        </div>
+
+        {/* Chat Panel */}
+        <AnimatePresence>
+          {showChat && kgBuilt && (
+            <motion.div
+              initial={{ x: '100%', opacity: 0 }}
+              animate={{ x: 0, opacity: 1 }}
+              exit={{ x: '100%', opacity: 0 }}
+              transition={{ type: 'spring', damping: 25, stiffness: 300 }}
+              className="w-full sm:w-[380px] max-w-[100vw] flex-shrink-0 border-l border-gray-200 bg-white flex flex-col z-20 shadow-[0_0_15px_rgba(0,0,0,0.05)]"
+            >
+              <div className="flex-none p-4 border-b border-gray-100 flex items-center justify-between">
+                <div className="flex items-center gap-2">
+                  <Sparkles className="w-4 h-4 text-purple-500" />
+                  <span className="text-sm font-bold">Chat with Knowledge</span>
+                </div>
+                <button onClick={() => setShowChat(false)} className="p-1 hover:bg-gray-100 rounded">
+                  <X className="w-4 h-4" />
+                </button>
+              </div>
+
+              {/* Chat Messages */}
+              <div className="flex-1 overflow-y-auto p-4 space-y-4">
+                {chatMessages.length === 0 && (
+                  <div className="text-center py-8">
+                    <Sparkles className="w-8 h-8 mx-auto mb-3 opacity-20" />
+                    <p className="text-sm text-gray-500">Ask questions about your meetings</p>
+                    <p className="text-xs text-gray-400 mt-1">e.g., "What decisions were made about the budget?"</p>
+                  </div>
+                )}
+                {chatMessages.map((msg, idx) => (
+                  <div key={idx} className={`flex ${msg.role === 'user' ? 'justify-end' : 'justify-start'}`}>
+                    <div className={`max-w-[85%] px-3 py-2 rounded-lg text-sm ${
+                      msg.role === 'user' 
+                        ? 'bg-[#141414] text-white' 
+                        : 'bg-gray-100 text-gray-800'
+                    }`}>
+                      {msg.content}
+                    </div>
+                  </div>
+                ))}
+                {isChatting && (
+                  <div className="flex justify-start">
+                    <div className="bg-gray-100 px-3 py-2 rounded-lg">
+                      <Loader2 className="w-4 h-4 animate-spin" />
+                    </div>
+                  </div>
+                )}
+                <div ref={chatEndRef} />
+              </div>
+
+              {/* Chat Input */}
+              <div className="flex-none p-4 border-t border-gray-100">
+                <div className="flex items-center gap-2">
+                  <input
+                    type="text"
+                    value={chatInput}
+                    onChange={(e) => setChatInput(e.target.value)}
+                    onKeyDown={(e) => e.key === 'Enter' && handleChatSubmit()}
+                    placeholder="Ask about your meetings..."
+                    className="flex-1 px-3 py-2 border border-gray-200 rounded-lg text-sm outline-none focus:border-[#141414]"
+                    disabled={isChatting}
+                  />
+                  <button
+                    onClick={handleChatSubmit}
+                    disabled={isChatting || !chatInput.trim()}
+                    className="p-2 bg-[#141414] text-white rounded-lg disabled:opacity-30 hover:bg-[#333] transition-colors"
+                  >
+                    <Send className="w-4 h-4" />
+                  </button>
+                </div>
+              </div>
+            </motion.div>
+          )}
+        </AnimatePresence>
+
+        {/* Node Detail Panel */}
+        <AnimatePresence>
+          {selectedNode && !showChat && (
+            <motion.div 
+              initial={{ x: '100%', opacity: 0 }}
+              animate={{ x: 0, opacity: 1 }}
+              exit={{ x: '100%', opacity: 0 }}
+              transition={{ type: 'spring', damping: 25, stiffness: 300 }}
+              className="w-full sm:w-[380px] max-w-[100vw] flex-shrink-0 bg-white border-l border-gray-200 overflow-y-auto overflow-x-hidden z-20 shadow-[0_0_15px_rgba(0,0,0,0.05)]"
+            >
+              <div className="p-4 border-b border-gray-100 flex items-center justify-between sticky top-0 bg-white z-10">
+                <div className="flex items-center gap-2">
+                  <span className="w-3 h-3 rounded-full" style={{ backgroundColor: selectedNode.color }} />
+                  <span className="text-[10px] font-mono uppercase font-bold text-gray-500 tracking-wider">
+                    {selectedNode.type}
+                  </span>
+                </div>
+                <button 
+                  onClick={() => setSelectedNode(null)} 
+                  className="p-1 hover:bg-gray-100 rounded"
+                >
+                  <X className="w-4 h-4" />
+                </button>
+              </div>
+              
+              <div className="p-4">
+                <h3 className="font-bold text-lg mb-4">{selectedNode.label}</h3>
+                
+                {selectedNode.type === 'meeting' && selectedNode.data && (
+                  <div className="space-y-4">
+                    {(selectedNode.data.topics || []).length > 0 && (
+                      <div>
+                        <h4 className="text-[10px] font-mono uppercase text-gray-400 mb-2 flex items-center gap-1">
+                          <MessageSquare className="w-3 h-3" /> Topics
+                        </h4>
+                        <div className="space-y-2">
+                          {selectedNode.data.topics.map((t: any, i: number) => (
+                            <div key={i} className="p-2 bg-gray-50 rounded-lg">
+                              <div className="flex items-center justify-between mb-1">
+                                <span className="text-xs font-semibold">{t.name}</span>
+                                <span className={`text-[9px] px-1.5 py-0.5 rounded ${
+                                  t.status === 'resolved' ? 'bg-green-100 text-green-700' :
+                                  t.status === 'off-track' ? 'bg-red-100 text-red-700' :
+                                  t.status === 'ongoing' ? 'bg-blue-100 text-blue-700' : 'bg-purple-100 text-purple-700'
+                                }`}>{t.status}</span>
+                              </div>
+                              <p className="text-[11px] text-gray-500">{t.summary}</p>
+                            </div>
+                          ))}
+                        </div>
+                      </div>
+                    )}
+                    
+                    {(selectedNode.data.people || []).length > 0 && (
+                      <div>
+                        <h4 className="text-[10px] font-mono uppercase text-gray-400 mb-2 flex items-center gap-1">
+                          <Users className="w-3 h-3" /> People
+                        </h4>
+                        <div className="flex flex-wrap gap-1">
+                          {selectedNode.data.people.map((p: string, i: number) => (
+                            <span key={i} className="px-2 py-1 bg-cyan-50 text-cyan-700 text-[10px] rounded">{p}</span>
+                          ))}
+                        </div>
+                      </div>
+                    )}
+                    
+                    {(selectedNode.data.decisions || []).length > 0 && (
+                      <div>
+                        <h4 className="text-[10px] font-mono uppercase text-gray-400 mb-2 flex items-center gap-1">
+                          <CheckCircle2 className="w-3 h-3" /> Decisions
+                        </h4>
+                        <ul className="space-y-1">
+                          {selectedNode.data.decisions.map((d: any, i: number) => (
+                            <li key={i} className="text-xs text-gray-700 bg-yellow-50 p-2 rounded">• {d.decision}</li>
+                          ))}
+                        </ul>
+                      </div>
+                    )}
+
+                    {(selectedNode.data.actionItems || []).length > 0 && (
+                      <div>
+                        <h4 className="text-[10px] font-mono uppercase text-gray-400 mb-2 flex items-center gap-1">
+                          <CheckCircle2 className="w-3 h-3" /> Action Items
+                        </h4>
+                        <ul className="space-y-2">
+                          {selectedNode.data.actionItems.map((a: any, i: number) => (
+                            <li key={i} className="p-2 bg-pink-50 rounded-lg">
+                              <span className="text-sm font-medium text-pink-900 block mb-1">{a.task}</span>
+                              <div className="flex items-center gap-1.5">
+                                <span className="text-[10px] text-pink-600 font-medium">Assignee: {a.owner}</span>
+                              </div>
+                            </li>
+                          ))}
+                        </ul>
+                      </div>
+                    )}
+
+                    {/* Related Meetings Section - Cross-Meeting Connections */}
+                    {(() => {
+                      const relatedMeetings = findRelatedMeetings(selectedNode.data.meetingId);
+                      if (relatedMeetings.length === 0) return null;
+                      
+                      return (
+                        <div className="border-t border-gray-200 pt-5 mt-5">
+                          <h4 className="text-[10px] font-mono uppercase tracking-widest text-gray-400 mb-4 flex items-center gap-2">
+                            <Share2 className="w-3 h-3" />
+                            Connected Meetings ({relatedMeetings.length})
+                          </h4>
+                          <div className="space-y-3">
+                            {relatedMeetings.slice(0, 5).map((related, idx) => (
+                              <ExpandableMeetingCard key={idx} related={related} idx={idx} />
+                            ))}
+                          </div>
+                          {relatedMeetings.length > 5 && (
+                            <button className="w-full mt-3 py-2 text-[10px] font-mono uppercase tracking-wider text-gray-400 hover:text-gray-600 bg-gray-50 hover:bg-gray-100 rounded-lg transition-colors">
+                              View {relatedMeetings.length - 5} More
+                            </button>
+                          )}
+                        </div>
+                      );
+                    })()}
+                  </div>
+                )}
+
+                {selectedNode.type === 'topic' && selectedNode.data && (
+                  <div className="space-y-4">
+                    <div className={`px-2 py-1 rounded text-xs inline-block ${
+                      selectedNode.data.status === 'resolved' ? 'bg-green-100 text-green-700' :
+                      selectedNode.data.status === 'off-track' ? 'bg-red-100 text-red-700' :
+                      selectedNode.data.status === 'ongoing' ? 'bg-blue-100 text-blue-700' : 'bg-purple-100 text-purple-700'
+                    }`}>
+                      Status: {selectedNode.data.status}
+                    </div>
+                    <p className="text-sm text-gray-700">{selectedNode.data.summary}</p>
+                    
+                    {selectedNode.data.allStatuses && selectedNode.data.allStatuses.length > 1 && (
+                      <div>
+                        <h4 className="text-[10px] font-mono uppercase text-gray-400 mb-2 flex items-center gap-1">
+                          <Clock className="w-3 h-3" /> Evolution
+                        </h4>
+                        <div className="space-y-2">
+                          {selectedNode.data.allStatuses.map((status: string, idx: number) => (
+                            <div key={idx} className="flex items-start gap-2">
+                              <span className={`w-2 h-2 rounded-full mt-1 ${
+                                status === 'resolved' ? 'bg-green-500' :
+                                status === 'off-track' ? 'bg-red-500' :
+                                status === 'ongoing' ? 'bg-blue-500' : 'bg-purple-500'
+                              }`} />
+                              <div>
+                                <span className="text-[10px] font-medium">{status}</span>
+                                <p className="text-[10px] text-gray-500 italic">"{selectedNode.data.allSummaries?.[idx]}"</p>
+                              </div>
+                            </div>
+                          ))}
+                        </div>
+                      </div>
+                    )}
+                  </div>
+                )}
+
+                {selectedNode.type === 'person' && selectedNode.data && (
+                  <div className="space-y-4">
+                    <div className="flex items-center gap-3">
+                      <div className="w-12 h-12 rounded-full bg-cyan-100 flex items-center justify-center">
+                        <Users className="w-6 h-6 text-cyan-600" />
+                      </div>
+                      <div>
+                        <p className="font-bold">{selectedNode.label}</p>
+                        <p className="text-xs text-gray-500">
+                          {selectedNode.data.meetings?.length || 0} meeting(s)
+                        </p>
+                      </div>
+                    </div>
+                    {selectedNode.data.meetings && (
+                      <div>
+                        <h4 className="text-[10px] font-mono uppercase text-gray-400 mb-2">Present in:</h4>
+                        <ul className="space-y-1">
+                          {selectedNode.data.meetings.map((m: string, i: number) => (
+                            <li key={i} className="text-xs text-gray-700 bg-gray-50 p-2 rounded">
+                              {m?.replace(/\.[^.]+$/, '')}
+                            </li>
+                          ))}
+                        </ul>
+                      </div>
+                    )}
+                  </div>
+                )}
+
+                {selectedNode.type === 'decision' && selectedNode.data && (
+                  <div className="space-y-4">
+                    <div className="p-3 bg-yellow-50 rounded-lg">
+                      <p className="text-sm text-yellow-900">{selectedNode.data.decision}</p>
+                    </div>
+                    <div className="text-xs text-gray-500">
+                      <p><strong>Related Topic:</strong> {selectedNode.data.relatedTopic || 'General'}</p>
+                      <p><strong>Meeting:</strong> {selectedNode.data.meetingTitle?.replace(/\.[^.]+$/, '')}</p>
+                    </div>
+                  </div>
+                )}
+
+                {selectedNode.type === 'action' && selectedNode.data && (
+                  <div className="space-y-4">
+                    <div className="p-3 bg-pink-50 rounded-lg">
+                      <p className="text-sm text-pink-900">{selectedNode.data.task}</p>
+                    </div>
+                    <div className="text-xs text-gray-500">
+                      <p><strong>Owner:</strong> {selectedNode.data.owner}</p>
+                      <p><strong>Related Topic:</strong> {selectedNode.data.relatedTopic || 'General'}</p>
+                      <p><strong>Meeting:</strong> {selectedNode.data.meetingTitle?.replace(/\.[^.]+$/, '')}</p>
+                    </div>
+                  </div>
+                )}
+              </div>
+            </motion.div>
+          )}
+        </AnimatePresence>
+      </div>
+    </div>
+  );
+}
