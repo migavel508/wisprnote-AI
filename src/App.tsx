@@ -1,4 +1,5 @@
 import React, { useState, useRef, useEffect } from 'react';
+import { Routes, Route, useNavigate, useLocation, useParams } from 'react-router-dom';
 import { 
   Upload, 
   FileAudio, 
@@ -81,6 +82,12 @@ import {
   ChatMessage
 } from './services/supabaseService';
 import Auth from './components/Auth';
+import ChatPage from './pages/ChatPage';
+import NotesPage from './pages/NotesPage';
+import AssetsPage from './pages/AssetsPage';
+import HistoryPage from './pages/HistoryPage';
+import KnowledgePage from './pages/KnowledgePage';
+import Sidebar from './components/Sidebar';
 import { Session } from '@supabase/supabase-js';
 
 declare global {
@@ -109,8 +116,52 @@ interface BatchStatus extends AudioBatch {
 }
 
 export default function App() {
+  const navigate = useNavigate();
+  const location = useLocation();
+  
+  // Derive currentView from URL path
+  const getCurrentView = (): View => {
+    const path = location.pathname;
+    if (path === '/' || path === '/process') return 'process';
+    if (path === '/history') return 'history';
+    if (path.startsWith('/notes')) return 'notes';
+    if (path.startsWith('/chat')) return 'chat';
+    if (path.startsWith('/assets')) return 'assets';
+    if (path === '/agents') return 'agents';
+    if (path === '/knowledge') return 'knowledge';
+    return 'process';
+  };
+  
+  const currentView = getCurrentView();
+  
+  // Navigation helper that uses router
+  const setCurrentView = (view: View, taskId?: string) => {
+    switch (view) {
+      case 'process':
+        navigate('/');
+        break;
+      case 'history':
+        navigate('/history');
+        break;
+      case 'notes':
+        navigate(taskId ? `/notes/${taskId}` : '/notes');
+        break;
+      case 'chat':
+        navigate(taskId ? `/chat/${taskId}` : '/chat');
+        break;
+      case 'assets':
+        navigate(taskId ? `/assets/${taskId}` : '/assets');
+        break;
+      case 'agents':
+        navigate('/agents');
+        break;
+      case 'knowledge':
+        navigate('/knowledge');
+        break;
+    }
+  };
+
   const [session, setSession] = useState<Session | null>(null);
-  const [currentView, setCurrentView] = useState<View>('process');
   const [file, setFile] = useState<File | null>(null);
   const [prompt, setPrompt] = useState('Analyze this recording...');
   const [status, setStatus] = useState<'idle' | 'splitting' | 'processing' | 'completed' | 'error'>('idle');
@@ -128,6 +179,20 @@ export default function App() {
 
   const [history, setHistory] = useState<TaskHistory[]>([]);
   const [selectedTask, setSelectedTask] = useState<TaskHistory | null>(null);
+  const [isLoadingHistory, setIsLoadingHistory] = useState(true); // Start true, set false after first fetch
+  
+  // Extract task ID from URL and load the task
+  useEffect(() => {
+    const path = location.pathname;
+    const match = path.match(/\/(notes|chat|assets)\/([^/]+)/);
+    if (match && history.length > 0) {
+      const taskId = match[2];
+      const task = history.find(t => t.id === taskId);
+      if (task && (!selectedTask || selectedTask.id !== taskId)) {
+        setSelectedTask(task);
+      }
+    }
+  }, [location.pathname, history]);
   const [noteTab, setNoteTab] = useState<NoteTab>('transcription');
   const [isSidebarOpen, setIsSidebarOpen] = useState(true);
   const [chatMessages, setChatMessages] = useState<Message[]>([]);
@@ -224,6 +289,7 @@ export default function App() {
       fetchHistory();
     }
   }, [session]);
+
 
   useEffect(() => {
     if (selectedTask) {
@@ -1337,11 +1403,14 @@ export default function App() {
 
   const fetchHistory = async () => {
     try {
+      setIsLoadingHistory(true);
       const data = await getTasks();
       setHistory(data);
       // We will sync KG data after both history and KG data are loaded, handled by a separate useEffect
     } catch (err) {
       console.error('Failed to fetch history:', err);
+    } finally {
+      setIsLoadingHistory(false);
     }
   };
 
@@ -1495,15 +1564,9 @@ export default function App() {
               Process
             </button>
             <button 
-              onClick={() => setCurrentView('history')}
-              className={`px-4 py-1.5 text-xs font-mono uppercase tracking-wider transition-colors flex-shrink-0 ${currentView === 'history' ? 'bg-[#141414] text-[#E4E3E0]' : 'hover:bg-[#141414]/5'}`}
-            >
-              History
-            </button>
-            <button 
               onClick={() => {
-                if (selectedTask) setCurrentView('notes');
-                else setCurrentView('history');
+                if (selectedTask) setCurrentView('notes', selectedTask.id);
+                else navigate('/notes');
               }}
               className={`px-4 py-1.5 text-xs font-mono uppercase tracking-wider transition-colors flex-shrink-0 ${currentView === 'notes' ? 'bg-[#141414] text-[#E4E3E0]' : 'hover:bg-[#141414]/5'}`}
             >
@@ -1511,8 +1574,8 @@ export default function App() {
             </button>
             <button 
               onClick={() => {
-                if (selectedTask) setCurrentView('chat');
-                else setCurrentView('history');
+                if (selectedTask) setCurrentView('chat', selectedTask.id);
+                else navigate('/chat');
               }}
               className={`px-4 py-1.5 text-xs font-mono uppercase tracking-wider transition-colors flex-shrink-0 ${currentView === 'chat' ? 'bg-[#141414] text-[#E4E3E0]' : 'hover:bg-[#141414]/5'}`}
             >
@@ -1520,8 +1583,8 @@ export default function App() {
             </button>
             <button 
               onClick={() => {
-                if (selectedTask) setCurrentView('assets');
-                else setCurrentView('history');
+                if (selectedTask) setCurrentView('assets', selectedTask.id);
+                else navigate('/assets');
               }}
               className={`px-4 py-1.5 text-xs font-mono uppercase tracking-wider transition-colors flex-shrink-0 ${currentView === 'assets' ? 'bg-[#141414] text-[#E4E3E0]' : 'hover:bg-[#141414]/5'}`}
             >
@@ -1562,43 +1625,25 @@ export default function App() {
       <div className="flex-1 flex overflow-hidden relative">
         {/* Sidebar for History/Notes */}
         <AnimatePresence initial={false}>
-          {isSidebarOpen && (currentView === 'history' || currentView === 'notes' || currentView === 'chat') && (
-            <motion.aside 
-              initial={{ width: 0, opacity: 0 }}
-              animate={{ width: window.innerWidth < 640 ? '100%' : 256, opacity: 1 }}
-              exit={{ width: 0, opacity: 0 }}
-              className={`border-r border-[#141414] bg-[#F5F5F5] flex flex-col overflow-hidden whitespace-nowrap z-40 ${window.innerWidth < 640 ? 'absolute inset-0' : 'relative'}`}
-            >
-              <div className="p-4 border-b border-[#141414] flex items-center justify-between">
-                <span className="text-[10px] font-mono uppercase opacity-50">Recent Tasks</span>
-                <Plus className="w-4 h-4 cursor-pointer opacity-50 hover:opacity-100" onClick={() => setCurrentView('process')} />
-              </div>
-              <div className="flex-1 overflow-y-auto">
-                {history.map((task) => (
-                  <div 
-                    key={task.id}
-                    onClick={() => {
-                      setSelectedTask(task);
-                      setCurrentView('notes');
-                    }}
-                    className={`p-3 border-b border-[#141414]/5 cursor-pointer hover:bg-white transition-colors group ${selectedTask?.id === task.id ? 'bg-white' : ''}`}
-                  >
-                    <div className="flex items-center gap-2 mb-1">
-                      <FileAudio className="w-3 h-3 opacity-50" />
-                      <span className="text-xs font-bold truncate block max-w-[180px]">{task.filename}</span>
-                    </div>
-                    <div className="text-[10px] opacity-40 font-mono">
-                      {new Date(task.created_at!).toLocaleDateString()}
-                    </div>
-                  </div>
-                ))}
-              </div>
-            </motion.aside>
+          {isSidebarOpen && (currentView === 'history' || currentView === 'notes' || currentView === 'chat' || currentView === 'assets') && (
+            <Sidebar
+              history={history}
+              selectedTask={selectedTask}
+              isLoading={isLoadingHistory}
+              onSelectTask={(task) => {
+                setSelectedTask(task);
+                setCurrentView('notes', task.id);
+              }}
+              onNewTask={() => setCurrentView('process')}
+              onClose={() => setIsSidebarOpen(false)}
+              onViewAllChats={() => setCurrentView('history')}
+              isMobile={window.innerWidth < 640}
+            />
           )}
         </AnimatePresence>
 
         {/* Sidebar Toggle Button */}
-        {(currentView === 'history' || currentView === 'notes' || currentView === 'chat') && (
+        {(currentView === 'history' || currentView === 'notes' || currentView === 'chat' || currentView === 'assets') && (
           <button 
             onClick={() => setIsSidebarOpen(!isSidebarOpen)}
             className="fixed sm:absolute left-0 top-1/2 -translate-y-1/2 z-50 bg-[#141414] text-white p-1 rounded-r-md shadow-lg hover:bg-[#333] transition-all"
@@ -1608,7 +1653,7 @@ export default function App() {
           </button>
         )}
 
-        <main className="flex-1 overflow-y-auto bg-[#E4E3E0] w-full">
+        <main className={`flex-1 bg-[#E4E3E0] w-full relative ${(currentView === 'chat' || currentView === 'notes' || currentView === 'assets' || currentView === 'history') ? 'overflow-hidden' : 'overflow-y-auto'}`}>
           <AnimatePresence mode="wait">
             {currentView === 'process' && (
               <motion.div 
@@ -1801,544 +1846,102 @@ export default function App() {
             )}
 
             {currentView === 'history' && (
-              <motion.div 
-                key="history"
-                initial={{ opacity: 0 }}
-                animate={{ opacity: 1 }}
-                className="p-4 sm:p-8 max-w-5xl mx-auto"
-              >
-                <div className="flex flex-col sm:flex-row items-start sm:items-center justify-between gap-4 mb-8">
-                  <h2 className="text-3xl font-serif italic font-bold">Transcription History</h2>
-                  <div className="flex items-center gap-2 border border-[#141414] bg-white px-3 py-1.5 w-full sm:w-auto">
-                    <Search className="w-4 h-4 opacity-50" />
-                    <input type="text" placeholder="Search tasks..." className="bg-transparent border-none outline-none text-xs font-mono w-full sm:w-48" />
-                  </div>
-                </div>
-
-                <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-6">
-                  {history.map((task) => (
-                    <motion.div 
-                      key={task.id}
-                      whileHover={{ y: -4 }}
-                      onClick={() => {
-                        setSelectedTask(task);
-                        setCurrentView('notes');
-                      }}
-                      className="border border-[#141414] bg-white p-6 shadow-[4px_4px_0px_0px_rgba(20,20,20,1)] cursor-pointer group"
-                    >
-                      <div className="flex justify-between items-start mb-4">
-                        <div className="p-2 bg-[#141414]/5 rounded">
-                          <FileAudio className="w-6 h-6" />
-                        </div>
-                        <span className="text-[10px] font-mono opacity-40 uppercase">{new Date(task.created_at!).toLocaleDateString()}</span>
-                      </div>
-                      <h3 className="font-bold text-sm mb-2 group-hover:underline truncate">{task.filename}</h3>
-                      <p className="text-[10px] opacity-50 line-clamp-3 font-mono mb-4">
-                        {task.summary || task.transcription.substring(0, 100) + '...'}
-                      </p>
-                      <div className="flex items-center gap-2 text-[10px] font-mono uppercase tracking-widest opacity-0 group-hover:opacity-100 transition-opacity">
-                        View Details <ChevronRight className="w-3 h-3" />
-                      </div>
-                    </motion.div>
-                  ))}
-                </div>
-              </motion.div>
+              <HistoryPage
+                history={history}
+                onSelectTask={(task) => {
+                  setSelectedTask(task);
+                  setCurrentView('notes', task.id);
+                }}
+              />
             )}
 
-            {currentView === 'notes' && selectedTask && (
-              <motion.div 
-                key="notes"
-                initial={{ opacity: 0 }}
-                animate={{ opacity: 1 }}
-                className="min-h-full bg-white flex flex-col"
-              >
-                {/* Notion Style Header */}
-                <div className="max-w-4xl mx-auto w-full px-4 sm:px-8 pt-8 sm:pt-16 pb-8">
-                  <div className="flex items-center gap-4 mb-6 opacity-50 text-sm overflow-x-auto no-scrollbar whitespace-nowrap">
-                    <BookOpen className="w-4 h-4 flex-shrink-0" />
-                    <span>Library</span>
-                    <span>/</span>
-                    <span className="truncate">{selectedTask.filename}</span>
-                  </div>
-                  
-                  <h1 className="text-3xl sm:text-5xl font-bold mb-8 tracking-tight break-words">{selectedTask.filename}</h1>
-                  
-                  <div className="flex flex-col sm:flex-row items-start sm:items-center gap-4 sm:gap-8 border-b border-[#141414]/10 mb-8 pb-4 sm:pb-0">
-                    <div className="flex items-center gap-6 w-full sm:w-auto">
-                      <div className="flex flex-col gap-1 pb-4 sm:pb-4">
-                        <span className="text-[10px] font-mono uppercase opacity-40">Created</span>
-                        <span className="text-xs font-medium">{new Date(selectedTask.created_at!).toLocaleString()}</span>
-                      </div>
-                      <div className="flex flex-col gap-1 pb-4 sm:pb-4">
-                        <span className="text-[10px] font-mono uppercase opacity-40">Prompt</span>
-                        <span className="text-xs font-medium truncate max-w-[120px] sm:max-w-[200px]">{selectedTask.prompt || 'Default Transcription'}</span>
-                      </div>
-                    </div>
-                    <button 
-                      onClick={() => setCurrentView('assets')}
-                      className="w-full sm:w-auto sm:ml-auto flex items-center justify-center gap-2 px-4 py-2 border border-[#141414] text-xs font-mono uppercase tracking-widest hover:bg-[#141414] hover:text-white transition-all"
-                    >
-                      <FileBox className="w-4 h-4" />
-                      Generate Assets
-                    </button>
-                  </div>
-
-                  {/* UI Switcher (Image Inspired) */}
-                  <div className="flex justify-center mb-12 overflow-x-auto no-scrollbar">
-                    <div className="flex gap-2 sm:gap-4 overflow-x-auto no-scrollbar">
-                      <button 
-                        onClick={() => setNoteTab('transcription')}
-                        className={`px-4 sm:px-6 py-2 rounded-lg text-sm font-medium transition-all ${noteTab === 'transcription' ? 'bg-[#141414] text-white shadow-lg' : 'text-[#141414]/60 hover:text-[#141414]'}`}
-                      >
-                        Transcription
-                      </button>
-                      <button 
-                        onClick={() => setNoteTab('summary')}
-                        className={`px-4 sm:px-6 py-2 rounded-lg text-sm font-medium transition-all ${noteTab === 'summary' ? 'bg-[#141414] text-white shadow-lg' : 'text-[#141414]/60 hover:text-[#141414]'}`}
-                      >
-                        Summary
-                      </button>
-                      <button 
-                        onClick={() => setNoteTab('notes')}
-                        className={`px-4 sm:px-6 py-2 rounded-lg text-sm font-medium transition-all ${noteTab === 'notes' ? 'bg-[#141414] text-white shadow-lg' : 'text-[#141414]/60 hover:text-[#141414]'}`}
-                      >
-                        Notes
-                      </button>
-                    </div>
-                  </div>
-
-                  {/* Content Area */}
-                  <div className="prose prose-lg max-w-none pb-32">
-                    <AnimatePresence mode="wait">
-                      <motion.div
-                        key={noteTab}
-                        initial={{ opacity: 0, x: 10 }}
-                        animate={{ opacity: 1, x: 0 }}
-                        exit={{ opacity: 0, x: -10 }}
-                        transition={{ duration: 0.2 }}
-                        className="markdown-body"
-                      >
-                        {noteTab === 'transcription' && (
-                          <div className="space-y-4">
-                            <Markdown remarkPlugins={[remarkGfm]}>{selectedTask.transcription}</Markdown>
-                          </div>
-                        )}
-                        {noteTab === 'summary' && (
-                          <div className="bg-[#F5F5F5] p-4 sm:p-8 rounded-2xl border border-[#141414]/5">
-                            <h3 className="text-xl font-serif italic mb-4">Key Summary</h3>
-                            <Markdown remarkPlugins={[remarkGfm]}>{selectedTask.summary || 'No summary generated.'}</Markdown>
-                          </div>
-                        )}
-                        {noteTab === 'notes' && (
-                          <div className="space-y-6">
-                            <Markdown remarkPlugins={[remarkGfm]}>{selectedTask.notes || 'No structured notes generated.'}</Markdown>
-                          </div>
-                        )}
-                      </motion.div>
-                    </AnimatePresence>
-                  </div>
+            {currentView === 'notes' && (
+              selectedTask ? (
+                <NotesPage
+                  selectedTask={selectedTask}
+                  onNavigateToAssets={() => setCurrentView('assets', selectedTask.id)}
+                />
+              ) : (
+                <div className="absolute inset-0 flex flex-col items-center justify-center bg-white">
+                  <BookOpen className="w-16 h-16 mb-4 opacity-10" />
+                  <h2 className="text-xl font-bold mb-2 opacity-60">No Meeting Selected</h2>
+                  <p className="text-sm opacity-40 mb-6 text-center max-w-md">
+                    {history.length > 0 
+                      ? "Select a meeting from the sidebar to view its notes"
+                      : "Process your first audio to get started with notes"}
+                  </p>
+                  <button
+                    onClick={() => setCurrentView('process')}
+                    className="px-6 py-2 bg-[#141414] text-white text-xs font-mono uppercase tracking-widest hover:bg-[#333] transition-colors"
+                  >
+                    Process Audio
+                  </button>
                 </div>
-              </motion.div>
+              )
             )}
 
-            {currentView === 'chat' && selectedTask && (
-              <motion.div 
-                key="chat"
-                initial={{ opacity: 0 }}
-                animate={{ opacity: 1 }}
-                className="h-full flex flex-col bg-white"
-              >
-                {/* Header breadcrumb */}
-                <div className="flex items-center gap-3 px-6 py-4 opacity-50 text-xs font-mono uppercase tracking-widest overflow-x-auto no-scrollbar whitespace-nowrap border-b border-[#141414]/10 bg-white sticky top-0 z-20">
-                  <MessageSquare className="w-4 h-4 flex-shrink-0" />
-                  <span className="truncate">{selectedTask.filename}</span>
-                  <span>/</span>
-                  <span className="font-bold text-[#141414]">AI Chat</span>
+            {currentView === 'chat' && (
+              selectedTask ? (
+                <ChatPage
+                  selectedTask={selectedTask}
+                  chatMessages={chatMessages}
+                  chatInput={chatInput}
+                  setChatInput={setChatInput}
+                  isChatting={isChatting}
+                  isGeneratingImage={isGeneratingImage}
+                  handleSendMessage={handleSendMessage}
+                  handleVisualize={handleVisualize}
+                />
+              ) : (
+                <div className="absolute inset-0 flex flex-col items-center justify-center bg-white">
+                  <MessageSquare className="w-16 h-16 mb-4 opacity-10" />
+                  <h2 className="text-xl font-bold mb-2 opacity-60">No Meeting Selected</h2>
+                  <p className="text-sm opacity-40 mb-6 text-center max-w-md">
+                    {history.length > 0 
+                      ? "Select a meeting from the sidebar to start chatting"
+                      : "Process your first audio to start chatting about it"}
+                  </p>
+                  <button
+                    onClick={() => setCurrentView('process')}
+                    className="px-6 py-2 bg-[#141414] text-white text-xs font-mono uppercase tracking-widest hover:bg-[#333] transition-colors"
+                  >
+                    Process Audio
+                  </button>
                 </div>
-
-                <div className="flex-1 overflow-y-auto bg-white scrollbar-thin relative flex flex-col">
-                  {/* Chat History & Empty State */}
-                  <div className="flex-1 max-w-3xl w-full mx-auto p-4 sm:p-8 flex flex-col">
-                    {chatMessages.length === 0 ? (
-                      <div className="flex-1 flex flex-col items-center justify-center text-center mt-10">
-                        <h1 className="text-4xl sm:text-5xl font-bold tracking-tight mb-4">Welcome to Chat</h1>
-                        <p className="text-base sm:text-lg text-[#141414]/60 max-w-xl mb-12">
-                          Ask anything about <span className="font-semibold text-[#141414]">{selectedTask.filename}</span>. Not sure where to start?
-                        </p>
-                        
-                        <div className="grid grid-cols-1 sm:grid-cols-2 gap-4 w-full max-w-2xl">
-                          <button 
-                            onClick={() => { setChatInput('Summarize the key decisions made in this meeting.'); handleSendMessage(); }}
-                            className="flex items-center justify-between p-4 border border-[#141414]/10 rounded-2xl hover:border-[#141414] hover:shadow-[4px_4px_0px_0px_rgba(20,20,20,1)] transition-all bg-white group text-left"
-                          >
-                            <div className="flex items-center gap-3">
-                              <div className="w-10 h-10 rounded-full bg-yellow-100 flex items-center justify-center text-yellow-600">
-                                <FileText className="w-5 h-5" />
-                              </div>
-                              <span className="font-medium text-sm">Summarize decisions</span>
-                            </div>
-                            <Plus className="w-4 h-4 opacity-30 group-hover:opacity-100 transition-opacity" />
-                          </button>
-
-                          <button 
-                            onClick={() => { setChatInput('What are my action items from this discussion?'); handleSendMessage(); }}
-                            className="flex items-center justify-between p-4 border border-[#141414]/10 rounded-2xl hover:border-[#141414] hover:shadow-[4px_4px_0px_0px_rgba(20,20,20,1)] transition-all bg-white group text-left"
-                          >
-                            <div className="flex items-center gap-3">
-                              <div className="w-10 h-10 rounded-full bg-blue-100 flex items-center justify-center text-blue-600">
-                                <CheckCircle2 className="w-5 h-5" />
-                              </div>
-                              <span className="font-medium text-sm">List action items</span>
-                            </div>
-                            <Plus className="w-4 h-4 opacity-30 group-hover:opacity-100 transition-opacity" />
-                          </button>
-
-                          <button 
-                            onClick={() => { setChatInput('Extract all the main topics discussed and generate a concept flowchart.'); handleSendMessage(); }}
-                            className="flex items-center justify-between p-4 border border-[#141414]/10 rounded-2xl hover:border-[#141414] hover:shadow-[4px_4px_0px_0px_rgba(20,20,20,1)] transition-all bg-white group text-left"
-                          >
-                            <div className="flex items-center gap-3">
-                              <div className="w-10 h-10 rounded-full bg-purple-100 flex items-center justify-center text-purple-600">
-                                <Network className="w-5 h-5" />
-                              </div>
-                              <span className="font-medium text-sm">Map concepts</span>
-                            </div>
-                            <Plus className="w-4 h-4 opacity-30 group-hover:opacity-100 transition-opacity" />
-                          </button>
-
-                          <button 
-                            onClick={() => { setChatInput('Generate a professional follow-up email to send to the team.'); handleSendMessage(); }}
-                            className="flex items-center justify-between p-4 border border-[#141414]/10 rounded-2xl hover:border-[#141414] hover:shadow-[4px_4px_0px_0px_rgba(20,20,20,1)] transition-all bg-white group text-left"
-                          >
-                            <div className="flex items-center gap-3">
-                              <div className="w-10 h-10 rounded-full bg-green-100 flex items-center justify-center text-green-600">
-                                <Mail className="w-5 h-5" />
-                              </div>
-                              <span className="font-medium text-sm">Draft follow-up email</span>
-                            </div>
-                            <Plus className="w-4 h-4 opacity-30 group-hover:opacity-100 transition-opacity" />
-                          </button>
-                        </div>
-                      </div>
-                    ) : (
-                      <div className="space-y-8 pb-8 pt-4">
-                        {chatMessages.map((msg, i) => (
-                          <motion.div 
-                            key={i}
-                            initial={{ opacity: 0, y: 10 }}
-                            animate={{ opacity: 1, y: 0 }}
-                            className={`flex ${msg.role === 'user' ? 'justify-end' : 'justify-start'}`}
-                          >
-                            <div className={`max-w-[90%] sm:max-w-[85%] ${
-                              msg.role === 'user' 
-                                ? 'bg-[#F5F5F5] text-[#141414] px-6 py-4 rounded-3xl rounded-tr-sm' 
-                                : 'bg-transparent text-[#141414]'
-                            }`}>
-                              {msg.role === 'model' && (
-                                <div className="flex items-center gap-3 mb-2">
-                                  <div className="w-8 h-8 rounded-full bg-[#141414] flex items-center justify-center shadow-sm">
-                                    <Sparkles className="w-4 h-4 text-white" />
-                                  </div>
-                                  <span className="font-bold text-sm">Lumina AI</span>
-                                </div>
-                              )}
-                              
-                              <div className={`prose prose-sm sm:prose-base max-w-none w-full ${
-                                msg.role === 'model' 
-                                  ? 'pl-11 prose-p:leading-loose prose-p:mb-6 prose-headings:font-bold prose-headings:mt-8 prose-headings:mb-4 prose-ul:my-6 prose-li:my-2 prose-li:leading-loose prose-strong:text-[#141414] text-[#141414]/90' 
-                                  : 'prose-p:leading-loose'
-                              }`}>
-                                <Markdown remarkPlugins={[remarkGfm]}>{msg.text}</Markdown>
-                              </div>
-                              
-                              {msg.image && (
-                                <div className={`mt-6 rounded-2xl overflow-hidden border border-[#141414]/10 shadow-sm ${msg.role === 'model' ? 'ml-11' : ''}`}>
-                                  <img src={msg.image} alt="Concept Visualization" className="w-full h-auto" />
-                                </div>
-                              )}
-                              
-                              {msg.role === 'model' && !msg.image && !isGeneratingImage && (
-                                <div className="mt-4 ml-11">
-                                  <button 
-                                    onClick={() => handleVisualize(msg.text.substring(0, 100))}
-                                    className="flex items-center gap-2 text-xs font-medium text-[#141414]/60 hover:text-[#141414] transition-colors bg-[#F5F5F5] hover:bg-[#EAEAEA] px-3 py-1.5 rounded-full"
-                                  >
-                                    <ImageIcon className="w-3 h-3" /> Visualize Response
-                                  </button>
-                                </div>
-                              )}
-                            </div>
-                          </motion.div>
-                        ))}
-                        
-                        {isChatting && (
-                          <motion.div 
-                            initial={{ opacity: 0 }} 
-                            animate={{ opacity: 1 }} 
-                            className="flex justify-start"
-                          >
-                            <div className="flex items-center gap-3">
-                              <div className="w-8 h-8 rounded-full bg-[#141414] flex items-center justify-center shadow-sm">
-                                <Sparkles className="w-4 h-4 text-white" />
-                              </div>
-                              <div className="flex items-center gap-1.5 px-4 py-3 bg-[#F5F5F5] rounded-3xl rounded-tl-sm">
-                                <motion.div className="w-1.5 h-1.5 bg-[#141414] rounded-full" animate={{ y: [0, -3, 0] }} transition={{ duration: 0.6, repeat: Infinity, delay: 0 }} />
-                                <motion.div className="w-1.5 h-1.5 bg-[#141414] rounded-full" animate={{ y: [0, -3, 0] }} transition={{ duration: 0.6, repeat: Infinity, delay: 0.2 }} />
-                                <motion.div className="w-1.5 h-1.5 bg-[#141414] rounded-full" animate={{ y: [0, -3, 0] }} transition={{ duration: 0.6, repeat: Infinity, delay: 0.4 }} />
-                              </div>
-                            </div>
-                          </motion.div>
-                        )}
-                        <div ref={chatEndRef} />
-                      </div>
-                    )}
-                  </div>
-                  
-                  {/* Sticky Chat Input Area */}
-                  <div className="sticky bottom-0 bg-gradient-to-t from-white via-white to-transparent pt-6 pb-6 px-4 sm:px-8 w-full z-10">
-                    <div className="max-w-3xl mx-auto">
-                      <div className="bg-white border border-[#141414]/20 rounded-2xl shadow-[0_8px_30px_rgb(0,0,0,0.04)] focus-within:border-[#141414] focus-within:shadow-[0_8px_30px_rgb(0,0,0,0.08)] transition-all overflow-hidden flex flex-col">
-                        <textarea 
-                          value={chatInput}
-                          onChange={(e) => setChatInput(e.target.value)}
-                          onKeyDown={(e) => {
-                            if (e.key === 'Enter' && !e.shiftKey) {
-                              e.preventDefault();
-                              handleSendMessage();
-                            }
-                          }}
-                          placeholder="Ask a question about the meeting..."
-                          className="w-full bg-transparent border-none outline-none px-5 py-4 text-base font-sans resize-none max-h-40 min-h-[60px]"
-                          rows={1}
-                        />
-                        
-                        <div className="px-3 pb-3 pt-1 flex items-center justify-between border-t border-[#141414]/5">
-                          <div className="flex items-center gap-1">
-                            <button className="flex items-center gap-1.5 px-3 py-1.5 rounded-lg text-xs font-medium text-[#141414]/60 hover:bg-[#F5F5F5] hover:text-[#141414] transition-colors">
-                              <ImageIcon className="w-3.5 h-3.5" /> Visualize
-                            </button>
-                            <button className="flex items-center gap-1.5 px-3 py-1.5 rounded-lg text-xs font-medium text-[#141414]/60 hover:bg-[#F5F5F5] hover:text-[#141414] transition-colors">
-                              <Sparkles className="w-3.5 h-3.5" /> Prompts
-                            </button>
-                          </div>
-                          
-                          <div className="flex items-center gap-3">
-                            <span className="text-[10px] font-mono text-[#141414]/40 hidden sm:block">
-                              {chatInput.length} / 4000
-                            </span>
-                            <button 
-                              onClick={handleSendMessage}
-                              disabled={!chatInput.trim() || isChatting}
-                              className="w-8 h-8 bg-[#141414] text-white flex items-center justify-center rounded-lg hover:bg-[#333] disabled:opacity-30 disabled:bg-[#141414]/50 transition-all"
-                            >
-                              <Send className="w-4 h-4" />
-                            </button>
-                          </div>
-                        </div>
-                      </div>
-                      
-                      <div className="text-center mt-3 text-[10px] text-[#141414]/40 font-medium">
-                        Lumina AI can make mistakes. Consider verifying important information.
-                      </div>
-                    </div>
-                  </div>
-                </div>
-              </motion.div>
+              )
             )}
 
-            {currentView === 'assets' && selectedTask && (
-              <motion.div 
-                key="assets"
-                initial={{ opacity: 0 }}
-                animate={{ opacity: 1 }}
-                className="min-h-full bg-white p-4 sm:p-8"
-              >
-                <div className="max-w-5xl mx-auto">
-                  <div className="flex items-center gap-4 mb-8 opacity-50 text-sm overflow-x-auto no-scrollbar whitespace-nowrap">
-                    <FileBox className="w-4 h-4 flex-shrink-0" />
-                    <span>Library</span>
-                    <span>/</span>
-                    <span className="truncate">{selectedTask.filename}</span>
-                    <span>/</span>
-                    <span>Assets</span>
-                  </div>
-
-                  <h1 className="text-3xl sm:text-4xl font-bold mb-12 tracking-tight">Content Assets</h1>
-
-                  <div className="grid grid-cols-1 lg:grid-cols-3 gap-12">
-                    <div className="lg:col-span-2 space-y-8">
-                      {/* Generation Options */}
-                      <section className="grid grid-cols-1 md:grid-cols-2 gap-6">
-                        <div className="border border-[#141414] p-6 bg-white shadow-[4px_4px_0px_0px_rgba(20,20,20,1)] flex flex-col">
-                          <div className="flex items-center gap-3 mb-6">
-                            <div className="p-3 bg-orange-100 text-orange-600 rounded-xl">
-                              <Presentation className="w-6 h-6" />
-                            </div>
-                            <div>
-                              <h3 className="font-bold">Presentation</h3>
-                              <p className="text-[10px] opacity-50 uppercase font-mono">PPTX Format</p>
-                            </div>
-                          </div>
-                          
-                          <div className="flex-1 space-y-4 mb-8">
-                            <div className="flex flex-col gap-2">
-                              <label className="text-[10px] font-mono uppercase opacity-50">Slide Count</label>
-                              <input 
-                                type="number" 
-                                min="3" 
-                                max="20" 
-                                value={isNaN(slideCount) ? '' : slideCount}
-                                onChange={(e) => {
-                                  const val = parseInt(e.target.value);
-                                  setSlideCount(isNaN(val) ? 0 : val);
-                                }}
-                                className="border border-[#141414] p-2 text-sm font-mono"
-                              />
-                            </div>
-                            <p className="text-xs opacity-60">Generate a professional slide deck based on the transcription content.</p>
-                          </div>
-
-                          <button 
-                            onClick={handleGeneratePPT}
-                            disabled={isGeneratingAsset}
-                            className="w-full py-3 bg-[#141414] text-white font-bold uppercase tracking-widest text-xs hover:bg-[#333] disabled:opacity-30 flex items-center justify-center gap-2"
-                          >
-                            {isGeneratingAsset ? <Loader2 className="w-4 h-4 animate-spin" /> : <Download className="w-4 h-4" />}
-                            Generate PPT
-                          </button>
-                        </div>
-
-                        <div className="border border-[#141414] p-6 bg-white shadow-[4px_4px_0px_0px_rgba(20,20,20,1)] flex flex-col">
-                          <div className="flex items-center gap-3 mb-6">
-                            <div className="p-3 bg-blue-100 text-blue-600 rounded-xl">
-                              <FileText className="w-6 h-6" />
-                            </div>
-                            <div>
-                              <h3 className="font-bold">Formal Report</h3>
-                              <p className="text-[10px] opacity-50 uppercase font-mono">DOCX Format</p>
-                            </div>
-                          </div>
-                          
-                          <div className="flex-1 mb-8">
-                            <p className="text-xs opacity-60">Create a structured, professional document with executive summary and detailed sections.</p>
-                          </div>
-
-                          <button 
-                            onClick={handleGenerateReport}
-                            disabled={isGeneratingAsset}
-                            className="w-full py-3 bg-[#141414] text-white font-bold uppercase tracking-widest text-xs hover:bg-[#333] disabled:opacity-30 flex items-center justify-center gap-2"
-                          >
-                            {isGeneratingAsset ? <Loader2 className="w-4 h-4 animate-spin" /> : <Download className="w-4 h-4" />}
-                            Generate DOCX
-                          </button>
-                        </div>
-                      </section>
-
-                      {/* Preview Area */}
-                      <section className="border border-[#141414] bg-[#F5F5F5] p-4 sm:p-8 rounded-2xl min-h-[400px] flex flex-col">
-                        {!selectedAsset ? (
-                          <div className="flex-1 flex flex-col items-center justify-center text-center">
-                            <Sparkles className="w-12 h-12 mb-4 opacity-10" />
-                            <h3 className="text-lg font-serif italic opacity-30">Asset Preview</h3>
-                            <p className="text-xs opacity-30 mt-2">Generate or select an asset to see its structure here</p>
-                          </div>
-                        ) : (
-                          <div className="flex-1 overflow-y-auto">
-                            <div className="flex items-center justify-between mb-6 border-b border-[#141414]/10 pb-4">
-                              <div className="flex items-center gap-3">
-                                {selectedAsset.type === 'ppt' ? <Presentation className="w-5 h-5 text-orange-600" /> : <FileText className="w-5 h-5 text-blue-600" />}
-                                <h3 className="font-bold text-sm">{selectedAsset.filename}</h3>
-                              </div>
-                              <button 
-                                onClick={() => downloadExistingAsset(selectedAsset)}
-                                className="flex items-center gap-2 px-3 py-1.5 bg-[#141414] text-white text-[10px] font-mono uppercase tracking-widest hover:bg-[#333] transition-all"
-                              >
-                                <Download className="w-3 h-3" />
-                                Download
-                              </button>
-                            </div>
-
-                            <div className="bg-white p-6 sm:p-8 border border-[#141414]/5 shadow-sm rounded-xl">
-                              {selectedAsset.type === 'ppt' ? (
-                                <div className="space-y-8">
-                                  <div className="text-center py-12 border-b border-[#141414]/5">
-                                    <h2 className="text-3xl font-bold tracking-tight mb-2">{selectedAsset.content.title}</h2>
-                                    <p className="text-xs font-mono opacity-40 uppercase tracking-widest">Title Slide</p>
-                                  </div>
-                                  {selectedAsset.content.slides.map((slide: any, idx: number) => (
-                                    <div key={idx} className="space-y-4">
-                                      <div className="flex items-center gap-4">
-                                        <span className="text-[10px] font-mono opacity-30 uppercase">Slide {idx + 1}</span>
-                                        <h4 className="font-bold text-lg">{slide.title}</h4>
-                                      </div>
-                                      <ul className="space-y-2 pl-4 border-l-2 border-[#141414]/5">
-                                        {slide.content.map((bullet: string, bidx: number) => (
-                                          <li key={bidx} className="text-sm opacity-70 flex items-start gap-2">
-                                            <span className="mt-1.5 w-1.5 h-1.5 rounded-full bg-[#141414]/20 flex-shrink-0" />
-                                            {bullet}
-                                          </li>
-                                        ))}
-                                      </ul>
-                                    </div>
-                                  ))}
-                                </div>
-                              ) : (
-                                <div className="space-y-8">
-                                  <div className="border-b border-[#141414]/5 pb-6">
-                                    <h2 className="text-3xl font-bold tracking-tight">{selectedAsset.content.title}</h2>
-                                  </div>
-                                  {selectedAsset.content.sections.map((section: any, idx: number) => (
-                                    <div key={idx} className="space-y-3">
-                                      <h4 className="font-bold text-lg uppercase tracking-tight">{section.heading}</h4>
-                                      <p className="text-sm leading-relaxed opacity-70">{section.body}</p>
-                                    </div>
-                                  ))}
-                                </div>
-                              )}
-                            </div>
-                          </div>
-                        )}
-                      </section>
-                    </div>
-
-                    {/* Asset History Sidebar */}
-                    <div className="space-y-6">
-                      <h3 className="text-xs font-mono uppercase tracking-widest opacity-50">Generated Assets</h3>
-                      <div className="space-y-3">
-                        {assetHistory.length === 0 && (
-                          <div className="p-8 border border-dashed border-[#141414]/20 text-center rounded-xl">
-                            <p className="text-[10px] font-mono opacity-40 uppercase">No assets yet</p>
-                          </div>
-                        )}
-                        {assetHistory.map((asset) => (
-                          <div 
-                            key={asset.id}
-                            onClick={() => setSelectedAsset(asset)}
-                            className={`p-4 border border-[#141414] shadow-[2px_2px_0px_0px_rgba(20,20,20,1)] flex items-center justify-between group cursor-pointer transition-all ${selectedAsset?.id === asset.id ? 'bg-[#141414] text-white shadow-none translate-x-[2px] translate-y-[2px]' : 'bg-white hover:bg-[#F5F5F5]'}`}
-                          >
-                            <div className="flex items-center gap-3 overflow-hidden">
-                              {asset.type === 'ppt' ? <Presentation className={`w-4 h-4 ${selectedAsset?.id === asset.id ? 'text-orange-400' : 'text-orange-600'}`} /> : <FileIcon className={`w-4 h-4 ${selectedAsset?.id === asset.id ? 'text-blue-400' : 'text-blue-600'}`} />}
-                              <div className="overflow-hidden">
-                                <p className="text-xs font-bold truncate">{asset.filename}</p>
-                                <p className={`text-[8px] font-mono uppercase ${selectedAsset?.id === asset.id ? 'opacity-60' : 'opacity-40'}`}>{new Date(asset.created_at!).toLocaleDateString()}</p>
-                              </div>
-                            </div>
-                            <button 
-                              onClick={(e) => {
-                                e.stopPropagation();
-                                downloadExistingAsset(asset);
-                              }}
-                              className={`p-2 rounded-lg transition-all ${selectedAsset?.id === asset.id ? 'hover:bg-white/10' : 'hover:bg-[#141414] hover:text-white'}`}
-                            >
-                              <Download className="w-4 h-4" />
-                            </button>
-                          </div>
-                        ))}
-                      </div>
-                    </div>
-                  </div>
+            {currentView === 'assets' && (
+              selectedTask ? (
+                <AssetsPage
+                  selectedTask={selectedTask}
+                  slideCount={slideCount}
+                  setSlideCount={setSlideCount}
+                  isGeneratingAsset={isGeneratingAsset}
+                  handleGeneratePPT={handleGeneratePPT}
+                  handleGenerateReport={handleGenerateReport}
+                  selectedAsset={selectedAsset}
+                  setSelectedAsset={setSelectedAsset}
+                  assetHistory={assetHistory}
+                  downloadExistingAsset={downloadExistingAsset}
+                />
+              ) : (
+                <div className="absolute inset-0 flex flex-col items-center justify-center bg-white">
+                  <FileBox className="w-16 h-16 mb-4 opacity-10" />
+                  <h2 className="text-xl font-bold mb-2 opacity-60">No Meeting Selected</h2>
+                  <p className="text-sm opacity-40 mb-6 text-center max-w-md">
+                    {history.length > 0 
+                      ? "Select a meeting from the sidebar to generate assets"
+                      : "Process your first audio to generate presentations and reports"}
+                  </p>
+                  <button
+                    onClick={() => setCurrentView('process')}
+                    className="px-6 py-2 bg-[#141414] text-white text-xs font-mono uppercase tracking-widest hover:bg-[#333] transition-colors"
+                  >
+                    Process Audio
+                  </button>
                 </div>
-              </motion.div>
+              )
             )}
 
             {currentView === 'agents' && (
@@ -2823,744 +2426,15 @@ export default function App() {
             )}
 
             {currentView === 'knowledge' && (
-              <motion.div 
-                key="knowledge"
-                initial={{ opacity: 0 }}
-                animate={{ opacity: 1 }}
-                exit={{ opacity: 0 }}
-                className="h-full flex flex-col"
-              >
-                <div className="p-4 sm:p-6 border-b border-[#141414]/10 bg-white flex flex-col sm:flex-row items-start sm:items-center justify-between gap-4">
-                  <div>
-                    <h2 className="text-xl font-bold tracking-tight flex items-center gap-2">
-                      <Share2 className="w-5 h-5" />
-                      Knowledge Graph
-                    </h2>
-                    <p className="text-xs opacity-50 mt-1">Cross-meeting memory — see how topics, decisions, and people connect across all your meetings</p>
-                  </div>
-                  <button 
-                    onClick={buildKnowledgeGraph}
-                    disabled={isLoadingKG || history.length === 0}
-                    className="px-6 py-2.5 bg-[#141414] text-white text-xs font-mono uppercase tracking-widest hover:bg-[#333] disabled:opacity-30 flex items-center gap-2 rounded-lg transition-colors"
-                  >
-                    {isLoadingKG ? <Loader2 className="w-4 h-4 animate-spin" /> : <Network className="w-4 h-4" />}
-                    {kgBuilt ? 'Rebuild Graph' : 'Build Graph'}
-                  </button>
-                </div>
-
-                <div className="flex-1 flex relative overflow-hidden w-full">
-                  {/* Background extraction indicator */}
-                  {isExtractingNewKG && kgBuilt && (
-                    <motion.div 
-                      initial={{ opacity: 0, y: -20 }}
-                      animate={{ opacity: 1, y: 0 }}
-                      exit={{ opacity: 0, y: -20 }}
-                      className="absolute top-4 left-1/2 transform -translate-x-1/2 z-50 bg-[#141414] text-white px-4 py-2 rounded-full shadow-lg flex items-center gap-3 text-xs font-mono"
-                    >
-                      <Loader2 className="w-3 h-3 animate-spin" />
-                      <span>Extracting latest meeting data...</span>
-                    </motion.div>
-                  )}
-                  
-                  {!kgBuilt && !isExtractingNewKG ? (
-                    <div className="flex-1 flex flex-col items-center justify-center text-center p-8">
-                      {isLoadingKG ? (
-                        <div className="w-full max-w-md flex flex-col items-center">
-                          <Loader2 className="w-16 h-16 animate-spin opacity-20 mb-6" />
-                          <h3 className="text-lg font-bold opacity-80 mb-2">
-                            Analyzing Meeting {kgProgress.current} of {kgProgress.total}
-                          </h3>
-                          <div className="w-full bg-gray-200 rounded-full h-2.5 mb-4">
-                            <motion.div 
-                              className="bg-[#141414] h-2.5 rounded-full" 
-                              initial={{ width: 0 }}
-                              animate={{ width: `${(kgProgress.current / kgProgress.total) * 100}%` }}
-                              transition={{ duration: 0.5 }}
-                            />
-                          </div>
-                          <p className="text-xs opacity-50 mt-2">
-                            Extracting topics, decisions, people, and action items to build a connected knowledge graph.
-                            <br />
-                            <span className="italic mt-1 block">(Processing sequentially to respect API limits)</span>
-                          </p>
-                        </div>
-                      ) : (
-                        <>
-                          <Share2 className="w-16 h-16 opacity-10 mb-6" />
-                          <h3 className="text-lg font-serif italic opacity-30">No Graph Built Yet</h3>
-                          <p className="text-xs opacity-30 mt-2 max-w-md">
-                            {history.length === 0 
-                              ? 'Process some audio files first, then come back to build your knowledge graph.'
-                              : `You have ${history.length} meeting${history.length !== 1 ? 's' : ''} ready. Click "Build Graph" to analyze and connect them.`
-                            }
-                          </p>
-                        </>
-                      )}
-                    </div>
-                  ) : (
-                    <>
-                      {/* Graph Canvas */}
-                      <div ref={kgContainerRef} className="flex-1 bg-[#FAFAFA] relative h-full min-w-0">
-                        {/* Graph Controls */}
-                        <div className="absolute bottom-6 right-6 z-10 flex gap-2">
-                          <button 
-                            onClick={() => {
-                              if (graphRef.current) {
-                                graphRef.current.zoomToFit(400, 50);
-                              }
-                            }}
-                            className="bg-white/90 backdrop-blur-sm border border-[#141414]/10 p-2 rounded-lg shadow-sm hover:bg-white text-gray-700 transition-colors flex items-center gap-2 group"
-                            title="Reset View"
-                          >
-                            <Layout className="w-4 h-4" />
-                            <span className="text-[10px] font-mono uppercase font-semibold hidden group-hover:block transition-all">Fit View</span>
-                          </button>
-                        </div>
-                        <ForceGraph2D
-                          ref={graphRef}
-                          graphData={buildGraphData()}
-                          width={kgDimensions.width}
-                          height={kgDimensions.height}
-                          nodeLabel={(node: any) => `${node.type.toUpperCase()}: ${node.label}`}
-                          nodeColor={(node: any) => node.color}
-                          nodeVal={(node: any) => node.size}
-                          linkColor={() => '#ccc'}
-                          linkWidth={(link: any) => link.dashed ? 2 : 1}
-                          linkLineDash={(link: any) => link.dashed ? [5, 5] : undefined}
-                          minZoom={0.5}
-                          maxZoom={8}
-                          onNodeClick={(node: any) => {
-                            setSelectedNode(node);
-                            if (graphRef.current) {
-                              // Center and zoom on clicked node
-                              graphRef.current.centerAt(node.x, node.y, 1000);
-                              graphRef.current.zoom(2, 1000);
-                            }
-                          }}
-                          // Optional: Add drag limits so users can't throw nodes out of bounds
-                          onNodeDragEnd={(node: any) => {
-                            // Keep nodes within reasonable bounds
-                            const bounds = 2000;
-                            node.fx = Math.max(-bounds, Math.min(bounds, node.x));
-                            node.fy = Math.max(-bounds, Math.min(bounds, node.y));
-                          }}
-                          nodeCanvasObject={(node: any, ctx: CanvasRenderingContext2D, globalScale: number) => {
-                            const label = node.label || '';
-                            const fontSize = node.type === 'meeting' ? 14 / globalScale : 11 / globalScale;
-                            ctx.font = `${node.type === 'meeting' ? 'bold ' : ''}${fontSize}px Sans-Serif`;
-                            
-                            // Draw node circle
-                            const r = node.type === 'meeting' ? 8 : node.type === 'topic' ? 6 : 4;
-                            ctx.beginPath();
-                            ctx.arc(node.x, node.y, r, 0, 2 * Math.PI, false);
-                            ctx.fillStyle = node.color || '#888';
-                            ctx.fill();
-                            
-                            // Draw border for meeting nodes
-                            if (node.type === 'meeting') {
-                              ctx.strokeStyle = '#000';
-                              ctx.lineWidth = 2 / globalScale;
-                              ctx.stroke();
-                            }
-                            
-                            // Draw label
-                            ctx.textAlign = 'center';
-                            ctx.textBaseline = 'top';
-                            ctx.fillStyle = '#333';
-                            const maxLen = node.type === 'meeting' ? 20 : 15;
-                            const displayLabel = label.length > maxLen ? label.substring(0, maxLen) + '...' : label;
-                            ctx.fillText(displayLabel, node.x, node.y + r + 2);
-                          }}
-                          cooldownTicks={100}
-                          d3AlphaDecay={0.02}
-                          d3VelocityDecay={0.3}
-                        />
-                      </div>
-
-                      {/* Legend */}
-                      <div className="absolute top-4 left-4 z-10 bg-white/90 backdrop-blur-sm border border-[#141414]/10 rounded-xl p-4 shadow-sm">
-                        <h4 className="text-[10px] font-mono uppercase tracking-widest opacity-50 mb-3">Legend</h4>
-                        <div className="space-y-2">
-                          {[
-                            { color: '#141414', label: 'Meeting', shape: 'large' },
-                            { color: '#8b5cf6', label: 'New Topic', shape: 'medium' },
-                            { color: '#3b82f6', label: 'Ongoing', shape: 'medium' },
-                            { color: '#22c55e', label: 'Resolved', shape: 'medium' },
-                            { color: '#f59e0b', label: 'Decision / Revisited', shape: 'small' },
-                            { color: '#ef4444', label: 'Off-track', shape: 'medium' },
-                            { color: '#06b6d4', label: 'Person', shape: 'small' },
-                            { color: '#ec4899', label: 'Action Item', shape: 'small' }
-                          ].map(item => (
-                            <div key={item.label} className="flex items-center gap-2">
-                              <span className={`rounded-full ${item.shape === 'large' ? 'w-3.5 h-3.5' : item.shape === 'medium' ? 'w-2.5 h-2.5' : 'w-2 h-2'}`} style={{ backgroundColor: item.color }} />
-                              <span className="text-[10px] text-gray-600">{item.label}</span>
-                            </div>
-                          ))}
-                        </div>
-                      </div>
-
-                      {/* Node Detail Panel */}
-                      <AnimatePresence>
-                        {selectedNode && (
-                          <motion.div 
-                            initial={{ x: 350, opacity: 0 }}
-                            animate={{ x: 0, opacity: 1 }}
-                            exit={{ x: 350, opacity: 0 }}
-                            transition={{ type: "spring", damping: 25, stiffness: 200 }}
-                            className="w-[350px] flex-shrink-0 bg-white/95 backdrop-blur-md border-l border-[#141414]/10 overflow-y-auto h-full p-6 shadow-[-15px_0_30px_-5px_rgba(0,0,0,0.1)] z-20 flex flex-col"
-                          >
-                          <div className="flex items-center justify-between mb-6 pb-4 border-b border-[#141414]/10">
-                            <div className="flex items-center gap-3">
-                              <span className={`w-3 h-3 rounded-full`} style={{ backgroundColor: selectedNode.color }} />
-                              <span className="text-[10px] font-mono uppercase font-bold text-gray-500 tracking-wider">
-                                {selectedNode.type} Node
-                              </span>
-                            </div>
-                            <button 
-                              onClick={() => setSelectedNode(null)} 
-                              className="p-1.5 hover:bg-gray-100 rounded-lg text-gray-400 hover:text-gray-800 transition-colors"
-                            >
-                              <X className="w-4 h-4" />
-                            </button>
-                          </div>
-                          
-                          <div className="flex-1 overflow-y-auto pr-2 custom-scrollbar">
-                            <h3 className="font-bold text-lg mb-6 leading-tight text-gray-900">{selectedNode.label}</h3>
-                            
-                            {selectedNode.type === 'meeting' && selectedNode.data && (
-                              <div className="space-y-6">
-                                {/* This Meeting's Topics */}
-                                <div>
-                                  <h4 className="text-[10px] font-mono uppercase tracking-widest text-gray-400 mb-3 flex items-center gap-2">
-                                    <MessageSquare className="w-3 h-3" />
-                                    Topics Discussed
-                                  </h4>
-                                  <div className="space-y-2">
-                                    {(selectedNode.data.topics || []).map((t: any, i: number) => (
-                                      <div key={i} className="p-3 bg-gray-50/80 rounded-xl border border-gray-100 hover:border-gray-200 transition-colors">
-                                        <div className="flex items-start justify-between gap-3 mb-2">
-                                          <span className="text-sm font-semibold text-gray-800 leading-tight">{t.name}</span>
-                                          <span className={`text-[9px] px-2 py-1 rounded-md font-mono shrink-0 ${
-                                            t.status === 'resolved' ? 'bg-green-100 text-green-700' :
-                                            t.status === 'off-track' ? 'bg-red-100 text-red-700' :
-                                            t.status === 'revisited' ? 'bg-yellow-100 text-yellow-700' :
-                                            t.status === 'ongoing' ? 'bg-blue-100 text-blue-700' : 'bg-purple-100 text-purple-700'
-                                          }`}>{t.status}</span>
-                                        </div>
-                                        <p className="text-xs text-gray-500 leading-relaxed">{t.summary}</p>
-                                      </div>
-                                    ))}
-                                  </div>
-                                </div>
-                                
-                                {(selectedNode.data.decisions || []).length > 0 && (
-                                  <div>
-                                    <h4 className="text-[10px] font-mono uppercase tracking-widest text-gray-400 mb-3 flex items-center gap-2">
-                                      <CheckCircle2 className="w-3 h-3" />
-                                      Decisions Made
-                                    </h4>
-                                    <ul className="space-y-2">
-                                      {selectedNode.data.decisions.map((d: any, i: number) => (
-                                        <li key={i} className="text-sm text-gray-700 flex items-start gap-3 bg-yellow-50/50 p-3 rounded-xl border border-yellow-100/50">
-                                          <span className="w-1.5 h-1.5 rounded-full bg-yellow-500 mt-1.5 shrink-0 shadow-sm" />
-                                          <span className="leading-snug">{d.decision}</span>
-                                        </li>
-                                      ))}
-                                    </ul>
-                                  </div>
-                                )}
-
-                                {(selectedNode.data.people || []).length > 0 && (
-                                  <div>
-                                    <h4 className="text-[10px] font-mono uppercase tracking-widest text-gray-400 mb-3 flex items-center gap-2">
-                                      <Users className="w-3 h-3" />
-                                      People Involved
-                                    </h4>
-                                    <div className="flex flex-wrap gap-1.5">
-                                      {selectedNode.data.people.map((p: string, i: number) => (
-                                        <span key={i} className="px-3 py-1.5 bg-cyan-50/80 border border-cyan-100 text-cyan-800 text-[11px] rounded-lg font-medium shadow-sm">{p}</span>
-                                      ))}
-                                    </div>
-                                  </div>
-                                )}
-
-                                {(selectedNode.data.actionItems || []).length > 0 && (
-                                  <div>
-                                    <h4 className="text-[10px] font-mono uppercase tracking-widest text-gray-400 mb-3 flex items-center gap-2">
-                                      <CheckCircle2 className="w-3 h-3" />
-                                      Action Items
-                                    </h4>
-                                    <ul className="space-y-2">
-                                      {selectedNode.data.actionItems.map((a: any, i: number) => (
-                                        <li key={i} className="p-3 bg-pink-50/50 border border-pink-100/50 rounded-xl">
-                                          <span className="text-sm font-medium text-pink-900 block mb-1.5">{a.task}</span>
-                                          <div className="flex items-center gap-1.5">
-                                            <span className="w-4 h-4 rounded-full bg-pink-200 flex items-center justify-center text-[8px] font-bold text-pink-700">{a.owner?.[0]?.toUpperCase()}</span>
-                                            <span className="text-[10px] text-pink-600 font-medium">{a.owner}</span>
-                                          </div>
-                                        </li>
-                                      ))}
-                                    </ul>
-                                  </div>
-                                )}
-
-                                {/* Related Meetings Section - Cross-Meeting Connections */}
-                                {(() => {
-                                  const relatedMeetings = findRelatedMeetings(selectedNode.data.meetingId);
-                                  if (relatedMeetings.length === 0) return null;
-                                  
-                                  // Create a component for the expandable card to manage its own state
-                                  const ExpandableMeetingCard = ({ related, idx }: { related: any, idx: number }) => {
-                                    const [isExpanded, setIsExpanded] = useState(false);
-                                    const relatedMeetingData = kgData.find(m => m.meetingId === related.meetingId);
-                                    if (!relatedMeetingData) return null;
-                                    
-                                    return (
-                                      <div key={idx} className="bg-gradient-to-br from-purple-50/80 to-blue-50/80 rounded-xl border border-purple-100/50 overflow-hidden transition-all duration-300 hover:shadow-md">
-                                        {/* Collapsed Header (Always visible) */}
-                                        <div 
-                                          className="p-3.5 flex items-center justify-between cursor-pointer hover:bg-white/40 transition-colors group"
-                                          onClick={() => setIsExpanded(!isExpanded)}
-                                        >
-                                          <div className="flex-1 min-w-0 pr-3">
-                                            <div className="flex items-center gap-2 mb-1.5">
-                                              <span className="text-sm font-bold text-gray-800 truncate group-hover:text-purple-700 transition-colors">
-                                                {related.meetingTitle?.replace(/\.[^.]+$/, '') || 'Meeting'}
-                                              </span>
-                                              <span className="text-[9px] px-2 py-0.5 bg-purple-200/50 text-purple-800 rounded-md font-mono shrink-0 font-medium">
-                                                {related.relevanceScore} pts
-                                              </span>
-                                            </div>
-                                            <div className="text-[10px] text-gray-500 truncate flex items-center gap-1.5">
-                                              {related.sharedTopics.length > 0 && (
-                                                <span className="flex items-center gap-1 bg-white/60 px-1.5 py-0.5 rounded text-gray-600">
-                                                  <MessageSquare className="w-3 h-3 text-purple-400" /> {related.sharedTopics.length}
-                                                </span>
-                                              )}
-                                              {related.sharedPeople.length > 0 && (
-                                                <span className="flex items-center gap-1 bg-white/60 px-1.5 py-0.5 rounded text-gray-600">
-                                                  <Users className="w-3 h-3 text-cyan-400" /> {related.sharedPeople.length}
-                                                </span>
-                                              )}
-                                            </div>
-                                          </div>
-                                          <div className={`shrink-0 p-1.5 bg-white/80 rounded-lg text-purple-600 shadow-sm transition-transform duration-300 ${isExpanded ? '-rotate-90 bg-purple-100' : 'rotate-90'}`}>
-                                            <ChevronRight className="w-3.5 h-3.5" />
-                                          </div>
-                                        </div>
-
-                                        {/* Expanded Content */}
-                                      {isExpanded && (
-                                        <div className="p-3 pt-0 border-t border-purple-100 bg-white/40">
-                                          <div className="pt-3">
-                                            {/* Why This Meeting is Connected */}
-                                            <div className="mb-3 p-2 bg-white/70 rounded border border-purple-200">
-                                              <span className="text-[9px] font-mono uppercase text-purple-700 block mb-1">🔗 Connection Details:</span>
-                                              <div className="text-[10px] text-gray-700">
-                                                {related.sharedTopics.length > 0 && (
-                                                  <span className="block mb-1">
-                                                    <strong>Topics:</strong> {related.sharedTopics.map((t:any) => t.name).join(', ')}
-                                                  </span>
-                                                )}
-                                                {related.sharedPeople.length > 0 && (
-                                                  <span className="block mb-1">
-                                                    <strong>People:</strong> {related.sharedPeople.join(', ')}
-                                                  </span>
-                                                )}
-                                              </div>
-                                            </div>
-                                            
-                                            {/* What Was Discussed in That Meeting - All Topics */}
-                                            {(relatedMeetingData.topics || []).length > 0 && (
-                                              <div className="mb-3">
-                                                <span className="text-[9px] font-mono uppercase text-indigo-700 block mb-2 flex items-center gap-1">
-                                                  <MessageSquare className="w-3 h-3" />
-                                                  What Was Discussed:
-                                                </span>
-                                                <div className="space-y-1.5">
-                                                  {(relatedMeetingData.topics || []).map((topic: any, tIdx: number) => {
-                                                    const isShared = related.sharedTopics.some((st:any) => 
-                                                      calculateSimilarity(st.name, topic.name) >= 0.4
-                                                    );
-                                                    const sharedTopic = related.sharedTopics.find((st:any) => 
-                                                      calculateSimilarity(st.name, topic.name) >= 0.4
-                                                    );
-                                                    
-                                                    return (
-                                                      <div key={tIdx} className={`p-2 rounded ${isShared ? 'bg-amber-50 border border-amber-200' : 'bg-white/80'}`}>
-                                                        <div className="flex items-start justify-between gap-2 mb-1">
-                                                          <span className="text-[10px] font-semibold text-gray-800 flex items-center gap-1">
-                                                            {isShared && <span className="text-amber-600" title="Shared with current meeting">⭐</span>}
-                                                            {topic.name}
-                                                          </span>
-                                                          <span className={`text-[8px] px-1 py-0.5 rounded font-mono shrink-0 ${
-                                                            topic.status === 'resolved' ? 'bg-green-100 text-green-700' :
-                                                            topic.status === 'off-track' ? 'bg-red-100 text-red-700' :
-                                                            topic.status === 'revisited' ? 'bg-yellow-100 text-yellow-700' :
-                                                            topic.status === 'ongoing' ? 'bg-blue-100 text-blue-700' : 'bg-purple-100 text-purple-700'
-                                                          }`}>{topic.status}</span>
-                                                        </div>
-                                                        <p className="text-[9px] text-gray-600 leading-relaxed line-clamp-2 hover:line-clamp-none transition-all">"{topic.summary}"</p>
-                                                        {isShared && sharedTopic && (
-                                                          <div className="mt-1 pt-1 border-t border-amber-200/50">
-                                                            <p className="text-[8px] text-amber-800">
-                                                              Status: {sharedTopic.otherStatus} → {sharedTopic.currentStatus}
-                                                            </p>
-                                                          </div>
-                                                        )}
-                                                      </div>
-                                                    );
-                                                  })}
-                                                </div>
-                                              </div>
-                                            )}
-                                            
-                                            {/* Decisions and Actions */}
-                                            <div className="grid grid-cols-1 gap-2 mt-3">
-                                              {(relatedMeetingData.decisions || []).length > 0 && (
-                                                <div className="bg-yellow-50/50 rounded p-2 border border-yellow-100">
-                                                  <span className="text-[9px] font-mono uppercase text-yellow-700 block mb-1">Decisions</span>
-                                                  <ul className="space-y-1">
-                                                    {(relatedMeetingData.decisions || []).slice(0, 2).map((dec: any, dIdx: number) => (
-                                                      <li key={dIdx} className="text-[9px] text-yellow-900 truncate">• {dec.decision}</li>
-                                                    ))}
-                                                  </ul>
-                                                </div>
-                                              )}
-                                              
-                                              {(relatedMeetingData.actionItems || []).length > 0 && (
-                                                <div className="bg-pink-50/50 rounded p-2 border border-pink-100">
-                                                  <span className="text-[9px] font-mono uppercase text-pink-700 block mb-1">Actions</span>
-                                                  <ul className="space-y-1">
-                                                    {(relatedMeetingData.actionItems || []).slice(0, 2).map((action: any, aIdx: number) => (
-                                                      <li key={aIdx} className="text-[9px] text-pink-900 truncate">
-                                                        <span className="font-medium">{action.owner}:</span> {action.task}
-                                                      </li>
-                                                    ))}
-                                                  </ul>
-                                                </div>
-                                              )}
-                                            </div>
-                                          </div>
-                                        </div>
-                                      )}
-                                    </div>
-                                  );
-                                };
-
-                                return (
-                                  <div className="border-t border-gray-200 pt-5 mt-5">
-                                    <h4 className="text-[10px] font-mono uppercase tracking-widest text-gray-400 mb-4 flex items-center gap-2">
-                                      <Share2 className="w-3 h-3" />
-                                      Connected Meetings ({relatedMeetings.length})
-                                    </h4>
-                                    <div className="space-y-3">
-                                      {relatedMeetings.slice(0, 5).map((related, idx) => (
-                                        <ExpandableMeetingCard key={idx} related={related} idx={idx} />
-                                      ))}
-                                    </div>
-                                    {relatedMeetings.length > 5 && (
-                                      <button className="w-full mt-3 py-2 text-[10px] font-mono uppercase tracking-wider text-gray-400 hover:text-gray-600 bg-gray-50 hover:bg-gray-100 rounded-lg transition-colors">
-                                        View {relatedMeetings.length - 5} More
-                                      </button>
-                                    )}
-                                  </div>
-                                );
-                              })()}
-                            </div>
-                          )}
-
-                          {selectedNode.type === 'topic' && selectedNode.data && (
-                            <div className="space-y-6">
-                              <div className="bg-white/60 p-4 rounded-xl border border-gray-100 shadow-sm">
-                                <div className={`px-2.5 py-1.5 rounded-lg text-xs font-semibold inline-flex items-center gap-1.5 mb-3 shadow-sm ${
-                                  selectedNode.data.status === 'resolved' ? 'bg-green-100 text-green-700 border border-green-200' :
-                                  selectedNode.data.status === 'off-track' ? 'bg-red-100 text-red-700 border border-red-200' :
-                                  selectedNode.data.status === 'revisited' ? 'bg-yellow-100 text-yellow-700 border border-yellow-200' :
-                                  selectedNode.data.status === 'ongoing' ? 'bg-blue-100 text-blue-700 border border-blue-200' : 'bg-purple-100 text-purple-700 border border-purple-200'
-                                }`}>
-                                  <span className="w-1.5 h-1.5 rounded-full bg-current" />
-                                  Current Status: {selectedNode.data.status}
-                                </div>
-                                <p className="text-sm text-gray-700 leading-relaxed font-medium">{selectedNode.data.summary}</p>
-                              </div>
-                              
-                              {/* Topic Evolution Timeline */}
-                              {selectedNode.data.allStatuses && selectedNode.data.allStatuses.length > 1 && (
-                                <div className="border-t border-gray-200 pt-5">
-                                  <h4 className="text-[10px] font-mono uppercase tracking-widest text-gray-400 mb-4 flex items-center gap-2">
-                                    <Clock className="w-3 h-3" />
-                                    Topic Evolution Timeline
-                                  </h4>
-                                  <div className="space-y-0 relative before:absolute before:inset-0 before:ml-[11px] before:-translate-x-px md:before:mx-auto md:before:translate-x-0 before:h-full before:w-0.5 before:bg-gradient-to-b before:from-transparent before:via-slate-200 before:to-transparent">
-                                    {selectedNode.data.allStatuses.map((status: string, idx: number) => (
-                                      <div key={idx} className="relative flex items-start gap-4 mb-4 group">
-                                        <div className="flex flex-col items-center relative z-10 pt-1">
-                                          <span className={`w-6 h-6 rounded-full flex items-center justify-center border-2 border-white shadow-sm transition-transform group-hover:scale-110 ${
-                                            status === 'resolved' ? 'bg-green-500' :
-                                            status === 'off-track' ? 'bg-red-500' :
-                                            status === 'revisited' ? 'bg-yellow-500' :
-                                            status === 'ongoing' ? 'bg-blue-500' : 'bg-purple-500'
-                                          }`} />
-                                        </div>
-                                        <div className="flex-1 bg-white/60 p-3 rounded-xl border border-gray-100 shadow-sm group-hover:border-gray-200 transition-colors">
-                                          <span className={`text-[9px] px-2 py-0.5 rounded-md font-mono inline-block mb-1.5 ${
-                                            status === 'resolved' ? 'bg-green-100 text-green-700' :
-                                            status === 'off-track' ? 'bg-red-100 text-red-700' :
-                                            status === 'revisited' ? 'bg-yellow-100 text-yellow-700' :
-                                            status === 'ongoing' ? 'bg-blue-100 text-blue-700' : 'bg-purple-100 text-purple-700'
-                                          }`}>{status}</span>
-                                          <p className="text-xs text-gray-600 italic">
-                                            "{selectedNode.data.allSummaries?.[idx] || 'No summary'}"
-                                          </p>
-                                        </div>
-                                      </div>
-                                    ))}
-                                  </div>
-                                </div>
-                              )}
-
-                              {/* Meetings where this topic was discussed */}
-                              {(() => {
-                                const meetingsWithTopic = kgData.filter(m => 
-                                  (m.topics || []).some((t: any) => 
-                                    t && t.name && (calculateSimilarity(t.name, selectedNode.label) >= 0.4 || 
-                                    t.name.toLowerCase() === (selectedNode.label || '').toLowerCase())
-                                  )
-                                );
-                                if (meetingsWithTopic.length === 0) return null;
-                                return (
-                                  <div className="border-t border-gray-200 pt-5">
-                                    <h4 className="text-[10px] font-mono uppercase tracking-widest text-gray-400 mb-3 flex items-center gap-2">
-                                      <Share2 className="w-3 h-3" />
-                                      Discussed in {meetingsWithTopic.length} Meeting{meetingsWithTopic.length !== 1 ? 's' : ''}
-                                    </h4>
-                                    <div className="space-y-3">
-                                      {meetingsWithTopic.map((meeting, idx) => {
-                                        const topicInMeeting = (meeting.topics || []).find((t: any) => 
-                                          t && t.name && (calculateSimilarity(t.name, selectedNode.label) >= 0.4 || 
-                                          t.name.toLowerCase() === (selectedNode.label || '').toLowerCase())
-                                        );
-                                        return (
-                                          <div key={idx} className="p-3 bg-indigo-50/50 rounded-xl border border-indigo-100 hover:border-indigo-200 transition-colors group">
-                                            <div className="flex items-center justify-between mb-2">
-                                              <span className="text-sm font-semibold text-gray-800 truncate group-hover:text-indigo-700 transition-colors">
-                                                {meeting.meetingTitle?.replace(/\.[^.]+$/, '') || 'Meeting'}
-                                              </span>
-                                              <span className={`text-[9px] px-2 py-0.5 rounded-md font-mono shrink-0 font-medium ${
-                                                topicInMeeting?.status === 'resolved' ? 'bg-green-100 text-green-700' :
-                                                topicInMeeting?.status === 'off-track' ? 'bg-red-100 text-red-700' :
-                                                topicInMeeting?.status === 'revisited' ? 'bg-yellow-100 text-yellow-700' :
-                                                topicInMeeting?.status === 'ongoing' ? 'bg-blue-100 text-blue-700' : 'bg-purple-100 text-purple-700'
-                                              }`}>{topicInMeeting?.status}</span>
-                                            </div>
-                                            <div className="relative">
-                                              <p className="text-xs text-gray-600 leading-relaxed italic line-clamp-2 hover:line-clamp-none transition-all cursor-pointer">"{topicInMeeting?.summary}"</p>
-                                            </div>
-                                          </div>
-                                        );
-                                      })}
-                                    </div>
-                                  </div>
-                                );
-                              })()}
-                            </div>
-                          )}
-
-                          {selectedNode.type === 'decision' && selectedNode.data && (
-                            <div className="space-y-6">
-                              <div className="p-4 bg-yellow-50/80 rounded-xl border border-yellow-200/50 shadow-sm relative overflow-hidden">
-                                <div className="absolute top-0 right-0 p-2 opacity-10">
-                                  <CheckCircle2 className="w-12 h-12" />
-                                </div>
-                                <h4 className="text-[10px] font-mono uppercase tracking-widest text-yellow-700 mb-2 relative z-10">Decision Made</h4>
-                                <p className="text-sm text-yellow-900 font-medium leading-relaxed relative z-10">{selectedNode.data.decision}</p>
-                              </div>
-                              
-                              <div className="flex items-center gap-3 p-3 bg-gray-50/80 rounded-xl border border-gray-100">
-                                <span className="p-2 bg-white rounded-lg shadow-sm">
-                                  <MessageSquare className="w-4 h-4 text-gray-400" />
-                                </span>
-                                <div>
-                                  <span className="text-[10px] font-mono uppercase tracking-widest text-gray-400 block mb-0.5">Related Topic</span>
-                                  <span className="text-xs font-semibold text-gray-700">{selectedNode.data.relatedTopic || 'General Discussion'}</span>
-                                </div>
-                              </div>
-                              
-                              {/* Meeting context */}
-                              {selectedNode.data.meetingTitle && (
-                                <div className="flex items-center gap-3 p-3 bg-gray-50/80 rounded-xl border border-gray-100">
-                                  <span className="p-2 bg-white rounded-lg shadow-sm">
-                                    <Presentation className="w-4 h-4 text-gray-400" />
-                                  </span>
-                                  <div>
-                                    <span className="text-[10px] font-mono uppercase tracking-widest text-gray-400 block mb-0.5">Made in Meeting</span>
-                                    <span className="text-xs font-semibold text-gray-700">
-                                      {selectedNode.data.meetingTitle?.replace(/\.[^.]+$/, '') || 'Meeting'}
-                                    </span>
-                                  </div>
-                                </div>
-                              )}
-                              
-                              {/* Find similar decisions in other meetings */}
-                              {(() => {
-                                const similarDecisions: Array<{ meeting: string; decision: string }> = [];
-                                kgData.forEach(m => {
-                                  if (m.meetingId === selectedNode.data.meetingId) return;
-                                  (m.decisions || []).forEach((d: any) => {
-                                    if (calculateSimilarity(d.decision, selectedNode.data.decision) >= 0.3) {
-                                      similarDecisions.push({ meeting: m.meetingTitle, decision: d.decision });
-                                    }
-                                  });
-                                });
-                                if (similarDecisions.length === 0) return null;
-                                return (
-                                  <div className="border-t border-gray-200 pt-5">
-                                    <h4 className="text-[10px] font-mono uppercase tracking-widest text-gray-400 mb-4 flex items-center gap-2">
-                                      <Share2 className="w-3 h-3" />
-                                      Similar Decisions ({similarDecisions.length})
-                                    </h4>
-                                    <div className="space-y-3">
-                                      {similarDecisions.slice(0, 3).map((sd, idx) => (
-                                        <div key={idx} className="p-3 bg-orange-50/50 rounded-xl border border-orange-100/50">
-                                          <span className="text-[9px] font-mono uppercase text-orange-600 block mb-1.5 font-semibold tracking-wider">
-                                            {sd.meeting?.replace(/\.[^.]+$/, '') || 'Meeting'}
-                                          </span>
-                                          <p className="text-xs text-orange-900 leading-relaxed">"{sd.decision}"</p>
-                                        </div>
-                                      ))}
-                                    </div>
-                                  </div>
-                                );
-                              })()}
-                            </div>
-                          )}
-
-                          {selectedNode.type === 'person' && selectedNode.data && (
-                            <div className="space-y-6">
-                              <div className="flex items-center gap-4 mb-2">
-                                <div className="w-16 h-16 rounded-full bg-cyan-100 flex items-center justify-center border-4 border-cyan-50 shadow-sm text-cyan-600">
-                                  <Users className="w-8 h-8" />
-                                </div>
-                                <div>
-                                  <h3 className="font-bold text-xl text-gray-900">{selectedNode.label}</h3>
-                                  <p className="text-xs text-gray-500 font-mono mt-1">Participant Profile</p>
-                                </div>
-                              </div>
-                              
-                              {/* Meetings where this person appears */}
-                              {(() => {
-                                const personName = (selectedNode.label || '').toLowerCase();
-                                const meetingsWithPerson = kgData.filter(m => 
-                                  (m.people || []).some((p: string) => p && p.toLowerCase() === personName)
-                                );
-                                if (meetingsWithPerson.length === 0) return null;
-                                return (
-                                  <div className="space-y-4 pt-2">
-                                    <h4 className="text-[10px] font-mono uppercase tracking-widest text-gray-400 mb-2 flex items-center gap-2">
-                                      <Presentation className="w-3 h-3" />
-                                      Present in {meetingsWithPerson.length} Meeting{meetingsWithPerson.length !== 1 ? 's' : ''}
-                                    </h4>
-                                    {meetingsWithPerson.map((meeting, idx) => {
-                                      // Find action items assigned to this person
-                                      const assignedActions = (meeting.actionItems || []).filter((a: any) => 
-                                        a.owner && a.owner.toLowerCase() === personName
-                                      );
-                                      return (
-                                        <div key={idx} className="p-4 bg-cyan-50/30 rounded-xl border border-cyan-100 hover:border-cyan-200 transition-colors group">
-                                          <span className="text-sm font-semibold text-gray-800 block mb-3 group-hover:text-cyan-700 transition-colors">
-                                            {meeting.meetingTitle?.replace(/\.[^.]+$/, '') || 'Meeting'}
-                                          </span>
-                                          
-                                          {/* Topics discussed in this meeting */}
-                                          {(meeting.topics || []).length > 0 && (
-                                            <div className="mb-3">
-                                              <span className="text-[9px] font-mono uppercase text-cyan-600 block mb-1.5 tracking-wider">Topics Context:</span>
-                                              <div className="flex flex-wrap gap-1.5">
-                                                {(meeting.topics || []).slice(0, 3).map((t: any, tIdx: number) => (
-                                                  <span key={tIdx} className="text-[10px] px-2 py-1 bg-white border border-cyan-100/50 rounded-md text-gray-600 shadow-sm">{t.name}</span>
-                                                ))}
-                                                {(meeting.topics || []).length > 3 && (
-                                                  <span className="text-[10px] px-2 py-1 bg-gray-50 rounded-md text-gray-400">+{(meeting.topics || []).length - 3}</span>
-                                                )}
-                                              </div>
-                                            </div>
-                                          )}
-                                          
-                                          {/* Action items assigned to this person */}
-                                          {assignedActions.length > 0 && (
-                                            <div className="pt-2 border-t border-cyan-100/50">
-                                              <span className="text-[9px] font-mono uppercase text-pink-600 block mb-2 tracking-wider flex items-center gap-1.5">
-                                                <CheckCircle2 className="w-3 h-3" /> Assigned Tasks
-                                              </span>
-                                              <div className="space-y-1.5">
-                                                {assignedActions.map((a: any, aIdx: number) => (
-                                                  <div key={aIdx} className="text-[11px] text-pink-900 bg-pink-50/50 border border-pink-100/50 rounded-lg p-2.5 shadow-sm">
-                                                    {a.task}
-                                                  </div>
-                                                ))}
-                                              </div>
-                                            </div>
-                                          )}
-                                        </div>
-                                      );
-                                    })}
-                                  </div>
-                                );
-                              })()}
-                            </div>
-                          )}
-
-                          {selectedNode.type === 'action' && selectedNode.data && (
-                            <div className="space-y-4">
-                              <div className="p-4 bg-pink-50/80 rounded-xl border border-pink-200/50 shadow-sm relative overflow-hidden">
-                                <div className="absolute top-0 right-0 p-2 opacity-10">
-                                  <CheckCircle2 className="w-12 h-12 text-pink-500" />
-                                </div>
-                                <h4 className="text-[10px] font-mono uppercase tracking-widest text-pink-700 mb-2 relative z-10">Action Item</h4>
-                                <p className="text-sm text-pink-900 font-medium leading-relaxed relative z-10">{selectedNode.data.task}</p>
-                              </div>
-                              
-                              <div className="grid grid-cols-2 gap-3">
-                                <div className="p-3 bg-gray-50/80 rounded-xl border border-gray-100">
-                                  <span className="text-[9px] font-mono uppercase tracking-widest text-gray-400 block mb-1">Owner</span>
-                                  <div className="flex items-center gap-2">
-                                    <span className="w-5 h-5 rounded-full bg-cyan-100 flex items-center justify-center text-[10px] font-bold text-cyan-700">
-                                      {selectedNode.data.owner?.[0]?.toUpperCase()}
-                                    </span>
-                                    <span className="text-xs font-semibold text-gray-700 truncate">{selectedNode.data.owner}</span>
-                                  </div>
-                                </div>
-                                <div className="p-3 bg-gray-50/80 rounded-xl border border-gray-100">
-                                  <span className="text-[9px] font-mono uppercase tracking-widest text-gray-400 block mb-1">Related To</span>
-                                  <span className="text-xs font-semibold text-gray-700 line-clamp-1">{selectedNode.data.relatedTopic || 'General'}</span>
-                                </div>
-                              </div>
-                              
-                              {/* Meeting context */}
-                              {selectedNode.data.meetingTitle && (
-                                <div className="flex items-center gap-3 p-3 bg-gray-50/80 rounded-xl border border-gray-100">
-                                  <span className="p-2 bg-white rounded-lg shadow-sm">
-                                    <Presentation className="w-4 h-4 text-gray-400" />
-                                  </span>
-                                  <div>
-                                    <span className="text-[10px] font-mono uppercase tracking-widest text-gray-400 block mb-0.5">Assigned in Meeting</span>
-                                    <span className="text-xs font-semibold text-gray-700">
-                                      {selectedNode.data.meetingTitle?.replace(/\.[^.]+$/, '') || 'Meeting'}
-                                    </span>
-                                  </div>
-                                </div>
-                              )}
-                            </div>
-                          )}
-                          </div>
-                        </motion.div>
-                        )}
-                      </AnimatePresence>
-                    </>
-                  )}
-                </div>
-              </motion.div>
+              <KnowledgePage
+                kgData={kgData}
+                isLoadingKG={isLoadingKG}
+                kgProgress={kgProgress}
+                isExtractingNewKG={isExtractingNewKG}
+                kgBuilt={kgBuilt}
+                buildKnowledgeGraph={buildKnowledgeGraph}
+                historyLength={history.length}
+              />
             )}
           </AnimatePresence>
         </main>
