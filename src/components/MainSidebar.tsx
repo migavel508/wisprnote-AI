@@ -63,25 +63,27 @@ export default function MainSidebar({
   }
 
   return (
-    <motion.div 
-      initial={{ width: 0, opacity: 0 }}
-      animate={{ width: 240, opacity: 1 }}
-      exit={{ width: 0, opacity: 0 }}
-      transition={{ duration: 0.2 }}
-      className="h-screen bg-[#f1f1ef] border-r border-[#e5e5e5] flex flex-col flex-shrink-0 font-[system-ui]"
-    >
-      {/* macOS Window Controls & Sidebar Toggle */}
-      <div className="flex items-center justify-between px-4 pt-[18px] pb-5">
-        <div className="flex items-center gap-2">
-          <div className="w-[11.5px] h-[11.5px] rounded-full bg-[#ff5f56] border border-[#e0443e]/40 shadow-sm"></div>
-          <div className="w-[11.5px] h-[11.5px] rounded-full bg-[#ffbd2e] border border-[#dea123]/40 shadow-sm"></div>
-          <div className="w-[11.5px] h-[11.5px] rounded-full bg-[#27c93f] border border-[#1aab29]/40 shadow-sm"></div>
-        </div>
+    <>
+      {/* Mobile overlay backdrop */}
+      <div 
+        className="fixed inset-0 bg-black/20 z-40 md:hidden"
+        onClick={onToggle}
+      />
+      
+      <motion.div 
+        initial={{ x: -240, opacity: 0 }}
+        animate={{ x: 0, opacity: 1 }}
+        exit={{ x: -240, opacity: 0 }}
+        transition={{ duration: 0.2 }}
+        className="fixed md:relative h-screen w-[240px] bg-[#f8f8f7] border-r border-[#e5e5e5] flex flex-col flex-shrink-0 font-[system-ui] z-50"
+      >
+      {/* Sidebar Toggle */}
+      <div className="flex items-center justify-start px-4 pt-4 pb-4">
         <button 
           onClick={onToggle}
-          className="text-[#595959] hover:text-[#1a1a1a] transition-colors rounded-[6px] p-[3px] border border-[#e3e3e0] bg-[#ebebe9]"
+          className="text-[#595959] hover:text-[#1a1a1a] transition-colors rounded-[8px] p-2 border border-[#e3e3e0] bg-white hover:bg-[#f5f5f5]"
         >
-          <SidebarIcon size={14} strokeWidth={2.5} />
+          <SidebarIcon size={16} strokeWidth={2} />
         </button>
       </div>
 
@@ -208,5 +210,6 @@ export default function MainSidebar({
         </div>
       </div>
     </motion.div>
+    </>
   );
 }
