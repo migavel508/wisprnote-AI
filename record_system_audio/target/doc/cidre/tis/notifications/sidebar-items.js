@@ -1,0 +1,1 @@
+window.SIDEBAR_ITEMS = {"fn":["enabled_kb_input_srcs_changed","selected_kb_input_src_changed"]};

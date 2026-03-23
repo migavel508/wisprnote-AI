@@ -1,0 +1,1 @@
+window.SIDEBAR_ITEMS = {"enum":["Action","IfaceConnectionType","SafeInfo"],"mod":["matching"],"struct":["NotificationInfo","QueryBuilder","Speed","SubscriptionGuard"],"type":["NotificationCallback"]};

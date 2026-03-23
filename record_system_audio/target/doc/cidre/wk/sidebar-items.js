@@ -1,0 +1,1 @@
+window.SIDEBAR_ITEMS = {"enum":["InactiveSchedulingPolicy","SelectionGranularity","UiDirectionPolicy","UserScriptInjectionTime"],"mod":["navigation","navigation_delegate","web_view"],"struct":["AudiovisualMediaTypes","Preferences","ProcessPool","UserContentController","UserScript","WebViewCfg","WebsiteDataStore"]};

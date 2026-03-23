@@ -1,0 +1,1 @@
+window.SIDEBAR_ITEMS = {"enum":["CaptureDynamicRange","CaptureResolution","CfgPreset","FrameStatus","OutputType","PresenterOverlayAlertSetting"],"struct":["AnyDelegate","Cfg","ContentFilter","FrameInfo","Stream"],"trait":["Delegate","DelegateImpl","Output","OutputImpl"]};

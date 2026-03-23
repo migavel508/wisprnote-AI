@@ -1,0 +1,1 @@
+window.SIDEBAR_ITEMS = {"mod":["downsampling_mode","keys","scaling_mode"]};

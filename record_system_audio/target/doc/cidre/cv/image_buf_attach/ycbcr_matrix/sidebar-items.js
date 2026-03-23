@@ -1,0 +1,1 @@
+window.SIDEBAR_ITEMS = {"fn":["itu_r_2020","itu_r_601_4","itu_r_709_2","smpte_240m_1995"]};

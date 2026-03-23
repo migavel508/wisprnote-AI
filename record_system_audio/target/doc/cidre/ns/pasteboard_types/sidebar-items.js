@@ -1,0 +1,1 @@
+window.SIDEBAR_ITEMS = {"fn":["color","file_url","font","html","multiple_text_selection","pdf","png","rtf","rtfd","ruler","sound","string","tabular_text","text_finder_opts","tiff","url"]};

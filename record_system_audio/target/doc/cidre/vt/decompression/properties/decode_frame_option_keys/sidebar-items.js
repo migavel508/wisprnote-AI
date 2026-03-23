@@ -1,0 +1,1 @@
+window.SIDEBAR_ITEMS = {"fn":["content_analyzer_crop_rect","content_analyzer_rotation"]};

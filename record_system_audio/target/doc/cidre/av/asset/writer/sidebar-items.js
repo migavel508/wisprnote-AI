@@ -1,0 +1,1 @@
+window.SIDEBAR_ITEMS = {"enum":["Status"],"struct":["AnyDelegate","Writer"],"trait":["Delegate","DelegateImpl"]};

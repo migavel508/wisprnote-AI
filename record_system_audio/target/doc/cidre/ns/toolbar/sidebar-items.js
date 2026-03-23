@@ -1,0 +1,1 @@
+window.SIDEBAR_ITEMS = {"enum":["ToolbarDisplayMode"],"struct":["AnyToolbarDelegate","Toolbar","ToolbarId","ToolbarItemId"],"trait":["ToolbarDelegate","ToolbarDelegateImpl"]};

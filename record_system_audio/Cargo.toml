@@ -1,0 +1,43 @@
+[package]
+name = "record_system_audio"
+version = "0.1.0"
+edition = "2021"
+
+[[bin]]
+name = "record_system_audio"
+path = "src/main.rs"
+
+[[bin]]
+name = "mic_recorder"
+path = "src/mic_recorder.rs"
+
+[[bin]]
+name = "combined_recorder"
+path = "src/combined_recorder.rs"
+
+[[bin]]
+name = "realtime_transcribe"
+path = "src/realtime_transcribe.rs"
+
+[[bin]]
+name = "combined_transcribe"
+path = "src/combined_transcribe.rs"
+
+[[bin]]
+name = "web_transcribe"
+path = "src/web_transcribe.rs"
+
+[dependencies]
+anyhow     = "1"
+ctrlc      = "3"
+ringbuf    = "0.4"
+cidre      = { git = "https://github.com/yury/cidre", features = ["ca", "av", "cf", "ns"] }
+tokio      = { version = "1", features = ["rt-multi-thread", "time", "sync", "macros", "net"] }
+tokio-tungstenite = { version = "0.24", features = ["native-tls"] }
+futures-util = "0.3"
+serde      = { version = "1", features = ["derive"] }
+serde_json = "1"
+url        = "2"
+base64     = "0.22"
+warp       = "0.3"
+tokio-stream = "0.1"

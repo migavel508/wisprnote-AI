@@ -1,0 +1,1 @@
+window.SIDEBAR_ITEMS = {"fn":["drag","find","font","general","ruler"]};

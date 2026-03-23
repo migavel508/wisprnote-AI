@@ -1,0 +1,45 @@
+<!DOCTYPE html><html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1.0"><meta name="generator" content="rustdoc"><meta name="description" content="A function called when an audio track has data to be processed by its tap."><title>ProcessCb in cidre::mt::audio_processing_tap - Rust</title><script>if(window.location.protocol!=="file:")document.head.insertAdjacentHTML("beforeend","SourceSerif4-Regular-6b053e98.ttf.woff2,FiraSans-Italic-81dc35de.woff2,FiraSans-Regular-0fe48ade.woff2,FiraSans-MediumItalic-ccf7e434.woff2,FiraSans-Medium-e1aa3f0a.woff2,SourceCodePro-Regular-8badfe75.ttf.woff2,SourceCodePro-Semibold-aa29a496.ttf.woff2".split(",").map(f=>`<link rel="preload" as="font" type="font/woff2"href="../../../static.files/${f}">`).join(""))</script><link rel="stylesheet" href="../../../static.files/normalize-9960930a.css"><link rel="stylesheet" href="../../../static.files/rustdoc-ca0dd0c4.css"><meta name="rustdoc-vars" data-root-path="../../../" data-static-root-path="../../../static.files/" data-current-crate="cidre" data-themes="" data-resource-suffix="" data-rustdoc-version="1.92.0 (ded5c06cf 2025-12-08)" data-channel="1.92.0" data-search-js="search-d69d8955.js" data-stringdex-js="stringdex-c3e638e9.js" data-settings-js="settings-c38705f0.js" ><script src="../../../static.files/storage-e2aeef58.js"></script><script defer src="sidebar-items.js"></script><script defer src="../../../static.files/main-ce535bd0.js"></script><noscript><link rel="stylesheet" href="../../../static.files/noscript-263c88ec.css"></noscript><link rel="alternate icon" type="image/png" href="../../../static.files/favicon-32x32-eab170b8.png"><link rel="icon" type="image/svg+xml" href="../../../static.files/favicon-044be391.svg"></head><body class="rustdoc type"><!--[if lte IE 11]><div class="warning">This old browser is unsupported and will most likely display funky things.</div><![endif]--><rustdoc-topbar><h2><a href="#">ProcessCb</a></h2></rustdoc-topbar><nav class="sidebar"><div class="sidebar-crate"><h2><a href="../../../cidre/index.html">cidre</a><span class="version">0.15.0</span></h2></div><div class="sidebar-elems"><div id="rustdoc-modnav"><h2><a href="index.html">In cidre::<wbr>mt::<wbr>audio_<wbr>processing_<wbr>tap</a></h2></div></div></nav><div class="sidebar-resizer" title="Drag to resize sidebar"></div><main><div class="width-limiter"><section id="main-content" class="content"><div class="main-heading"><div class="rustdoc-breadcrumbs"><a href="../../index.html">cidre</a>::<wbr><a href="../index.html">mt</a>::<wbr><a href="index.html">audio_processing_tap</a></div><h1>Type Alias <span class="type">Process<wbr>Cb</span>&nbsp;<button id="copy-path" title="Copy item path to clipboard">Copy item path</button></h1><rustdoc-toolbar></rustdoc-toolbar><span class="sub-heading"><a class="src" href="../../../src/cidre/mt/audio_processing_tap.rs.html#129-136">Source</a> </span></div><pre class="rust item-decl"><code>pub type ProcessCb&lt;const N: <a class="primitive" href="https://doc.rust-lang.org/1.92.0/std/primitive.usize.html">usize</a> = 1&gt; = extern &quot;C-unwind&quot; <a class="primitive" href="https://doc.rust-lang.org/1.92.0/std/primitive.fn.html">fn</a>(tap: &amp;mut <a class="struct" href="struct.Tap.html" title="struct cidre::mt::audio_processing_tap::Tap">AudioProcessingTap</a>, frames_n: <a class="type" href="../../cm/type.ItemCount.html" title="type cidre::cm::ItemCount">ItemCount</a>, flags: <a class="struct" href="struct.Flags.html" title="struct cidre::mt::audio_processing_tap::Flags">AudioProcessingTapFlags</a>, buf_list_in_out: &amp;mut <a class="struct" href="../../cat/audio/struct.BufList.html" title="struct cidre::cat::audio::BufList">AudioBufList</a>&lt;N&gt;, frames_n_out: &amp;mut <a class="type" href="../../cm/type.ItemCount.html" title="type cidre::cm::ItemCount">ItemCount</a>, flags_out: &amp;mut <a class="struct" href="struct.Flags.html" title="struct cidre::mt::audio_processing_tap::Flags">Flags</a>);</code></pre><details class="toggle top-doc" open><summary class="hideme"><span>Expand description</span></summary><div class="docblock"><p>A function called when an audio track has data to be processed by its tap.</p>
+<p>A processing callback is invoked when the audio track has data that can be processed by a
+given tap.</p>
+<p>The processing callback will be called when there is sufficient input data to provide for
+processing. The callback should then go and request as much source data as it needs in order
+to produce the requested number of processed samples. When the callback requests source data,
+it may receive less data than it requests.</p>
+<p>The tap must provide the same number of samples that are being requested. Under normal circumstances,
+the source data it requests should be satisfied (as the client running the audio queue is also
+providing the queue with the audio source material). If there is insufficient source data available
+(this is indicated by the numberFramesOut from the GetSourceAudio call), then the processing tap
+should cope as best as it can; it can either return less data than was requested, insert silence,
+insert noise, etc.
+If less data is returned than requested, the remainder will be filled with silence.</p>
+<p>A processing tap is a real-time operation, so the general Core Audio limitations for real-time
+processing apply.  For example, care should be taken not to allocate memory or call into
+blocking system calls, as this will interfere with the real-time nature of audio playback.</p>
+<p>Under normal operation, the source data will be continuous from the last time the callback was
+called, and the processed samples should be continuous from the previous samples returned. If
+there is any discontinuity between the last samples provided for processing, the audio queue will
+set the kMTAudioProcessingTapFlag_StartOfStream bit in the flags. After a discontinuity, the
+first sample that the processing tap outputs should correspond to the first sample that was
+provided in the source samples (so a reset + consequent process serves to re-anchor a
+relationship between the processing tap’s source and processed samples). In this case, the
+processing tap will typically discard any previous state (for example, if a processing tap was
+adding a reverb to a signal, then the discontinuity flag would act the same as AudioUnitReset;
+any previous source information in the processing tap should be discarded).</p>
+<p>The caller is responsible for absorbing any processing delays. For example, if the
+processing is to be done by an audio unit that reports a processing latency, then the caller
+should remove those latency samples from the audio unit’s rendering and not return them to
+the tap.</p>
+<p>The processing tap may operate on the provided source data in place (“in-place processing”)
+and return pointers to that buffer, rather than its own. This is similar to audio
+unit render operations. The processing tap will be provided with a bufferList on input
+where the mData pointers are NULL.</p>
+<p>When the output audio is stopped asynchronously, the processing tap will see the
+kMTAudioProcessingTapFlag_EndOfStream bit set on return from GetSourceAudio, and is responsible
+for propagating this bit from the callback when its processing has reached this point.</p>
+<p>A processing tap will NEVER see the same source data again, so, it should keep its own copy,
+if it needs to keep it for further reference past the duration of this call. It also cannot
+assume that the pointers to the source data that it retrieves will remain valid AFTER the
+processing tap has executed.</p>
+<p>Should the processing tap provide custom buffers in bufferListInOut, it should ensure that the
+data pointers remain valid until the tap is executed again.</p>
+</div></details></section></div></main></body></html>

@@ -87,7 +87,8 @@ import NotesPage from './pages/NotesPage';
 import AssetsPage from './pages/AssetsPage';
 import HistoryPage from './pages/HistoryPage';
 import KnowledgePage from './pages/KnowledgePage';
-import Sidebar from './components/Sidebar';
+import ProcessPage from './pages/ProcessPage';
+import MainSidebar from './components/MainSidebar';
 import { Session } from '@supabase/supabase-js';
 
 declare global {
@@ -163,7 +164,7 @@ export default function App() {
 
   const [session, setSession] = useState<Session | null>(null);
   const [file, setFile] = useState<File | null>(null);
-  const [prompt, setPrompt] = useState('Analyze this recording...');
+  const [prompt, setPrompt] = useState('');
   const [status, setStatus] = useState<'idle' | 'splitting' | 'processing' | 'completed' | 'error'>('idle');
   const [batches, setBatches] = useState<BatchStatus[]>([]);
   const [error, setError] = useState<string | null>(null);
@@ -1547,301 +1548,73 @@ export default function App() {
   }
 
   return (
-    <div className="min-h-screen bg-[#E4E3E0] text-[#141414] font-sans selection:bg-[#141414] selection:text-[#E4E3E0] flex flex-col">
-      {/* Header */}
-      <header className="border-b border-[#141414] p-4 flex flex-col sm:flex-row justify-between items-start sm:items-center gap-4 bg-white sticky top-0 z-50">
-        <div className="flex flex-col sm:flex-row items-start sm:items-center gap-4 sm:gap-6 w-full sm:w-auto">
-          <div className="flex items-center gap-2 cursor-pointer" onClick={() => setCurrentView('process')}>
-            <Layers className="w-6 h-6" />
-            <h1 className="text-xl font-bold tracking-tight uppercase">Wisprnote AI</h1>
-          </div>
-          
-          <nav className="flex items-center gap-1 overflow-x-auto w-full sm:w-auto pb-2 sm:pb-0 no-scrollbar">
-            <button 
-              onClick={() => setCurrentView('process')}
-              className={`px-4 py-1.5 text-xs font-mono uppercase tracking-wider transition-colors flex-shrink-0 ${currentView === 'process' ? 'bg-[#141414] text-[#E4E3E0]' : 'hover:bg-[#141414]/5'}`}
-            >
-              Process
-            </button>
-            <button 
-              onClick={() => {
-                if (selectedTask) setCurrentView('notes', selectedTask.id);
-                else navigate('/notes');
-              }}
-              className={`px-4 py-1.5 text-xs font-mono uppercase tracking-wider transition-colors flex-shrink-0 ${currentView === 'notes' ? 'bg-[#141414] text-[#E4E3E0]' : 'hover:bg-[#141414]/5'}`}
-            >
-              Notes
-            </button>
-            <button 
-              onClick={() => {
-                if (selectedTask) setCurrentView('chat', selectedTask.id);
-                else navigate('/chat');
-              }}
-              className={`px-4 py-1.5 text-xs font-mono uppercase tracking-wider transition-colors flex-shrink-0 ${currentView === 'chat' ? 'bg-[#141414] text-[#E4E3E0]' : 'hover:bg-[#141414]/5'}`}
-            >
-              Chat
-            </button>
-            <button 
-              onClick={() => {
-                if (selectedTask) setCurrentView('assets', selectedTask.id);
-                else navigate('/assets');
-              }}
-              className={`px-4 py-1.5 text-xs font-mono uppercase tracking-wider transition-colors flex-shrink-0 ${currentView === 'assets' ? 'bg-[#141414] text-[#E4E3E0]' : 'hover:bg-[#141414]/5'}`}
-            >
-              Assets
-            </button>
-            <button 
-              onClick={() => setCurrentView('agents')}
-              className={`px-4 py-1.5 text-xs font-mono uppercase tracking-wider transition-colors flex-shrink-0 ${currentView === 'agents' ? 'bg-[#141414] text-[#E4E3E0]' : 'hover:bg-[#141414]/5'}`}
-            >
-              Agents
-            </button>
-            <button 
-              onClick={() => setCurrentView('knowledge')}
-              className={`px-4 py-1.5 text-xs font-mono uppercase tracking-wider transition-colors flex-shrink-0 flex items-center gap-1.5 ${currentView === 'knowledge' ? 'bg-[#141414] text-[#E4E3E0]' : 'hover:bg-[#141414]/5'}`}
-            >
-              <Share2 className="w-3 h-3" />
-              Knowledge
-            </button>
-          </nav>
-        </div>
-        
-        <div className="flex items-center gap-4 ml-auto sm:ml-0">
-          <div className="text-[10px] font-mono opacity-50 uppercase tracking-widest hidden sm:block">
-            {status !== 'idle' ? `Status: ${status}` : 'Ready'}
-          </div>
-          <div className="w-8 h-8 rounded-full bg-[#141414] text-[#E4E3E0] flex items-center justify-center text-[10px] font-bold">
-            {session?.user?.email?.substring(0, 2).toUpperCase() || 'AI'}
-          </div>
-          <button 
-            onClick={() => supabase.auth.signOut()}
-            className="text-[10px] font-mono uppercase opacity-50 hover:opacity-100 transition-opacity"
-          >
-            Sign Out
-          </button>
-        </div>
-      </header>
-
-      <div className="flex-1 flex overflow-hidden relative">
-        {/* Sidebar for History/Notes */}
-        <AnimatePresence initial={false}>
-          {isSidebarOpen && (currentView === 'history' || currentView === 'notes' || currentView === 'chat' || currentView === 'assets') && (
-            <Sidebar
-              history={history}
-              selectedTask={selectedTask}
-              isLoading={isLoadingHistory}
-              onSelectTask={(task) => {
-                setSelectedTask(task);
-                setCurrentView('notes', task.id);
-              }}
-              onNewTask={() => setCurrentView('process')}
-              onClose={() => setIsSidebarOpen(false)}
-              onViewAllChats={() => setCurrentView('history')}
-              isMobile={window.innerWidth < 640}
-            />
-          )}
-        </AnimatePresence>
-
-        {/* Sidebar Toggle Button */}
-        {(currentView === 'history' || currentView === 'notes' || currentView === 'chat' || currentView === 'assets') && (
-          <button 
-            onClick={() => setIsSidebarOpen(!isSidebarOpen)}
-            className="fixed sm:absolute left-0 top-1/2 -translate-y-1/2 z-50 bg-[#141414] text-white p-1 rounded-r-md shadow-lg hover:bg-[#333] transition-all"
-            style={{ left: isSidebarOpen ? (window.innerWidth < 640 ? 'calc(100% - 32px)' : '256px') : '0' }}
-          >
-            {isSidebarOpen ? <ChevronLeft className="w-4 h-4" /> : <ChevronRight className="w-4 h-4" />}
-          </button>
+    <div className="h-screen bg-[#faf9f7] text-[#1a1a1a] font-[system-ui] selection:bg-[#1a1a1a] selection:text-white flex overflow-hidden">
+      {/* Main Sidebar Navigation */}
+      <AnimatePresence initial={false}>
+        {isSidebarOpen && (
+          <MainSidebar
+            currentView={currentView}
+            onViewChange={(view) => {
+              if (view === 'notes' && selectedTask) {
+                setCurrentView('notes', selectedTask.id);
+              } else if (view === 'chat' && selectedTask) {
+                setCurrentView('chat', selectedTask.id);
+              } else if (view === 'assets' && selectedTask) {
+                setCurrentView('assets', selectedTask.id);
+              } else {
+                setCurrentView(view);
+              }
+            }}
+            isOpen={isSidebarOpen}
+            onToggle={() => setIsSidebarOpen(!isSidebarOpen)}
+            session={session}
+            onSignOut={() => supabase.auth.signOut()}
+            status={status}
+          />
         )}
+      </AnimatePresence>
 
-        <main className={`flex-1 bg-[#E4E3E0] w-full relative ${(currentView === 'chat' || currentView === 'notes' || currentView === 'assets' || currentView === 'history') ? 'overflow-hidden' : 'overflow-y-auto'}`}>
+      {/* Sidebar Toggle when closed */}
+      {!isSidebarOpen && (
+        <button 
+          onClick={() => setIsSidebarOpen(true)}
+          className="fixed top-4 left-4 z-50 w-8 h-8 bg-white border border-[#e5e5e5] rounded-lg flex items-center justify-center text-[#595959] hover:text-[#1a1a1a] hover:bg-[#f5f5f5] transition-colors shadow-sm"
+        >
+          <ChevronRight className="w-4 h-4" />
+        </button>
+      )}
+
+      {/* Main Content Area */}
+      <div className="flex-1 flex overflow-hidden relative">
+        <main className={`flex-1 bg-[#faf9f7] w-full relative overflow-y-auto`}>
           <AnimatePresence mode="wait">
             {currentView === 'process' && (
               <motion.div 
                 key="process"
-                initial={{ opacity: 0, y: 10 }}
-                animate={{ opacity: 1, y: 0 }}
-                exit={{ opacity: 0, y: -10 }}
-                className="max-w-4xl mx-auto p-4 sm:p-8"
+                initial={{ opacity: 0 }}
+                animate={{ opacity: 1 }}
+                exit={{ opacity: 0 }}
+                className="h-full"
               >
-                <div className="grid grid-cols-1 md:grid-cols-2 gap-8">
-                  {/* Left: Input Selection */}
-                  <div className="space-y-6">
-                    <section className="border border-[#141414] p-6 bg-white shadow-[4px_4px_0px_0px_rgba(20,20,20,1)] flex flex-col">
-                      <div className="flex items-center justify-between mb-4">
-                        <h2 className="font-serif italic text-sm uppercase opacity-50 tracking-wider">01. Input Source</h2>
-                        
-                        {/* Toggle Upload/Record */}
-                        <div className="flex bg-[#F5F5F5] border border-[#141414]/10 rounded-md p-1">
-                          <button
-                            onClick={() => setInputMode('upload')}
-                            className={`flex items-center gap-2 px-3 py-1.5 text-xs font-mono uppercase tracking-widest rounded-sm transition-all ${inputMode === 'upload' ? 'bg-white shadow-sm font-bold text-[#141414]' : 'opacity-50 hover:opacity-100'}`}
-                          >
-                            <Upload className="w-3 h-3" /> File
-                          </button>
-                          <button
-                            onClick={() => setInputMode('record')}
-                            className={`flex items-center gap-2 px-3 py-1.5 text-xs font-mono uppercase tracking-widest rounded-sm transition-all ${inputMode === 'record' ? 'bg-white shadow-sm font-bold text-[#141414]' : 'opacity-50 hover:opacity-100'}`}
-                          >
-                            <Mic className="w-3 h-3" /> Record
-                          </button>
-                        </div>
-                      </div>
-
-                      {/* Content Area for Input */}
-                      <div className="min-h-[220px] flex flex-col justify-center">
-                        {inputMode === 'upload' ? (
-                          <div 
-                            onClick={() => fileInputRef.current?.click()}
-                            className={`flex-1 border-2 border-dashed border-[#141414]/20 flex flex-col items-center justify-center p-8 text-center cursor-pointer hover:bg-[#F5F5F5] transition-colors mb-4 ${file && !isRecording ? 'bg-[#F5F5F5]' : ''}`}
-                          >
-                            <input type="file" ref={fileInputRef} onChange={handleFileChange} className="hidden" accept="audio/*" />
-                            {file && !isRecording ? (
-                              <div className="flex flex-col items-center gap-2">
-                                <FileAudio className="w-12 h-12 mb-2" />
-                                <span className="font-mono text-sm font-bold">{file.name}</span>
-                                <span className="text-xs opacity-50">{(file.size / (1024 * 1024)).toFixed(2)} MB</span>
-                              </div>
-                            ) : (
-                              <div className="flex flex-col items-center gap-2">
-                                <Upload className="w-12 h-12 mb-2 opacity-30" />
-                                <span className="text-sm font-medium">Drop audio file here or click to browse</span>
-                              </div>
-                            )}
-                          </div>
-                        ) : (
-                          <div className={`flex-1 border-2 border-[#141414]/10 flex flex-col items-center justify-center p-8 text-center mb-4 transition-all ${isRecording ? 'bg-red-50/50 border-red-200' : 'bg-[#FAFAFA]'}`}>
-                            {isRecording ? (
-                              <div className="flex flex-col items-center gap-6 w-full">
-                                <div className="text-3xl font-mono text-red-500 font-bold tracking-widest">
-                                  {formatTime(recordingTime)}
-                                </div>
-                                
-                                {/* Wave Animation */}
-                                <div className="flex items-end justify-center gap-1 h-8 w-full max-w-[200px]">
-                                  {[...Array(20)].map((_, i) => (
-                                    <motion.div
-                                      key={i}
-                                      animate={{ height: isPaused ? '20%' : ['20%', '100%', '20%'] }}
-                                      transition={isPaused ? { duration: 0.3 } : {
-                                        duration: 0.8,
-                                        repeat: Infinity,
-                                        delay: i * 0.05,
-                                        ease: "easeInOut"
-                                      }}
-                                      className={`w-1.5 rounded-t-sm opacity-80 ${isPaused ? 'bg-gray-400' : 'bg-red-500'}`}
-                                    />
-                                  ))}
-                                </div>
-
-                                <div className="flex items-center gap-4 mt-2">
-                                  {isPaused ? (
-                                    <button 
-                                      onClick={resumeRecording}
-                                      className="w-14 h-14 bg-[#141414] text-white rounded-full flex items-center justify-center hover:bg-[#333] hover:scale-105 transition-all shadow-md"
-                                      title="Resume"
-                                    >
-                                      <PlayCircle className="w-7 h-7" />
-                                    </button>
-                                  ) : (
-                                    <button 
-                                      onClick={pauseRecording}
-                                      className="w-14 h-14 bg-gray-200 text-gray-700 rounded-full flex items-center justify-center hover:bg-gray-300 hover:scale-105 transition-all shadow-md"
-                                      title="Pause"
-                                    >
-                                      <PauseCircle className="w-7 h-7" />
-                                    </button>
-                                  )}
-                                  
-                                  <button 
-                                    onClick={stopRecording}
-                                    className="w-16 h-16 bg-red-500 text-white rounded-full flex items-center justify-center hover:bg-red-600 hover:scale-105 transition-all shadow-lg"
-                                    title="Stop"
-                                  >
-                                    <StopCircle className="w-8 h-8" />
-                                  </button>
-                                </div>
-                                
-                                <span className={`text-xs font-mono uppercase tracking-widest font-bold ${isPaused ? 'text-gray-500' : 'text-red-500/70 animate-pulse'}`}>
-                                  {isPaused ? 'Recording Paused' : 'Recording Live...'}
-                                </span>
-                              </div>
-                            ) : file ? (
-                              <div className="flex flex-col items-center gap-4 w-full">
-                                <div className="p-4 bg-green-100 text-green-600 rounded-full mb-2">
-                                  <CheckCircle2 className="w-8 h-8" />
-                                </div>
-                                <span className="font-mono text-sm font-bold text-green-700">Recording Saved</span>
-                                <span className="text-xs opacity-50">{formatTime(recordingTime)}</span>
-                                <button 
-                                  onClick={() => { setFile(null); startRecording(); }}
-                                  className="mt-2 text-xs font-mono uppercase border-b border-[#141414] pb-0.5 hover:opacity-70"
-                                >
-                                  Record Again
-                                </button>
-                              </div>
-                            ) : (
-                              <div className="flex flex-col items-center gap-6">
-                                <div className="w-20 h-20 rounded-full bg-[#141414]/5 flex items-center justify-center">
-                                  <Mic className="w-10 h-10 opacity-40" />
-                                </div>
-                                <button 
-                                  onClick={startRecording}
-                                  className="px-8 py-3 bg-[#141414] text-white font-bold uppercase tracking-widest text-xs rounded-full hover:bg-[#333] hover:scale-105 transition-all shadow-md flex items-center gap-2"
-                                >
-                                  <span className="w-2 h-2 rounded-full bg-red-500"></span>
-                                  Start Recording
-                                </button>
-                              </div>
-                            )}
-                          </div>
-                        )}
-                      </div>
-
-                      <div className="mt-auto">
-                        <textarea 
-                          value={prompt}
-                          onChange={(e) => setPrompt(e.target.value)}
-                          className="w-full border border-[#141414] p-3 text-sm font-mono focus:outline-none h-20 resize-none mb-4"
-                          placeholder="Instructions (optional)..."
-                        />
-                        <button 
-                          onClick={startProcessing}
-                          disabled={!file || isRecording || status === 'processing' || status === 'splitting'}
-                          className="w-full bg-[#141414] text-[#E4E3E0] py-4 font-bold uppercase tracking-widest hover:bg-[#333] disabled:opacity-30 flex items-center justify-center gap-2"
-                        >
-                          {status === 'processing' || status === 'splitting' ? <Loader2 className="w-5 h-5 animate-spin" /> : <Play className="w-5 h-5 fill-current" />}
-                          Start Processing
-                        </button>
-                      </div>
-                    </section>
-                  </div>
-
-                  {/* Right: Progress */}
-                  <div className="space-y-6">
-                    {batches.length > 0 && (
-                      <section className="border border-[#141414] bg-white shadow-[4px_4px_0px_0px_rgba(20,20,20,1)] overflow-hidden">
-                        <div className="p-4 border-b border-[#141414] bg-[#141414] text-[#E4E3E0] flex justify-between items-center">
-                          <h2 className="font-serif italic text-sm uppercase tracking-wider">02. Queue</h2>
-                          <span className="font-mono text-[10px]">{Math.round(totalProgress)}%</span>
-                        </div>
-                        <div className="max-h-[500px] overflow-y-auto">
-                          {batches.map((batch, idx) => (
-                            <div key={idx} className="p-4 border-b border-[#141414]/10 flex items-center justify-between">
-                              <div className="flex items-center gap-3">
-                                <div className={`w-6 h-6 rounded-full border border-[#141414] flex items-center justify-center text-[10px] font-mono ${batch.status === 'completed' ? 'bg-[#141414] text-[#E4E3E0]' : ''}`}>
-                                  {idx + 1}
-                                </div>
-                                <span className="text-xs font-mono">Batch {idx + 1}</span>
-                              </div>
-                              {batch.status === 'processing' && <Loader2 className="w-3 h-3 animate-spin opacity-50" />}
-                              {batch.status === 'completed' && <CheckCircle2 className="w-3 h-3 text-green-600" />}
-                            </div>
-                          ))}
-                        </div>
-                      </section>
-                    )}
-                  </div>
-                </div>
+                <ProcessPage
+                  file={file}
+                  setFile={setFile}
+                  isRecording={isRecording}
+                  isPaused={isPaused}
+                  recordingTime={recordingTime}
+                  startRecording={startRecording}
+                  stopRecording={stopRecording}
+                  pauseRecording={pauseRecording}
+                  resumeRecording={resumeRecording}
+                  prompt={prompt}
+                  setPrompt={setPrompt}
+                  startProcessing={startProcessing}
+                  status={status}
+                  batches={batches}
+                  totalProgress={totalProgress}
+                  inputMode={inputMode}
+                  setInputMode={setInputMode}
+                />
               </motion.div>
             )}
 
@@ -1862,21 +1635,13 @@ export default function App() {
                   onNavigateToAssets={() => setCurrentView('assets', selectedTask.id)}
                 />
               ) : (
-                <div className="absolute inset-0 flex flex-col items-center justify-center bg-white">
-                  <BookOpen className="w-16 h-16 mb-4 opacity-10" />
-                  <h2 className="text-xl font-bold mb-2 opacity-60">No Meeting Selected</h2>
-                  <p className="text-sm opacity-40 mb-6 text-center max-w-md">
-                    {history.length > 0 
-                      ? "Select a meeting from the sidebar to view its notes"
-                      : "Process your first audio to get started with notes"}
-                  </p>
-                  <button
-                    onClick={() => setCurrentView('process')}
-                    className="px-6 py-2 bg-[#141414] text-white text-xs font-mono uppercase tracking-widest hover:bg-[#333] transition-colors"
-                  >
-                    Process Audio
-                  </button>
-                </div>
+                <HistoryPage
+                  history={history}
+                  onSelectTask={(task) => {
+                    setSelectedTask(task);
+                    setCurrentView('notes', task.id);
+                  }}
+                />
               )
             )}
 
@@ -1893,21 +1658,13 @@ export default function App() {
                   handleVisualize={handleVisualize}
                 />
               ) : (
-                <div className="absolute inset-0 flex flex-col items-center justify-center bg-white">
-                  <MessageSquare className="w-16 h-16 mb-4 opacity-10" />
-                  <h2 className="text-xl font-bold mb-2 opacity-60">No Meeting Selected</h2>
-                  <p className="text-sm opacity-40 mb-6 text-center max-w-md">
-                    {history.length > 0 
-                      ? "Select a meeting from the sidebar to start chatting"
-                      : "Process your first audio to start chatting about it"}
-                  </p>
-                  <button
-                    onClick={() => setCurrentView('process')}
-                    className="px-6 py-2 bg-[#141414] text-white text-xs font-mono uppercase tracking-widest hover:bg-[#333] transition-colors"
-                  >
-                    Process Audio
-                  </button>
-                </div>
+                <HistoryPage
+                  history={history}
+                  onSelectTask={(task) => {
+                    setSelectedTask(task);
+                    setCurrentView('chat', task.id);
+                  }}
+                />
               )
             )}
 
@@ -1926,21 +1683,13 @@ export default function App() {
                   downloadExistingAsset={downloadExistingAsset}
                 />
               ) : (
-                <div className="absolute inset-0 flex flex-col items-center justify-center bg-white">
-                  <FileBox className="w-16 h-16 mb-4 opacity-10" />
-                  <h2 className="text-xl font-bold mb-2 opacity-60">No Meeting Selected</h2>
-                  <p className="text-sm opacity-40 mb-6 text-center max-w-md">
-                    {history.length > 0 
-                      ? "Select a meeting from the sidebar to generate assets"
-                      : "Process your first audio to generate presentations and reports"}
-                  </p>
-                  <button
-                    onClick={() => setCurrentView('process')}
-                    className="px-6 py-2 bg-[#141414] text-white text-xs font-mono uppercase tracking-widest hover:bg-[#333] transition-colors"
-                  >
-                    Process Audio
-                  </button>
-                </div>
+                <HistoryPage
+                  history={history}
+                  onSelectTask={(task) => {
+                    setSelectedTask(task);
+                    setCurrentView('assets', task.id);
+                  }}
+                />
               )
             )}
 

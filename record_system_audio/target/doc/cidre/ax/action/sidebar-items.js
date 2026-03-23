@@ -1,0 +1,1 @@
+window.SIDEBAR_ITEMS = {"fn":["cancel","confirm","decrement","increment","pick","press","raise","show_alternate_ui","show_default_ui","show_menu"]};

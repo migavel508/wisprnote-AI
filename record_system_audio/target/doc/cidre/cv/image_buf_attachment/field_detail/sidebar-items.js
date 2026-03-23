@@ -1,0 +1,1 @@
+window.SIDEBAR_ITEMS = {"fn":["spatial_first_line_early","spatial_first_line_late","termporal_bottom_first","termporal_top_first"]};

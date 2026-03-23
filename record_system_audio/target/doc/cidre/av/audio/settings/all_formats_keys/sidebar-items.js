@@ -1,0 +1,1 @@
+window.SIDEBAR_ITEMS = {"fn":["id","number_of_channels","sample_rate"]};

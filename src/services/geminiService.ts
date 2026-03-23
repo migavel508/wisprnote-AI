@@ -39,6 +39,24 @@ export interface ProcessResult {
 export async function processAudioBatch(batch: AudioBatch, prompt: string): Promise<ProcessResult> {
   const base64Data = await blobToBase64(batch.blob);
   
+  // Use a transcription-focused prompt to get clean transcription output
+  const transcriptionPrompt = `You are a professional transcription service. Your ONLY task is to transcribe the spoken words in this audio accurately and verbatim.
+
+IMPORTANT RULES:
+- Output ONLY the exact words spoken in the audio
+- Do NOT summarize, analyze, or interpret the content
+- Do NOT add any commentary, notes, or explanations
+- Do NOT use bullet points or formatting - just plain text paragraphs
+- Include speaker labels if multiple speakers are detected (e.g., "Speaker 1:", "Speaker 2:")
+- Preserve natural speech patterns including filler words (um, uh, etc.) if present
+- If audio is unclear, use [inaudible] for unclear portions
+
+This is part ${batch.index + 1} of ${batch.total} of the audio recording (from ${Math.floor(batch.startTime)}s to ${Math.floor(batch.endTime)}s).
+
+${prompt ? `Additional context: ${prompt}` : ''}
+
+Now transcribe the audio:`;
+
   const response = await generateWithFallback({
     model: "gemini-3-flash-preview",
     contents: [
@@ -51,7 +69,7 @@ export async function processAudioBatch(batch: AudioBatch, prompt: string): Prom
             },
           },
           {
-            text: `${prompt}\n\nThis is part ${batch.index + 1} of ${batch.total} of the audio recording (from ${Math.floor(batch.startTime)}s to ${Math.floor(batch.endTime)}s).`,
+            text: transcriptionPrompt,
           },
         ],
       },

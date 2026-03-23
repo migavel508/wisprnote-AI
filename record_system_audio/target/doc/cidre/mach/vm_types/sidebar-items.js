@@ -1,0 +1,1 @@
+window.SIDEBAR_ITEMS = {"type":["Addr","Integer","Map","MapInspect","MapRead","Natural","Offset","Size"]};
