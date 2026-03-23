@@ -66,7 +66,7 @@ export default function MainSidebar({
     <>
       {/* Mobile overlay backdrop */}
       <div 
-        className="fixed inset-0 bg-black/20 z-40 md:hidden"
+        className="fixed inset-0 bg-black/20 z-[60] md:hidden"
         onClick={onToggle}
       />
       
@@ -75,7 +75,7 @@ export default function MainSidebar({
         animate={{ x: 0, opacity: 1 }}
         exit={{ x: -240, opacity: 0 }}
         transition={{ duration: 0.2 }}
-        className="fixed md:relative h-screen w-[240px] bg-[#f8f8f7] border-r border-[#e5e5e5] flex flex-col flex-shrink-0 font-[system-ui] z-50"
+        className="fixed md:relative h-screen w-[240px] bg-[#f8f8f7] border-r border-[#e5e5e5] flex flex-col flex-shrink-0 font-[system-ui] z-[70]"
       >
       {/* Sidebar Toggle */}
       <div className="flex items-center justify-start px-4 pt-4 pb-4">

@@ -228,7 +228,7 @@ export default function ProcessPage({
 
       {/* Start Processing Button - Shows above collapsed bar when file is ready */}
       {file && !isRecording && !isProcessing && viewState === 'collapsed' && (
-        <div className="fixed bottom-[90px] sm:bottom-[100px] left-1/2 transform -translate-x-1/2 z-50 px-4 w-full sm:w-auto flex justify-center">
+        <div className="absolute bottom-[90px] sm:bottom-[100px] left-1/2 transform -translate-x-1/2 z-40 px-4 w-full sm:w-auto flex justify-center">
           <motion.button 
             initial={{ opacity: 0, y: 20 }}
             animate={{ opacity: 1, y: 0 }}
@@ -243,7 +243,7 @@ export default function ProcessPage({
 
       {/* Processing Progress Bar - Shows during processing */}
       {isProcessing && (
-        <div className="fixed bottom-[90px] sm:bottom-[100px] left-1/2 transform -translate-x-1/2 z-50 w-[calc(100%-32px)] sm:w-[600px] max-w-[600px]">
+        <div className="absolute bottom-[90px] sm:bottom-[100px] left-1/2 transform -translate-x-1/2 z-40 w-[calc(100%-32px)] sm:w-[600px] max-w-[600px]">
           <motion.div 
             initial={{ opacity: 0, y: 20 }}
             animate={{ opacity: 1, y: 0 }}
@@ -269,7 +269,7 @@ export default function ProcessPage({
 
       {/* Bottom Bar - Collapsed State */}
       {viewState === 'collapsed' && (
-        <div className="fixed bottom-4 sm:bottom-6 left-1/2 transform -translate-x-1/2 z-50 w-[calc(100%-32px)] sm:w-auto max-w-[600px]">
+        <div className="absolute bottom-4 sm:bottom-6 left-1/2 transform -translate-x-1/2 z-40 w-[calc(100%-32px)] sm:w-auto max-w-[600px]">
           <div className="flex items-center gap-2 w-full sm:w-auto">
             {/* Wave Animation Button */}
             <div 
@@ -368,7 +368,7 @@ export default function ProcessPage({
             animate={{ y: 0, opacity: 1 }}
             exit={{ y: '100%', opacity: 0 }}
             transition={{ type: 'spring', damping: 25, stiffness: 300 }}
-            className="fixed bottom-0 left-0 right-0 sm:left-1/2 sm:right-auto sm:transform sm:-translate-x-1/2 w-full sm:w-[720px] bg-white rounded-t-[20px] sm:rounded-t-[24px] shadow-[0_-4px_40px_rgba(0,0,0,0.12)] border border-[#141414]/10 border-b-0 flex flex-col z-50 overflow-hidden"
+            className="absolute bottom-0 left-0 right-0 sm:left-1/2 sm:right-auto sm:transform sm:-translate-x-1/2 w-full sm:w-[720px] bg-white rounded-t-[20px] sm:rounded-t-[24px] shadow-[0_-4px_40px_rgba(0,0,0,0.12)] border border-[#141414]/10 border-b-0 flex flex-col z-40 overflow-hidden"
             style={{ height: '70vh', maxHeight: '420px' }}
           >
             {/* Header */}

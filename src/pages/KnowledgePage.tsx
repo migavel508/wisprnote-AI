@@ -21,6 +21,7 @@ import {
   ZoomOut,
   Maximize2
 } from 'lucide-react';
+import { KnowledgeGraphSkeleton } from '../components/Skeleton';
 
 interface KnowledgePageProps {
   kgData: any[];
@@ -30,6 +31,7 @@ interface KnowledgePageProps {
   kgBuilt: boolean;
   buildKnowledgeGraph: () => void;
   historyLength: number;
+  isInitialLoading?: boolean;
 }
 
 // Similarity calculation for topic matching
@@ -80,7 +82,8 @@ export default function KnowledgePage({
   isExtractingNewKG,
   kgBuilt,
   buildKnowledgeGraph,
-  historyLength
+  historyLength,
+  isInitialLoading = false
 }: KnowledgePageProps) {
   const [selectedNode, setSelectedNode] = useState<any>(null);
   const [searchQuery, setSearchQuery] = useState('');
@@ -611,6 +614,11 @@ Answer the user's question based on this data. Be concise and helpful. If you ca
     { type: 'decision', color: '#f59e0b', label: 'Decision', shape: 'small' },
     { type: 'action', color: '#ec4899', label: 'Action', shape: 'small' }
   ];
+
+  // Show skeleton during initial data loading
+  if (isInitialLoading) {
+    return <KnowledgeGraphSkeleton />;
+  }
 
   return (
     <div className="absolute inset-0 flex flex-col bg-white overflow-hidden">
