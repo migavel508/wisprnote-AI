@@ -13,6 +13,7 @@ import {
 } from 'lucide-react';
 import Markdown from 'react-markdown';
 import remarkGfm from 'remark-gfm';
+import { ChatPageSkeleton } from '../components/Skeleton';
 
 interface Message {
   role: 'user' | 'model';
@@ -30,7 +31,7 @@ interface TaskHistory {
 }
 
 interface ChatPageProps {
-  selectedTask: TaskHistory;
+  selectedTask: TaskHistory | null;
   chatMessages: Message[];
   chatInput: string;
   setChatInput: (value: string) => void;
@@ -38,6 +39,7 @@ interface ChatPageProps {
   isGeneratingImage: boolean;
   handleSendMessage: () => void;
   handleVisualize: (text: string) => void;
+  isLoading?: boolean;
 }
 
 export default function ChatPage({
@@ -49,6 +51,7 @@ export default function ChatPage({
   isGeneratingImage,
   handleSendMessage,
   handleVisualize,
+  isLoading = false,
 }: ChatPageProps) {
   const chatEndRef = useRef<HTMLDivElement>(null);
   const messagesContainerRef = useRef<HTMLDivElement>(null);
@@ -62,6 +65,11 @@ export default function ChatPage({
 
   // Calculate input area height for proper padding
   const INPUT_AREA_HEIGHT = 180; // Approximate height of input area + disclaimer
+
+  // Show skeleton while loading
+  if (isLoading || !selectedTask) {
+    return <ChatPageSkeleton />;
+  }
 
   return (
     <div className="h-full w-full bg-white relative overflow-hidden">

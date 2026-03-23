@@ -4,10 +4,12 @@ import { BookOpen, FileBox } from 'lucide-react';
 import Markdown from 'react-markdown';
 import remarkGfm from 'remark-gfm';
 import { TaskHistory } from '../services/supabaseService';
+import { NotesPageSkeleton } from '../components/Skeleton';
 
 interface NotesPageProps {
-  selectedTask: TaskHistory;
+  selectedTask: TaskHistory | null;
   onNavigateToAssets: () => void;
+  isLoading?: boolean;
 }
 
 type NoteTab = 'transcription' | 'summary' | 'notes';
@@ -23,8 +25,13 @@ function formatTranscriptionWithBoldSpeakers(text: string): string {
   return text.replace(speakerPattern, (match) => `**${match.trim()}**`);
 }
 
-export default function NotesPage({ selectedTask, onNavigateToAssets }: NotesPageProps) {
+export default function NotesPage({ selectedTask, onNavigateToAssets, isLoading = false }: NotesPageProps) {
   const [noteTab, setNoteTab] = useState<NoteTab>('transcription');
+
+  // Show skeleton while loading
+  if (isLoading || !selectedTask) {
+    return <NotesPageSkeleton />;
+  }
 
   return (
     <div className="absolute inset-0 flex flex-col bg-white overflow-hidden">

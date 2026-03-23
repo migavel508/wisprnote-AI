@@ -9,9 +9,10 @@ import {
   File as FileIcon
 } from 'lucide-react';
 import { TaskHistory, GeneratedAsset } from '../services/supabaseService';
+import { AssetsPageSkeleton } from '../components/Skeleton';
 
 interface AssetsPageProps {
-  selectedTask: TaskHistory;
+  selectedTask: TaskHistory | null;
   slideCount: number;
   setSlideCount: (count: number) => void;
   isGeneratingAsset: boolean;
@@ -21,6 +22,7 @@ interface AssetsPageProps {
   setSelectedAsset: (asset: GeneratedAsset | null) => void;
   assetHistory: GeneratedAsset[];
   downloadExistingAsset: (asset: GeneratedAsset) => void;
+  isLoading?: boolean;
 }
 
 export default function AssetsPage({
@@ -34,7 +36,13 @@ export default function AssetsPage({
   setSelectedAsset,
   assetHistory,
   downloadExistingAsset,
+  isLoading = false,
 }: AssetsPageProps) {
+  // Show skeleton while loading
+  if (isLoading || !selectedTask) {
+    return <AssetsPageSkeleton />;
+  }
+
   return (
     <div className="absolute inset-0 flex flex-col bg-white overflow-hidden">
       {/* Fixed Header */}

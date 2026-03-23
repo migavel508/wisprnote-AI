@@ -45,6 +45,68 @@ export async function saveTask(task: TaskHistory) {
   return data[0];
 }
 
+// Lightweight task metadata for list views (no heavy transcription/notes)
+export interface TaskMetadata {
+  id: string;
+  created_at: string;
+  filename: string;
+  summary?: string;
+  status: 'completed' | 'error';
+  duration: number;
+}
+
+// Get tasks with pagination - lightweight version for list views
+export async function getTasksLightweight(page: number = 0, pageSize: number = 20): Promise<{ data: TaskMetadata[], hasMore: boolean, total: number }> {
+  const { data: { user } } = await supabase.auth.getUser();
+  if (!user) throw new Error('User not authenticated');
+
+  // Get total count first
+  const { count } = await supabase
+    .from('task_history')
+    .select('*', { count: 'exact', head: true })
+    .eq('user_id', user.id);
+
+  // Fetch only essential fields for list view (no transcription, notes)
+  const { data, error } = await supabase
+    .from('task_history')
+    .select('id, created_at, filename, summary, status, duration')
+    .eq('user_id', user.id)
+    .order('created_at', { ascending: false })
+    .range(page * pageSize, (page + 1) * pageSize - 1);
+  
+  if (error) {
+    console.error('Error fetching tasks:', error);
+    throw error;
+  }
+  
+  return {
+    data: data as TaskMetadata[],
+    hasMore: (count || 0) > (page + 1) * pageSize,
+    total: count || 0
+  };
+}
+
+// Get full task details by ID (for when user clicks on a task)
+export async function getTaskById(taskId: string): Promise<TaskHistory | null> {
+  const { data: { user } } = await supabase.auth.getUser();
+  if (!user) throw new Error('User not authenticated');
+
+  const { data, error } = await supabase
+    .from('task_history')
+    .select('*')
+    .eq('id', taskId)
+    .eq('user_id', user.id)
+    .single();
+  
+  if (error) {
+    if (error.code === 'PGRST116') return null; // Not found
+    console.error('Error fetching task:', error);
+    throw error;
+  }
+  return data as TaskHistory;
+}
+
+// Legacy function - fetches all tasks (use sparingly)
 export async function getTasks() {
   const { data: { user } } = await supabase.auth.getUser();
   if (!user) throw new Error('User not authenticated');
