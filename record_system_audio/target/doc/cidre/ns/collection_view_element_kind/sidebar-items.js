@@ -1,0 +1,1 @@
+window.SIDEBAR_ITEMS = {"fn":["section_footer","section_header"]};

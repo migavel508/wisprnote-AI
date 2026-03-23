@@ -1,0 +1,1 @@
+window.SIDEBAR_ITEMS = {"enum":["LogicalToPhysicalColorAttachMappingState"],"struct":["LogicalToPhysicalColorAttachMap","RenderPipelineColorAttachDesc","RenderPipelineColorAttachDescArray","RenderPipelineDesc"]};

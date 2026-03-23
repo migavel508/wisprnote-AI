@@ -1,0 +1,1 @@
+window.SIDEBAR_ITEMS = {"enum":["ErrorCode","TimeDurationConstraintType"],"struct":["AudioFileAnalyzer","AudioStreamAnalyzer","Classification","ClassificationResult","ClassifySoundRequest","Id","Request","Result","TimeDurationConstraint"],"trait":["ResultsObserving","ResultsObservingImpl"]};

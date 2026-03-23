@@ -1,0 +1,1 @@
+window.SIDEBAR_ITEMS = {"constant":["VM_MEMORY_MACH_MSG","VM_MEMORY_SHARED_PMAP"],"struct":["VmAllocationFlags"]};

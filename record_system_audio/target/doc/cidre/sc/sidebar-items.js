@@ -1,0 +1,1 @@
+window.SIDEBAR_ITEMS = {"mod":["content_sharing_picker","error","recording_output","shareable_content","stream"],"struct":["ScreenshotManager"]};

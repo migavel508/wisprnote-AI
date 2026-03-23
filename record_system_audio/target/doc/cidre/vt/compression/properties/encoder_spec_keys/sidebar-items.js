@@ -1,0 +1,1 @@
+window.SIDEBAR_ITEMS = {"fn":["enable_hw_accelerated_video_encoder","enable_low_latency_rate_control","require_hw_accelerated_video_encoder"]};

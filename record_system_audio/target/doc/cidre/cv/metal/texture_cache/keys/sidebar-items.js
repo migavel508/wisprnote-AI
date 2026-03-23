@@ -1,0 +1,1 @@
+window.SIDEBAR_ITEMS = {"fn":["maximum_texture_age","texture_usage"]};

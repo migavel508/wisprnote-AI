@@ -1,0 +1,1 @@
+window.SIDEBAR_ITEMS = {"constant":["NOT_FOUND"],"enum":["ComparisonResult"],"fn":["class_from_ns_string","protocol_from_ns_string","selector_from_ns_string","string_from_class","string_from_protocol","string_from_selector"],"struct":["ExceptionName"],"type":["Comparator"]};

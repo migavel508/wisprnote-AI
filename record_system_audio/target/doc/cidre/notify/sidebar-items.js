@@ -1,0 +1,1 @@
+window.SIDEBAR_ITEMS = {"fn":["cancel","check","is_valid_token","post","register_check","register_dispatch","register_dispatch_block","register_file_descriptor","register_mach_port","register_signal","resume","set_state","state","suspend"],"struct":["Error","RegFlags","Status","Token"],"type":["Handler","Result"]};

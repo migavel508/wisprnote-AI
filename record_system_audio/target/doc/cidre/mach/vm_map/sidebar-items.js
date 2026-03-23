@@ -1,0 +1,1 @@
+window.SIDEBAR_ITEMS = {"fn":["vm_allocate","vm_deallocate"]};

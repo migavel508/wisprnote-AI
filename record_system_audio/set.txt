@@ -1,0 +1,8 @@
+# Set API key
+export DEEPGRAM_API_KEY="555b11280fed39c3fdb30249841a9125b4fb0233"
+
+# Run
+cargo run --release --bin realtime_transcribe
+
+# Or with options
+cargo run --release --bin realtime_transcribe -- --duration 300 --api-key 555b11280fed39c3fdb30249841a9125b4fb0233

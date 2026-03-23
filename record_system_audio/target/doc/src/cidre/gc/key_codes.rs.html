@@ -1,0 +1,503 @@
+<!DOCTYPE html><html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1.0"><meta name="generator" content="rustdoc"><meta name="description" content="Source of the Rust file `/Users/migavelaishwin/.cargo/git/checkouts/cidre-2c979cd9b38fdb3d/c0b2eb6/cidre/src/gc/key_codes.rs`."><title>key_codes.rs - source</title><script>if(window.location.protocol!=="file:")document.head.insertAdjacentHTML("beforeend","SourceSerif4-Regular-6b053e98.ttf.woff2,FiraSans-Italic-81dc35de.woff2,FiraSans-Regular-0fe48ade.woff2,FiraSans-MediumItalic-ccf7e434.woff2,FiraSans-Medium-e1aa3f0a.woff2,SourceCodePro-Regular-8badfe75.ttf.woff2,SourceCodePro-Semibold-aa29a496.ttf.woff2".split(",").map(f=>`<link rel="preload" as="font" type="font/woff2"href="../../../static.files/${f}">`).join(""))</script><link rel="stylesheet" href="../../../static.files/normalize-9960930a.css"><link rel="stylesheet" href="../../../static.files/rustdoc-ca0dd0c4.css"><meta name="rustdoc-vars" data-root-path="../../../" data-static-root-path="../../../static.files/" data-current-crate="cidre" data-themes="" data-resource-suffix="" data-rustdoc-version="1.92.0 (ded5c06cf 2025-12-08)" data-channel="1.92.0" data-search-js="search-d69d8955.js" data-stringdex-js="stringdex-c3e638e9.js" data-settings-js="settings-c38705f0.js" ><script src="../../../static.files/storage-e2aeef58.js"></script><script defer src="../../../static.files/src-script-813739b1.js"></script><script defer src="../../../src-files.js"></script><script defer src="../../../static.files/main-ce535bd0.js"></script><noscript><link rel="stylesheet" href="../../../static.files/noscript-263c88ec.css"></noscript><link rel="alternate icon" type="image/png" href="../../../static.files/favicon-32x32-eab170b8.png"><link rel="icon" type="image/svg+xml" href="../../../static.files/favicon-044be391.svg"></head><body class="rustdoc src"><!--[if lte IE 11]><div class="warning">This old browser is unsupported and will most likely display funky things.</div><![endif]--><nav class="sidebar"><div class="src-sidebar-title"><h2>Files</h2></div></nav><div class="sidebar-resizer" title="Drag to resize sidebar"></div><main><section id="main-content" class="content"><div class="main-heading"><h1><div class="sub-heading">cidre/gc/</div>key_codes.rs</h1><rustdoc-toolbar></rustdoc-toolbar></div><div class="example-wrap digits-3"><pre class="rust"><code><a href=#1 id=1 data-nosnippet>1</a><span class="kw">use </span><span class="kw">crate</span>::ns;
+<a href=#2 id=2 data-nosnippet>2</a>
+<a href=#3 id=3 data-nosnippet>3</a><span class="doccomment">/// These values match the keyboard and keypad usage IDs in `IOHIDUsageTables.h`.
+<a href=#4 id=4 data-nosnippet>4</a></span><span class="attr">#[doc(alias = <span class="string">"GCKeyCode"</span>)]
+<a href=#5 id=5 data-nosnippet>5</a></span><span class="kw">pub type </span>KeyCode = ns::Integer;
+<a href=#6 id=6 data-nosnippet>6</a>
+<a href=#7 id=7 data-nosnippet>7</a><span class="comment">// Letter keys
+<a href=#8 id=8 data-nosnippet>8</a></span><span class="attr">#[doc(alias = <span class="string">"GCKeyCodeKeyA"</span>)]
+<a href=#9 id=9 data-nosnippet>9</a></span><span class="kw">pub const </span>KEY_A: KeyCode = <span class="number">0x04</span>; <span class="comment">// a or A
+<a href=#10 id=10 data-nosnippet>10</a></span><span class="attr">#[doc(alias = <span class="string">"GCKeyCodeKeyB"</span>)]
+<a href=#11 id=11 data-nosnippet>11</a></span><span class="kw">pub const </span>KEY_B: KeyCode = <span class="number">0x05</span>; <span class="comment">// b or B
+<a href=#12 id=12 data-nosnippet>12</a></span><span class="attr">#[doc(alias = <span class="string">"GCKeyCodeKeyC"</span>)]
+<a href=#13 id=13 data-nosnippet>13</a></span><span class="kw">pub const </span>KEY_C: KeyCode = <span class="number">0x06</span>; <span class="comment">// c or C
+<a href=#14 id=14 data-nosnippet>14</a></span><span class="attr">#[doc(alias = <span class="string">"GCKeyCodeKeyD"</span>)]
+<a href=#15 id=15 data-nosnippet>15</a></span><span class="kw">pub const </span>KEY_D: KeyCode = <span class="number">0x07</span>; <span class="comment">// d or D
+<a href=#16 id=16 data-nosnippet>16</a></span><span class="attr">#[doc(alias = <span class="string">"GCKeyCodeKeyE"</span>)]
+<a href=#17 id=17 data-nosnippet>17</a></span><span class="kw">pub const </span>KEY_E: KeyCode = <span class="number">0x08</span>; <span class="comment">// e or E
+<a href=#18 id=18 data-nosnippet>18</a></span><span class="attr">#[doc(alias = <span class="string">"GCKeyCodeKeyF"</span>)]
+<a href=#19 id=19 data-nosnippet>19</a></span><span class="kw">pub const </span>KEY_F: KeyCode = <span class="number">0x09</span>; <span class="comment">// f or F
+<a href=#20 id=20 data-nosnippet>20</a></span><span class="attr">#[doc(alias = <span class="string">"GCKeyCodeKeyG"</span>)]
+<a href=#21 id=21 data-nosnippet>21</a></span><span class="kw">pub const </span>KEY_G: KeyCode = <span class="number">0x0A</span>; <span class="comment">// g or G
+<a href=#22 id=22 data-nosnippet>22</a></span><span class="attr">#[doc(alias = <span class="string">"GCKeyCodeKeyH"</span>)]
+<a href=#23 id=23 data-nosnippet>23</a></span><span class="kw">pub const </span>KEY_H: KeyCode = <span class="number">0x0B</span>; <span class="comment">// h or H
+<a href=#24 id=24 data-nosnippet>24</a></span><span class="attr">#[doc(alias = <span class="string">"GCKeyCodeKeyI"</span>)]
+<a href=#25 id=25 data-nosnippet>25</a></span><span class="kw">pub const </span>KEY_I: KeyCode = <span class="number">0x0C</span>; <span class="comment">// i or I
+<a href=#26 id=26 data-nosnippet>26</a></span><span class="attr">#[doc(alias = <span class="string">"GCKeyCodeKeyJ"</span>)]
+<a href=#27 id=27 data-nosnippet>27</a></span><span class="kw">pub const </span>KEY_J: KeyCode = <span class="number">0x0D</span>; <span class="comment">// j or J
+<a href=#28 id=28 data-nosnippet>28</a></span><span class="attr">#[doc(alias = <span class="string">"GCKeyCodeKeyK"</span>)]
+<a href=#29 id=29 data-nosnippet>29</a></span><span class="kw">pub const </span>KEY_K: KeyCode = <span class="number">0x0E</span>; <span class="comment">// k or K
+<a href=#30 id=30 data-nosnippet>30</a></span><span class="attr">#[doc(alias = <span class="string">"GCKeyCodeKeyL"</span>)]
+<a href=#31 id=31 data-nosnippet>31</a></span><span class="kw">pub const </span>KEY_L: KeyCode = <span class="number">0x0F</span>; <span class="comment">// l or L
+<a href=#32 id=32 data-nosnippet>32</a></span><span class="attr">#[doc(alias = <span class="string">"GCKeyCodeKeyM"</span>)]
+<a href=#33 id=33 data-nosnippet>33</a></span><span class="kw">pub const </span>KEY_M: KeyCode = <span class="number">0x10</span>; <span class="comment">// m or M
+<a href=#34 id=34 data-nosnippet>34</a></span><span class="attr">#[doc(alias = <span class="string">"GCKeyCodeKeyN"</span>)]
+<a href=#35 id=35 data-nosnippet>35</a></span><span class="kw">pub const </span>KEY_N: KeyCode = <span class="number">0x11</span>; <span class="comment">// n or N
+<a href=#36 id=36 data-nosnippet>36</a></span><span class="attr">#[doc(alias = <span class="string">"GCKeyCodeKeyO"</span>)]
+<a href=#37 id=37 data-nosnippet>37</a></span><span class="kw">pub const </span>KEY_O: KeyCode = <span class="number">0x12</span>; <span class="comment">// o or O
+<a href=#38 id=38 data-nosnippet>38</a></span><span class="attr">#[doc(alias = <span class="string">"GCKeyCodeKeyP"</span>)]
+<a href=#39 id=39 data-nosnippet>39</a></span><span class="kw">pub const </span>KEY_P: KeyCode = <span class="number">0x13</span>; <span class="comment">// p or P
+<a href=#40 id=40 data-nosnippet>40</a></span><span class="attr">#[doc(alias = <span class="string">"GCKeyCodeKeyQ"</span>)]
+<a href=#41 id=41 data-nosnippet>41</a></span><span class="kw">pub const </span>KEY_Q: KeyCode = <span class="number">0x14</span>; <span class="comment">// q or Q
+<a href=#42 id=42 data-nosnippet>42</a></span><span class="attr">#[doc(alias = <span class="string">"GCKeyCodeKeyR"</span>)]
+<a href=#43 id=43 data-nosnippet>43</a></span><span class="kw">pub const </span>KEY_R: KeyCode = <span class="number">0x15</span>; <span class="comment">// r or R
+<a href=#44 id=44 data-nosnippet>44</a></span><span class="attr">#[doc(alias = <span class="string">"GCKeyCodeKeyS"</span>)]
+<a href=#45 id=45 data-nosnippet>45</a></span><span class="kw">pub const </span>KEY_S: KeyCode = <span class="number">0x16</span>; <span class="comment">// s or S
+<a href=#46 id=46 data-nosnippet>46</a></span><span class="attr">#[doc(alias = <span class="string">"GCKeyCodeKeyT"</span>)]
+<a href=#47 id=47 data-nosnippet>47</a></span><span class="kw">pub const </span>KEY_T: KeyCode = <span class="number">0x17</span>; <span class="comment">// t or T
+<a href=#48 id=48 data-nosnippet>48</a></span><span class="attr">#[doc(alias = <span class="string">"GCKeyCodeKeyU"</span>)]
+<a href=#49 id=49 data-nosnippet>49</a></span><span class="kw">pub const </span>KEY_U: KeyCode = <span class="number">0x18</span>; <span class="comment">// u or U
+<a href=#50 id=50 data-nosnippet>50</a></span><span class="attr">#[doc(alias = <span class="string">"GCKeyCodeKeyV"</span>)]
+<a href=#51 id=51 data-nosnippet>51</a></span><span class="kw">pub const </span>KEY_V: KeyCode = <span class="number">0x19</span>; <span class="comment">// v or V
+<a href=#52 id=52 data-nosnippet>52</a></span><span class="attr">#[doc(alias = <span class="string">"GCKeyCodeKeyW"</span>)]
+<a href=#53 id=53 data-nosnippet>53</a></span><span class="kw">pub const </span>KEY_W: KeyCode = <span class="number">0x1A</span>; <span class="comment">// w or W
+<a href=#54 id=54 data-nosnippet>54</a></span><span class="attr">#[doc(alias = <span class="string">"GCKeyCodeKeyX"</span>)]
+<a href=#55 id=55 data-nosnippet>55</a></span><span class="kw">pub const </span>KEY_X: KeyCode = <span class="number">0x1B</span>; <span class="comment">// x or X
+<a href=#56 id=56 data-nosnippet>56</a></span><span class="attr">#[doc(alias = <span class="string">"GCKeyCodeKeyY"</span>)]
+<a href=#57 id=57 data-nosnippet>57</a></span><span class="kw">pub const </span>KEY_Y: KeyCode = <span class="number">0x1C</span>; <span class="comment">// y or Y
+<a href=#58 id=58 data-nosnippet>58</a></span><span class="attr">#[doc(alias = <span class="string">"GCKeyCodeKeyZ"</span>)]
+<a href=#59 id=59 data-nosnippet>59</a></span><span class="kw">pub const </span>KEY_Z: KeyCode = <span class="number">0x1D</span>; <span class="comment">// z or Z
+<a href=#60 id=60 data-nosnippet>60</a>
+<a href=#61 id=61 data-nosnippet>61</a>// Number row
+<a href=#62 id=62 data-nosnippet>62</a></span><span class="attr">#[doc(alias = <span class="string">"GCKeyCodeOne"</span>)]
+<a href=#63 id=63 data-nosnippet>63</a></span><span class="kw">pub const </span>ONE: KeyCode = <span class="number">0x1E</span>; <span class="comment">// 1 or !
+<a href=#64 id=64 data-nosnippet>64</a></span><span class="attr">#[doc(alias = <span class="string">"GCKeyCodeTwo"</span>)]
+<a href=#65 id=65 data-nosnippet>65</a></span><span class="kw">pub const </span>TWO: KeyCode = <span class="number">0x1F</span>; <span class="comment">// 2 or @
+<a href=#66 id=66 data-nosnippet>66</a></span><span class="attr">#[doc(alias = <span class="string">"GCKeyCodeThree"</span>)]
+<a href=#67 id=67 data-nosnippet>67</a></span><span class="kw">pub const </span>THREE: KeyCode = <span class="number">0x20</span>; <span class="comment">// 3 or #
+<a href=#68 id=68 data-nosnippet>68</a></span><span class="attr">#[doc(alias = <span class="string">"GCKeyCodeFour"</span>)]
+<a href=#69 id=69 data-nosnippet>69</a></span><span class="kw">pub const </span>FOUR: KeyCode = <span class="number">0x21</span>; <span class="comment">// 4 or $
+<a href=#70 id=70 data-nosnippet>70</a></span><span class="attr">#[doc(alias = <span class="string">"GCKeyCodeFive"</span>)]
+<a href=#71 id=71 data-nosnippet>71</a></span><span class="kw">pub const </span>FIVE: KeyCode = <span class="number">0x22</span>; <span class="comment">// 5 or %
+<a href=#72 id=72 data-nosnippet>72</a></span><span class="attr">#[doc(alias = <span class="string">"GCKeyCodeSix"</span>)]
+<a href=#73 id=73 data-nosnippet>73</a></span><span class="kw">pub const </span>SIX: KeyCode = <span class="number">0x23</span>; <span class="comment">// 6 or ^
+<a href=#74 id=74 data-nosnippet>74</a></span><span class="attr">#[doc(alias = <span class="string">"GCKeyCodeSeven"</span>)]
+<a href=#75 id=75 data-nosnippet>75</a></span><span class="kw">pub const </span>SEVEN: KeyCode = <span class="number">0x24</span>; <span class="comment">// 7 or &amp;
+<a href=#76 id=76 data-nosnippet>76</a></span><span class="attr">#[doc(alias = <span class="string">"GCKeyCodeEight"</span>)]
+<a href=#77 id=77 data-nosnippet>77</a></span><span class="kw">pub const </span>EIGHT: KeyCode = <span class="number">0x25</span>; <span class="comment">// 8 or *
+<a href=#78 id=78 data-nosnippet>78</a></span><span class="attr">#[doc(alias = <span class="string">"GCKeyCodeNine"</span>)]
+<a href=#79 id=79 data-nosnippet>79</a></span><span class="kw">pub const </span>NINE: KeyCode = <span class="number">0x26</span>; <span class="comment">// 9 or (
+<a href=#80 id=80 data-nosnippet>80</a></span><span class="attr">#[doc(alias = <span class="string">"GCKeyCodeZero"</span>)]
+<a href=#81 id=81 data-nosnippet>81</a></span><span class="kw">pub const </span>ZERO: KeyCode = <span class="number">0x27</span>; <span class="comment">// 0 or )
+<a href=#82 id=82 data-nosnippet>82</a>
+<a href=#83 id=83 data-nosnippet>83</a>// Control and symbol keys
+<a href=#84 id=84 data-nosnippet>84</a></span><span class="attr">#[doc(alias = <span class="string">"GCKeyCodeReturnOrEnter"</span>)]
+<a href=#85 id=85 data-nosnippet>85</a></span><span class="kw">pub const </span>RETURN_OR_ENTER: KeyCode = <span class="number">0x28</span>; <span class="comment">// Return (Enter)
+<a href=#86 id=86 data-nosnippet>86</a></span><span class="attr">#[doc(alias = <span class="string">"GCKeyCodeEscape"</span>)]
+<a href=#87 id=87 data-nosnippet>87</a></span><span class="kw">pub const </span>ESCAPE: KeyCode = <span class="number">0x29</span>; <span class="comment">// Escape
+<a href=#88 id=88 data-nosnippet>88</a></span><span class="attr">#[doc(alias = <span class="string">"GCKeyCodeDeleteOrBackspace"</span>)]
+<a href=#89 id=89 data-nosnippet>89</a></span><span class="kw">pub const </span>DELETE_OR_BACKSPACE: KeyCode = <span class="number">0x2A</span>; <span class="comment">// Delete (Backspace)
+<a href=#90 id=90 data-nosnippet>90</a></span><span class="attr">#[doc(alias = <span class="string">"GCKeyCodeTab"</span>)]
+<a href=#91 id=91 data-nosnippet>91</a></span><span class="kw">pub const </span>TAB: KeyCode = <span class="number">0x2B</span>; <span class="comment">// Tab
+<a href=#92 id=92 data-nosnippet>92</a></span><span class="attr">#[doc(alias = <span class="string">"GCKeyCodeSpacebar"</span>)]
+<a href=#93 id=93 data-nosnippet>93</a></span><span class="kw">pub const </span>SPACEBAR: KeyCode = <span class="number">0x2C</span>; <span class="comment">// Spacebar
+<a href=#94 id=94 data-nosnippet>94</a></span><span class="attr">#[doc(alias = <span class="string">"GCKeyCodeHyphen"</span>)]
+<a href=#95 id=95 data-nosnippet>95</a></span><span class="kw">pub const </span>HYPHEN: KeyCode = <span class="number">0x2D</span>; <span class="comment">// - or _
+<a href=#96 id=96 data-nosnippet>96</a></span><span class="attr">#[doc(alias = <span class="string">"GCKeyCodeEqualSign"</span>)]
+<a href=#97 id=97 data-nosnippet>97</a></span><span class="kw">pub const </span>EQUAL_SIGN: KeyCode = <span class="number">0x2E</span>; <span class="comment">// = or +
+<a href=#98 id=98 data-nosnippet>98</a></span><span class="attr">#[doc(alias = <span class="string">"GCKeyCodeOpenBracket"</span>)]
+<a href=#99 id=99 data-nosnippet>99</a></span><span class="kw">pub const </span>OPEN_BRACKET: KeyCode = <span class="number">0x2F</span>; <span class="comment">// [ or {
+<a href=#100 id=100 data-nosnippet>100</a></span><span class="attr">#[doc(alias = <span class="string">"GCKeyCodeCloseBracket"</span>)]
+<a href=#101 id=101 data-nosnippet>101</a></span><span class="kw">pub const </span>CLOSE_BRACKET: KeyCode = <span class="number">0x30</span>; <span class="comment">// ] or }
+<a href=#102 id=102 data-nosnippet>102</a></span><span class="attr">#[doc(alias = <span class="string">"GCKeyCodeBackslash"</span>)]
+<a href=#103 id=103 data-nosnippet>103</a></span><span class="kw">pub const </span>BACKSLASH: KeyCode = <span class="number">0x31</span>; <span class="comment">// \ or |
+<a href=#104 id=104 data-nosnippet>104</a></span><span class="attr">#[doc(alias = <span class="string">"GCKeyCodeNonUSPound"</span>)]
+<a href=#105 id=105 data-nosnippet>105</a></span><span class="kw">pub const </span>NON_US_POUND: KeyCode = <span class="number">0x32</span>; <span class="comment">// Non-US # or _
+<a href=#106 id=106 data-nosnippet>106</a>
+<a href=#107 id=107 data-nosnippet>107</a>// Punctuation and lock keys
+<a href=#108 id=108 data-nosnippet>108</a></span><span class="attr">#[doc(alias = <span class="string">"GCKeyCodeSemicolon"</span>)]
+<a href=#109 id=109 data-nosnippet>109</a></span><span class="kw">pub const </span>SEMICOLON: KeyCode = <span class="number">0x33</span>; <span class="comment">// ; or :
+<a href=#110 id=110 data-nosnippet>110</a></span><span class="attr">#[doc(alias = <span class="string">"GCKeyCodeQuote"</span>)]
+<a href=#111 id=111 data-nosnippet>111</a></span><span class="kw">pub const </span>QUOTE: KeyCode = <span class="number">0x34</span>; <span class="comment">// ' or "
+<a href=#112 id=112 data-nosnippet>112</a></span><span class="attr">#[doc(alias = <span class="string">"GCKeyCodeGraveAccentAndTilde"</span>)]
+<a href=#113 id=113 data-nosnippet>113</a></span><span class="kw">pub const </span>GRAVE_ACCENT_AND_TILDE: KeyCode = <span class="number">0x35</span>; <span class="comment">// Grave Accent and Tilde
+<a href=#114 id=114 data-nosnippet>114</a></span><span class="attr">#[doc(alias = <span class="string">"GCKeyCodeComma"</span>)]
+<a href=#115 id=115 data-nosnippet>115</a></span><span class="kw">pub const </span>COMMA: KeyCode = <span class="number">0x36</span>; <span class="comment">// , or &lt;
+<a href=#116 id=116 data-nosnippet>116</a></span><span class="attr">#[doc(alias = <span class="string">"GCKeyCodePeriod"</span>)]
+<a href=#117 id=117 data-nosnippet>117</a></span><span class="kw">pub const </span>PERIOD: KeyCode = <span class="number">0x37</span>; <span class="comment">// . or &gt;
+<a href=#118 id=118 data-nosnippet>118</a></span><span class="attr">#[doc(alias = <span class="string">"GCKeyCodeSlash"</span>)]
+<a href=#119 id=119 data-nosnippet>119</a></span><span class="kw">pub const </span>SLASH: KeyCode = <span class="number">0x38</span>; <span class="comment">// / or ?
+<a href=#120 id=120 data-nosnippet>120</a></span><span class="attr">#[doc(alias = <span class="string">"GCKeyCodeCapsLock"</span>)]
+<a href=#121 id=121 data-nosnippet>121</a></span><span class="kw">pub const </span>CAPS_LOCK: KeyCode = <span class="number">0x39</span>; <span class="comment">// Caps Lock
+<a href=#122 id=122 data-nosnippet>122</a>
+<a href=#123 id=123 data-nosnippet>123</a>// Function and navigation keys
+<a href=#124 id=124 data-nosnippet>124</a></span><span class="attr">#[doc(alias = <span class="string">"GCKeyCodeF1"</span>)]
+<a href=#125 id=125 data-nosnippet>125</a></span><span class="kw">pub const </span>F1: KeyCode = <span class="number">0x3A</span>; <span class="comment">// F1
+<a href=#126 id=126 data-nosnippet>126</a></span><span class="attr">#[doc(alias = <span class="string">"GCKeyCodeF2"</span>)]
+<a href=#127 id=127 data-nosnippet>127</a></span><span class="kw">pub const </span>F2: KeyCode = <span class="number">0x3B</span>; <span class="comment">// F2
+<a href=#128 id=128 data-nosnippet>128</a></span><span class="attr">#[doc(alias = <span class="string">"GCKeyCodeF3"</span>)]
+<a href=#129 id=129 data-nosnippet>129</a></span><span class="kw">pub const </span>F3: KeyCode = <span class="number">0x3C</span>; <span class="comment">// F3
+<a href=#130 id=130 data-nosnippet>130</a></span><span class="attr">#[doc(alias = <span class="string">"GCKeyCodeF4"</span>)]
+<a href=#131 id=131 data-nosnippet>131</a></span><span class="kw">pub const </span>F4: KeyCode = <span class="number">0x3D</span>; <span class="comment">// F4
+<a href=#132 id=132 data-nosnippet>132</a></span><span class="attr">#[doc(alias = <span class="string">"GCKeyCodeF5"</span>)]
+<a href=#133 id=133 data-nosnippet>133</a></span><span class="kw">pub const </span>F5: KeyCode = <span class="number">0x3E</span>; <span class="comment">// F5
+<a href=#134 id=134 data-nosnippet>134</a></span><span class="attr">#[doc(alias = <span class="string">"GCKeyCodeF6"</span>)]
+<a href=#135 id=135 data-nosnippet>135</a></span><span class="kw">pub const </span>F6: KeyCode = <span class="number">0x3F</span>; <span class="comment">// F6
+<a href=#136 id=136 data-nosnippet>136</a></span><span class="attr">#[doc(alias = <span class="string">"GCKeyCodeF7"</span>)]
+<a href=#137 id=137 data-nosnippet>137</a></span><span class="kw">pub const </span>F7: KeyCode = <span class="number">0x40</span>; <span class="comment">// F7
+<a href=#138 id=138 data-nosnippet>138</a></span><span class="attr">#[doc(alias = <span class="string">"GCKeyCodeF8"</span>)]
+<a href=#139 id=139 data-nosnippet>139</a></span><span class="kw">pub const </span>F8: KeyCode = <span class="number">0x41</span>; <span class="comment">// F8
+<a href=#140 id=140 data-nosnippet>140</a></span><span class="attr">#[doc(alias = <span class="string">"GCKeyCodeF9"</span>)]
+<a href=#141 id=141 data-nosnippet>141</a></span><span class="kw">pub const </span>F9: KeyCode = <span class="number">0x42</span>; <span class="comment">// F9
+<a href=#142 id=142 data-nosnippet>142</a></span><span class="attr">#[doc(alias = <span class="string">"GCKeyCodeF10"</span>)]
+<a href=#143 id=143 data-nosnippet>143</a></span><span class="kw">pub const </span>F10: KeyCode = <span class="number">0x43</span>; <span class="comment">// F10
+<a href=#144 id=144 data-nosnippet>144</a></span><span class="attr">#[doc(alias = <span class="string">"GCKeyCodeF11"</span>)]
+<a href=#145 id=145 data-nosnippet>145</a></span><span class="kw">pub const </span>F11: KeyCode = <span class="number">0x44</span>; <span class="comment">// F11
+<a href=#146 id=146 data-nosnippet>146</a></span><span class="attr">#[doc(alias = <span class="string">"GCKeyCodeF12"</span>)]
+<a href=#147 id=147 data-nosnippet>147</a></span><span class="kw">pub const </span>F12: KeyCode = <span class="number">0x45</span>; <span class="comment">// F12
+<a href=#148 id=148 data-nosnippet>148</a></span><span class="attr">#[doc(alias = <span class="string">"GCKeyCodePrintScreen"</span>)]
+<a href=#149 id=149 data-nosnippet>149</a></span><span class="kw">pub const </span>PRINT_SCREEN: KeyCode = <span class="number">0x46</span>; <span class="comment">// Print Screen
+<a href=#150 id=150 data-nosnippet>150</a></span><span class="attr">#[doc(alias = <span class="string">"GCKeyCodeScrollLock"</span>)]
+<a href=#151 id=151 data-nosnippet>151</a></span><span class="kw">pub const </span>SCROLL_LOCK: KeyCode = <span class="number">0x47</span>; <span class="comment">// Scroll Lock
+<a href=#152 id=152 data-nosnippet>152</a></span><span class="attr">#[doc(alias = <span class="string">"GCKeyCodePause"</span>)]
+<a href=#153 id=153 data-nosnippet>153</a></span><span class="kw">pub const </span>PAUSE: KeyCode = <span class="number">0x48</span>; <span class="comment">// Pause
+<a href=#154 id=154 data-nosnippet>154</a></span><span class="attr">#[doc(alias = <span class="string">"GCKeyCodeInsert"</span>)]
+<a href=#155 id=155 data-nosnippet>155</a></span><span class="kw">pub const </span>INSERT: KeyCode = <span class="number">0x49</span>; <span class="comment">// Insert
+<a href=#156 id=156 data-nosnippet>156</a></span><span class="attr">#[doc(alias = <span class="string">"GCKeyCodeHome"</span>)]
+<a href=#157 id=157 data-nosnippet>157</a></span><span class="kw">pub const </span>HOME: KeyCode = <span class="number">0x4A</span>; <span class="comment">// Home
+<a href=#158 id=158 data-nosnippet>158</a></span><span class="attr">#[doc(alias = <span class="string">"GCKeyCodePageUp"</span>)]
+<a href=#159 id=159 data-nosnippet>159</a></span><span class="kw">pub const </span>PAGE_UP: KeyCode = <span class="number">0x4B</span>; <span class="comment">// Page Up
+<a href=#160 id=160 data-nosnippet>160</a></span><span class="attr">#[doc(alias = <span class="string">"GCKeyCodeDeleteForward"</span>)]
+<a href=#161 id=161 data-nosnippet>161</a></span><span class="kw">pub const </span>DELETE_FORWARD: KeyCode = <span class="number">0x4C</span>; <span class="comment">// Delete Forward
+<a href=#162 id=162 data-nosnippet>162</a></span><span class="attr">#[doc(alias = <span class="string">"GCKeyCodeEnd"</span>)]
+<a href=#163 id=163 data-nosnippet>163</a></span><span class="kw">pub const </span>END: KeyCode = <span class="number">0x4D</span>; <span class="comment">// End
+<a href=#164 id=164 data-nosnippet>164</a></span><span class="attr">#[doc(alias = <span class="string">"GCKeyCodePageDown"</span>)]
+<a href=#165 id=165 data-nosnippet>165</a></span><span class="kw">pub const </span>PAGE_DOWN: KeyCode = <span class="number">0x4E</span>; <span class="comment">// Page Down
+<a href=#166 id=166 data-nosnippet>166</a></span><span class="attr">#[doc(alias = <span class="string">"GCKeyCodeRightArrow"</span>)]
+<a href=#167 id=167 data-nosnippet>167</a></span><span class="kw">pub const </span>RIGHT_ARROW: KeyCode = <span class="number">0x4F</span>; <span class="comment">// Right Arrow
+<a href=#168 id=168 data-nosnippet>168</a></span><span class="attr">#[doc(alias = <span class="string">"GCKeyCodeLeftArrow"</span>)]
+<a href=#169 id=169 data-nosnippet>169</a></span><span class="kw">pub const </span>LEFT_ARROW: KeyCode = <span class="number">0x50</span>; <span class="comment">// Left Arrow
+<a href=#170 id=170 data-nosnippet>170</a></span><span class="attr">#[doc(alias = <span class="string">"GCKeyCodeDownArrow"</span>)]
+<a href=#171 id=171 data-nosnippet>171</a></span><span class="kw">pub const </span>DOWN_ARROW: KeyCode = <span class="number">0x51</span>; <span class="comment">// Down Arrow
+<a href=#172 id=172 data-nosnippet>172</a></span><span class="attr">#[doc(alias = <span class="string">"GCKeyCodeUpArrow"</span>)]
+<a href=#173 id=173 data-nosnippet>173</a></span><span class="kw">pub const </span>UP_ARROW: KeyCode = <span class="number">0x52</span>; <span class="comment">// Up Arrow
+<a href=#174 id=174 data-nosnippet>174</a>
+<a href=#175 id=175 data-nosnippet>175</a>// Keypad keys
+<a href=#176 id=176 data-nosnippet>176</a></span><span class="attr">#[doc(alias = <span class="string">"GCKeyCodeKeypadNumLock"</span>)]
+<a href=#177 id=177 data-nosnippet>177</a></span><span class="kw">pub const </span>KEYPAD_NUM_LOCK: KeyCode = <span class="number">0x53</span>; <span class="comment">// Keypad NumLock or Clear
+<a href=#178 id=178 data-nosnippet>178</a></span><span class="attr">#[doc(alias = <span class="string">"GCKeyCodeKeypadSlash"</span>)]
+<a href=#179 id=179 data-nosnippet>179</a></span><span class="kw">pub const </span>KEYPAD_SLASH: KeyCode = <span class="number">0x54</span>; <span class="comment">// Keypad /
+<a href=#180 id=180 data-nosnippet>180</a></span><span class="attr">#[doc(alias = <span class="string">"GCKeyCodeKeypadAsterisk"</span>)]
+<a href=#181 id=181 data-nosnippet>181</a></span><span class="kw">pub const </span>KEYPAD_ASTERISK: KeyCode = <span class="number">0x55</span>; <span class="comment">// Keypad *
+<a href=#182 id=182 data-nosnippet>182</a></span><span class="attr">#[doc(alias = <span class="string">"GCKeyCodeKeypadHyphen"</span>)]
+<a href=#183 id=183 data-nosnippet>183</a></span><span class="kw">pub const </span>KEYPAD_HYPHEN: KeyCode = <span class="number">0x56</span>; <span class="comment">// Keypad -
+<a href=#184 id=184 data-nosnippet>184</a></span><span class="attr">#[doc(alias = <span class="string">"GCKeyCodeKeypadPlus"</span>)]
+<a href=#185 id=185 data-nosnippet>185</a></span><span class="kw">pub const </span>KEYPAD_PLUS: KeyCode = <span class="number">0x57</span>; <span class="comment">// Keypad +
+<a href=#186 id=186 data-nosnippet>186</a></span><span class="attr">#[doc(alias = <span class="string">"GCKeyCodeKeypadEnter"</span>)]
+<a href=#187 id=187 data-nosnippet>187</a></span><span class="kw">pub const </span>KEYPAD_ENTER: KeyCode = <span class="number">0x58</span>; <span class="comment">// Keypad Enter
+<a href=#188 id=188 data-nosnippet>188</a></span><span class="attr">#[doc(alias = <span class="string">"GCKeyCodeKeypad1"</span>)]
+<a href=#189 id=189 data-nosnippet>189</a></span><span class="kw">pub const </span>KEYPAD1: KeyCode = <span class="number">0x59</span>; <span class="comment">// Keypad 1 or End
+<a href=#190 id=190 data-nosnippet>190</a></span><span class="attr">#[doc(alias = <span class="string">"GCKeyCodeKeypad2"</span>)]
+<a href=#191 id=191 data-nosnippet>191</a></span><span class="kw">pub const </span>KEYPAD2: KeyCode = <span class="number">0x5A</span>; <span class="comment">// Keypad 2 or Down Arrow
+<a href=#192 id=192 data-nosnippet>192</a></span><span class="attr">#[doc(alias = <span class="string">"GCKeyCodeKeypad3"</span>)]
+<a href=#193 id=193 data-nosnippet>193</a></span><span class="kw">pub const </span>KEYPAD3: KeyCode = <span class="number">0x5B</span>; <span class="comment">// Keypad 3 or Page Down
+<a href=#194 id=194 data-nosnippet>194</a></span><span class="attr">#[doc(alias = <span class="string">"GCKeyCodeKeypad4"</span>)]
+<a href=#195 id=195 data-nosnippet>195</a></span><span class="kw">pub const </span>KEYPAD4: KeyCode = <span class="number">0x5C</span>; <span class="comment">// Keypad 4 or Left Arrow
+<a href=#196 id=196 data-nosnippet>196</a></span><span class="attr">#[doc(alias = <span class="string">"GCKeyCodeKeypad5"</span>)]
+<a href=#197 id=197 data-nosnippet>197</a></span><span class="kw">pub const </span>KEYPAD5: KeyCode = <span class="number">0x5D</span>; <span class="comment">// Keypad 5
+<a href=#198 id=198 data-nosnippet>198</a></span><span class="attr">#[doc(alias = <span class="string">"GCKeyCodeKeypad6"</span>)]
+<a href=#199 id=199 data-nosnippet>199</a></span><span class="kw">pub const </span>KEYPAD6: KeyCode = <span class="number">0x5E</span>; <span class="comment">// Keypad 6 or Right Arrow
+<a href=#200 id=200 data-nosnippet>200</a></span><span class="attr">#[doc(alias = <span class="string">"GCKeyCodeKeypad7"</span>)]
+<a href=#201 id=201 data-nosnippet>201</a></span><span class="kw">pub const </span>KEYPAD7: KeyCode = <span class="number">0x5F</span>; <span class="comment">// Keypad 7 or Home
+<a href=#202 id=202 data-nosnippet>202</a></span><span class="attr">#[doc(alias = <span class="string">"GCKeyCodeKeypad8"</span>)]
+<a href=#203 id=203 data-nosnippet>203</a></span><span class="kw">pub const </span>KEYPAD8: KeyCode = <span class="number">0x60</span>; <span class="comment">// Keypad 8 or Up Arrow
+<a href=#204 id=204 data-nosnippet>204</a></span><span class="attr">#[doc(alias = <span class="string">"GCKeyCodeKeypad9"</span>)]
+<a href=#205 id=205 data-nosnippet>205</a></span><span class="kw">pub const </span>KEYPAD9: KeyCode = <span class="number">0x61</span>; <span class="comment">// Keypad 9 or Page Up
+<a href=#206 id=206 data-nosnippet>206</a></span><span class="attr">#[doc(alias = <span class="string">"GCKeyCodeKeypad0"</span>)]
+<a href=#207 id=207 data-nosnippet>207</a></span><span class="kw">pub const </span>KEYPAD0: KeyCode = <span class="number">0x62</span>; <span class="comment">// Keypad 0 or Insert
+<a href=#208 id=208 data-nosnippet>208</a></span><span class="attr">#[doc(alias = <span class="string">"GCKeyCodeKeypadPeriod"</span>)]
+<a href=#209 id=209 data-nosnippet>209</a></span><span class="kw">pub const </span>KEYPAD_PERIOD: KeyCode = <span class="number">0x63</span>; <span class="comment">// Keypad . or Delete
+<a href=#210 id=210 data-nosnippet>210</a></span><span class="attr">#[doc(alias = <span class="string">"GCKeyCodeNonUSBackslash"</span>)]
+<a href=#211 id=211 data-nosnippet>211</a></span><span class="kw">pub const </span>NON_US_BACKSLASH: KeyCode = <span class="number">0x64</span>; <span class="comment">// Non-US \ or |
+<a href=#212 id=212 data-nosnippet>212</a>
+<a href=#213 id=213 data-nosnippet>213</a>// Application and extended function keys
+<a href=#214 id=214 data-nosnippet>214</a></span><span class="attr">#[doc(alias = <span class="string">"GCKeyCodeApplication"</span>)]
+<a href=#215 id=215 data-nosnippet>215</a></span><span class="kw">pub const </span>APPLICATION: KeyCode = <span class="number">0x65</span>; <span class="comment">// Application
+<a href=#216 id=216 data-nosnippet>216</a></span><span class="attr">#[doc(alias = <span class="string">"GCKeyCodePower"</span>)]
+<a href=#217 id=217 data-nosnippet>217</a></span><span class="kw">pub const </span>POWER: KeyCode = <span class="number">0x66</span>; <span class="comment">// Power
+<a href=#218 id=218 data-nosnippet>218</a></span><span class="attr">#[doc(alias = <span class="string">"GCKeyCodeKeypadEqualSign"</span>)]
+<a href=#219 id=219 data-nosnippet>219</a></span><span class="kw">pub const </span>KEYPAD_EQUAL_SIGN: KeyCode = <span class="number">0x67</span>; <span class="comment">// Keypad =
+<a href=#220 id=220 data-nosnippet>220</a>
+<a href=#221 id=221 data-nosnippet>221</a></span><span class="attr">#[doc(alias = <span class="string">"GCKeyCodeF13"</span>)]
+<a href=#222 id=222 data-nosnippet>222</a></span><span class="kw">pub const </span>F13: KeyCode = <span class="number">0x68</span>; <span class="comment">// F13
+<a href=#223 id=223 data-nosnippet>223</a></span><span class="attr">#[doc(alias = <span class="string">"GCKeyCodeF14"</span>)]
+<a href=#224 id=224 data-nosnippet>224</a></span><span class="kw">pub const </span>F14: KeyCode = <span class="number">0x69</span>; <span class="comment">// F14
+<a href=#225 id=225 data-nosnippet>225</a></span><span class="attr">#[doc(alias = <span class="string">"GCKeyCodeF15"</span>)]
+<a href=#226 id=226 data-nosnippet>226</a></span><span class="kw">pub const </span>F15: KeyCode = <span class="number">0x6A</span>; <span class="comment">// F15
+<a href=#227 id=227 data-nosnippet>227</a></span><span class="attr">#[doc(alias = <span class="string">"GCKeyCodeF16"</span>)]
+<a href=#228 id=228 data-nosnippet>228</a></span><span class="kw">pub const </span>F16: KeyCode = <span class="number">0x6B</span>; <span class="comment">// F16
+<a href=#229 id=229 data-nosnippet>229</a></span><span class="attr">#[doc(alias = <span class="string">"GCKeyCodeF17"</span>)]
+<a href=#230 id=230 data-nosnippet>230</a></span><span class="kw">pub const </span>F17: KeyCode = <span class="number">0x6C</span>; <span class="comment">// F17
+<a href=#231 id=231 data-nosnippet>231</a></span><span class="attr">#[doc(alias = <span class="string">"GCKeyCodeF18"</span>)]
+<a href=#232 id=232 data-nosnippet>232</a></span><span class="kw">pub const </span>F18: KeyCode = <span class="number">0x6D</span>; <span class="comment">// F18
+<a href=#233 id=233 data-nosnippet>233</a></span><span class="attr">#[doc(alias = <span class="string">"GCKeyCodeF19"</span>)]
+<a href=#234 id=234 data-nosnippet>234</a></span><span class="kw">pub const </span>F19: KeyCode = <span class="number">0x6E</span>; <span class="comment">// F19
+<a href=#235 id=235 data-nosnippet>235</a></span><span class="attr">#[doc(alias = <span class="string">"GCKeyCodeF20"</span>)]
+<a href=#236 id=236 data-nosnippet>236</a></span><span class="kw">pub const </span>F20: KeyCode = <span class="number">0x6F</span>; <span class="comment">// F20
+<a href=#237 id=237 data-nosnippet>237</a>
+<a href=#238 id=238 data-nosnippet>238</a>// International keys
+<a href=#239 id=239 data-nosnippet>239</a></span><span class="attr">#[doc(alias = <span class="string">"GCKeyCodeInternational1"</span>)]
+<a href=#240 id=240 data-nosnippet>240</a></span><span class="kw">pub const </span>INTERNATIONAL1: KeyCode = <span class="number">0x87</span>; <span class="comment">// International1
+<a href=#241 id=241 data-nosnippet>241</a></span><span class="attr">#[doc(alias = <span class="string">"GCKeyCodeInternational2"</span>)]
+<a href=#242 id=242 data-nosnippet>242</a></span><span class="kw">pub const </span>INTERNATIONAL2: KeyCode = <span class="number">0x88</span>; <span class="comment">// International2
+<a href=#243 id=243 data-nosnippet>243</a></span><span class="attr">#[doc(alias = <span class="string">"GCKeyCodeInternational3"</span>)]
+<a href=#244 id=244 data-nosnippet>244</a></span><span class="kw">pub const </span>INTERNATIONAL3: KeyCode = <span class="number">0x89</span>; <span class="comment">// International3
+<a href=#245 id=245 data-nosnippet>245</a></span><span class="attr">#[doc(alias = <span class="string">"GCKeyCodeInternational4"</span>)]
+<a href=#246 id=246 data-nosnippet>246</a></span><span class="kw">pub const </span>INTERNATIONAL4: KeyCode = <span class="number">0x8A</span>; <span class="comment">// International4
+<a href=#247 id=247 data-nosnippet>247</a></span><span class="attr">#[doc(alias = <span class="string">"GCKeyCodeInternational5"</span>)]
+<a href=#248 id=248 data-nosnippet>248</a></span><span class="kw">pub const </span>INTERNATIONAL5: KeyCode = <span class="number">0x8B</span>; <span class="comment">// International5
+<a href=#249 id=249 data-nosnippet>249</a></span><span class="attr">#[doc(alias = <span class="string">"GCKeyCodeInternational6"</span>)]
+<a href=#250 id=250 data-nosnippet>250</a></span><span class="kw">pub const </span>INTERNATIONAL6: KeyCode = <span class="number">0x8C</span>; <span class="comment">// International6
+<a href=#251 id=251 data-nosnippet>251</a></span><span class="attr">#[doc(alias = <span class="string">"GCKeyCodeInternational7"</span>)]
+<a href=#252 id=252 data-nosnippet>252</a></span><span class="kw">pub const </span>INTERNATIONAL7: KeyCode = <span class="number">0x8D</span>; <span class="comment">// International7
+<a href=#253 id=253 data-nosnippet>253</a></span><span class="attr">#[doc(alias = <span class="string">"GCKeyCodeInternational8"</span>)]
+<a href=#254 id=254 data-nosnippet>254</a></span><span class="kw">pub const </span>INTERNATIONAL8: KeyCode = <span class="number">0x8E</span>; <span class="comment">// International8
+<a href=#255 id=255 data-nosnippet>255</a></span><span class="attr">#[doc(alias = <span class="string">"GCKeyCodeInternational9"</span>)]
+<a href=#256 id=256 data-nosnippet>256</a></span><span class="kw">pub const </span>INTERNATIONAL9: KeyCode = <span class="number">0x8F</span>; <span class="comment">// International9
+<a href=#257 id=257 data-nosnippet>257</a>
+<a href=#258 id=258 data-nosnippet>258</a>// Language keys
+<a href=#259 id=259 data-nosnippet>259</a></span><span class="attr">#[doc(alias = <span class="string">"GCKeyCodeLANG1"</span>)]
+<a href=#260 id=260 data-nosnippet>260</a></span><span class="kw">pub const </span>LANG1: KeyCode = <span class="number">0x90</span>; <span class="comment">// LANG1
+<a href=#261 id=261 data-nosnippet>261</a></span><span class="attr">#[doc(alias = <span class="string">"GCKeyCodeLANG2"</span>)]
+<a href=#262 id=262 data-nosnippet>262</a></span><span class="kw">pub const </span>LANG2: KeyCode = <span class="number">0x91</span>; <span class="comment">// LANG2
+<a href=#263 id=263 data-nosnippet>263</a></span><span class="attr">#[doc(alias = <span class="string">"GCKeyCodeLANG3"</span>)]
+<a href=#264 id=264 data-nosnippet>264</a></span><span class="kw">pub const </span>LANG3: KeyCode = <span class="number">0x92</span>; <span class="comment">// LANG3
+<a href=#265 id=265 data-nosnippet>265</a></span><span class="attr">#[doc(alias = <span class="string">"GCKeyCodeLANG4"</span>)]
+<a href=#266 id=266 data-nosnippet>266</a></span><span class="kw">pub const </span>LANG4: KeyCode = <span class="number">0x93</span>; <span class="comment">// LANG4
+<a href=#267 id=267 data-nosnippet>267</a></span><span class="attr">#[doc(alias = <span class="string">"GCKeyCodeLANG5"</span>)]
+<a href=#268 id=268 data-nosnippet>268</a></span><span class="kw">pub const </span>LANG5: KeyCode = <span class="number">0x94</span>; <span class="comment">// LANG5
+<a href=#269 id=269 data-nosnippet>269</a></span><span class="attr">#[doc(alias = <span class="string">"GCKeyCodeLANG6"</span>)]
+<a href=#270 id=270 data-nosnippet>270</a></span><span class="kw">pub const </span>LANG6: KeyCode = <span class="number">0x95</span>; <span class="comment">// LANG6
+<a href=#271 id=271 data-nosnippet>271</a></span><span class="attr">#[doc(alias = <span class="string">"GCKeyCodeLANG7"</span>)]
+<a href=#272 id=272 data-nosnippet>272</a></span><span class="kw">pub const </span>LANG7: KeyCode = <span class="number">0x96</span>; <span class="comment">// LANG7
+<a href=#273 id=273 data-nosnippet>273</a></span><span class="attr">#[doc(alias = <span class="string">"GCKeyCodeLANG8"</span>)]
+<a href=#274 id=274 data-nosnippet>274</a></span><span class="kw">pub const </span>LANG8: KeyCode = <span class="number">0x97</span>; <span class="comment">// LANG8
+<a href=#275 id=275 data-nosnippet>275</a></span><span class="attr">#[doc(alias = <span class="string">"GCKeyCodeLANG9"</span>)]
+<a href=#276 id=276 data-nosnippet>276</a></span><span class="kw">pub const </span>LANG9: KeyCode = <span class="number">0x98</span>; <span class="comment">// LANG9
+<a href=#277 id=277 data-nosnippet>277</a>
+<a href=#278 id=278 data-nosnippet>278</a>// Modifier keys
+<a href=#279 id=279 data-nosnippet>279</a></span><span class="attr">#[doc(alias = <span class="string">"GCKeyCodeLeftControl"</span>)]
+<a href=#280 id=280 data-nosnippet>280</a></span><span class="kw">pub const </span>LEFT_CONTROL: KeyCode = <span class="number">0xE0</span>; <span class="comment">// Left Control
+<a href=#281 id=281 data-nosnippet>281</a></span><span class="attr">#[doc(alias = <span class="string">"GCKeyCodeLeftShift"</span>)]
+<a href=#282 id=282 data-nosnippet>282</a></span><span class="kw">pub const </span>LEFT_SHIFT: KeyCode = <span class="number">0xE1</span>; <span class="comment">// Left Shift
+<a href=#283 id=283 data-nosnippet>283</a></span><span class="attr">#[doc(alias = <span class="string">"GCKeyCodeLeftAlt"</span>)]
+<a href=#284 id=284 data-nosnippet>284</a></span><span class="kw">pub const </span>LEFT_ALT: KeyCode = <span class="number">0xE2</span>; <span class="comment">// Left Alt
+<a href=#285 id=285 data-nosnippet>285</a></span><span class="attr">#[doc(alias = <span class="string">"GCKeyCodeLeftGUI"</span>)]
+<a href=#286 id=286 data-nosnippet>286</a></span><span class="kw">pub const </span>LEFT_GUI: KeyCode = <span class="number">0xE3</span>; <span class="comment">// Left GUI
+<a href=#287 id=287 data-nosnippet>287</a></span><span class="attr">#[doc(alias = <span class="string">"GCKeyCodeRightControl"</span>)]
+<a href=#288 id=288 data-nosnippet>288</a></span><span class="kw">pub const </span>RIGHT_CONTROL: KeyCode = <span class="number">0xE4</span>; <span class="comment">// Right Control
+<a href=#289 id=289 data-nosnippet>289</a></span><span class="attr">#[doc(alias = <span class="string">"GCKeyCodeRightShift"</span>)]
+<a href=#290 id=290 data-nosnippet>290</a></span><span class="kw">pub const </span>RIGHT_SHIFT: KeyCode = <span class="number">0xE5</span>; <span class="comment">// Right Shift
+<a href=#291 id=291 data-nosnippet>291</a></span><span class="attr">#[doc(alias = <span class="string">"GCKeyCodeRightAlt"</span>)]
+<a href=#292 id=292 data-nosnippet>292</a></span><span class="kw">pub const </span>RIGHT_ALT: KeyCode = <span class="number">0xE6</span>; <span class="comment">// Right Alt
+<a href=#293 id=293 data-nosnippet>293</a></span><span class="attr">#[doc(alias = <span class="string">"GCKeyCodeRightGUI"</span>)]
+<a href=#294 id=294 data-nosnippet>294</a></span><span class="kw">pub const </span>RIGHT_GUI: KeyCode = <span class="number">0xE7</span>; <span class="comment">// Right GUI
+<a href=#295 id=295 data-nosnippet>295</a>
+<a href=#296 id=296 data-nosnippet>296</a></span><span class="attr">#[cfg(all(test, target_os = <span class="string">"macos"</span>))]
+<a href=#297 id=297 data-nosnippet>297</a></span><span class="kw">mod </span>tests {
+<a href=#298 id=298 data-nosnippet>298</a>    <span class="kw">use </span>std::{fs, process::Command};
+<a href=#299 id=299 data-nosnippet>299</a>
+<a href=#300 id=300 data-nosnippet>300</a>    <span class="kw">use super</span>::<span class="kw-2">*</span>;
+<a href=#301 id=301 data-nosnippet>301</a>
+<a href=#302 id=302 data-nosnippet>302</a>    <span class="kw">fn </span>hid_header() -&gt; String {
+<a href=#303 id=303 data-nosnippet>303</a>        <span class="kw">let </span>output = Command::new(<span class="string">"xcrun"</span>)
+<a href=#304 id=304 data-nosnippet>304</a>            .args([<span class="string">"--sdk"</span>, <span class="string">"macosx"</span>, <span class="string">"--show-sdk-path"</span>])
+<a href=#305 id=305 data-nosnippet>305</a>            .output()
+<a href=#306 id=306 data-nosnippet>306</a>            .expect(<span class="string">"xcrun should be available to locate the macOS SDK"</span>);
+<a href=#307 id=307 data-nosnippet>307</a>        <span class="macro">assert!</span>(
+<a href=#308 id=308 data-nosnippet>308</a>            output.status.success(),
+<a href=#309 id=309 data-nosnippet>309</a>            <span class="string">"xcrun failed: {}"</span>,
+<a href=#310 id=310 data-nosnippet>310</a>            String::from_utf8_lossy(<span class="kw-2">&amp;</span>output.stderr)
+<a href=#311 id=311 data-nosnippet>311</a>        );
+<a href=#312 id=312 data-nosnippet>312</a>        <span class="kw">let </span>sdk = String::from_utf8(output.stdout).expect(<span class="string">"xcrun output should be utf-8"</span>);
+<a href=#313 id=313 data-nosnippet>313</a>        <span class="kw">let </span>path = <span class="macro">format!</span>(
+<a href=#314 id=314 data-nosnippet>314</a>            <span class="string">"{}/System/Library/Frameworks/IOKit.framework/Headers/hid/IOHIDUsageTables.h"</span>,
+<a href=#315 id=315 data-nosnippet>315</a>            sdk.trim()
+<a href=#316 id=316 data-nosnippet>316</a>        );
+<a href=#317 id=317 data-nosnippet>317</a>        <span class="kw">let </span>bytes = fs::read(path).expect(<span class="string">"IOHIDUsageTables.h should exist in the SDK"</span>);
+<a href=#318 id=318 data-nosnippet>318</a>        String::from_utf8_lossy(<span class="kw-2">&amp;</span>bytes).into_owned()
+<a href=#319 id=319 data-nosnippet>319</a>    }
+<a href=#320 id=320 data-nosnippet>320</a>
+<a href=#321 id=321 data-nosnippet>321</a>    <span class="kw">fn </span>hid_usage(header: <span class="kw-2">&amp;</span>str, symbol: <span class="kw-2">&amp;</span>str) -&gt; KeyCode {
+<a href=#322 id=322 data-nosnippet>322</a>        <span class="kw">let </span>line = header
+<a href=#323 id=323 data-nosnippet>323</a>            .lines()
+<a href=#324 id=324 data-nosnippet>324</a>            .find(|line| {
+<a href=#325 id=325 data-nosnippet>325</a>                line.split(<span class="string">'='</span>)
+<a href=#326 id=326 data-nosnippet>326</a>                    .next()
+<a href=#327 id=327 data-nosnippet>327</a>                    .map(str::trim)
+<a href=#328 id=328 data-nosnippet>328</a>                    .is_some_and(|name| name == symbol)
+<a href=#329 id=329 data-nosnippet>329</a>            })
+<a href=#330 id=330 data-nosnippet>330</a>            .unwrap_or_else(|| <span class="macro">panic!</span>(<span class="string">"missing {symbol} in IOHIDUsageTables.h"</span>));
+<a href=#331 id=331 data-nosnippet>331</a>        <span class="kw">let </span>value = line
+<a href=#332 id=332 data-nosnippet>332</a>            .split(<span class="string">'='</span>)
+<a href=#333 id=333 data-nosnippet>333</a>            .nth(<span class="number">1</span>)
+<a href=#334 id=334 data-nosnippet>334</a>            .unwrap_or_else(|| <span class="macro">panic!</span>(<span class="string">"missing value for {symbol}"</span>))
+<a href=#335 id=335 data-nosnippet>335</a>            .split(<span class="string">','</span>)
+<a href=#336 id=336 data-nosnippet>336</a>            .next()
+<a href=#337 id=337 data-nosnippet>337</a>            .unwrap()
+<a href=#338 id=338 data-nosnippet>338</a>            .trim();
+<a href=#339 id=339 data-nosnippet>339</a>
+<a href=#340 id=340 data-nosnippet>340</a>        <span class="kw">if </span>value.starts_with(<span class="string">"0x"</span>) {
+<a href=#341 id=341 data-nosnippet>341</a>            KeyCode::from_str_radix(value.trim_start_matches(<span class="string">"0x"</span>), <span class="number">16</span>)
+<a href=#342 id=342 data-nosnippet>342</a>                .expect(<span class="string">"hex value should parse"</span>)
+<a href=#343 id=343 data-nosnippet>343</a>        } <span class="kw">else </span>{
+<a href=#344 id=344 data-nosnippet>344</a>            value.parse::&lt;KeyCode&gt;().expect(<span class="string">"value should parse"</span>)
+<a href=#345 id=345 data-nosnippet>345</a>        }
+<a href=#346 id=346 data-nosnippet>346</a>    }
+<a href=#347 id=347 data-nosnippet>347</a>
+<a href=#348 id=348 data-nosnippet>348</a>    <span class="attr">#[test]
+<a href=#349 id=349 data-nosnippet>349</a>    </span><span class="kw">fn </span>all_gc_key_codes_match_hid_usage_table() {
+<a href=#350 id=350 data-nosnippet>350</a>        <span class="kw">let </span>header = hid_header();
+<a href=#351 id=351 data-nosnippet>351</a>        <span class="kw">let </span>cases = [
+<a href=#352 id=352 data-nosnippet>352</a>            (KEY_A, <span class="string">"kHIDUsage_KeyboardA"</span>),
+<a href=#353 id=353 data-nosnippet>353</a>            (KEY_B, <span class="string">"kHIDUsage_KeyboardB"</span>),
+<a href=#354 id=354 data-nosnippet>354</a>            (KEY_C, <span class="string">"kHIDUsage_KeyboardC"</span>),
+<a href=#355 id=355 data-nosnippet>355</a>            (KEY_D, <span class="string">"kHIDUsage_KeyboardD"</span>),
+<a href=#356 id=356 data-nosnippet>356</a>            (KEY_E, <span class="string">"kHIDUsage_KeyboardE"</span>),
+<a href=#357 id=357 data-nosnippet>357</a>            (KEY_F, <span class="string">"kHIDUsage_KeyboardF"</span>),
+<a href=#358 id=358 data-nosnippet>358</a>            (KEY_G, <span class="string">"kHIDUsage_KeyboardG"</span>),
+<a href=#359 id=359 data-nosnippet>359</a>            (KEY_H, <span class="string">"kHIDUsage_KeyboardH"</span>),
+<a href=#360 id=360 data-nosnippet>360</a>            (KEY_I, <span class="string">"kHIDUsage_KeyboardI"</span>),
+<a href=#361 id=361 data-nosnippet>361</a>            (KEY_J, <span class="string">"kHIDUsage_KeyboardJ"</span>),
+<a href=#362 id=362 data-nosnippet>362</a>            (KEY_K, <span class="string">"kHIDUsage_KeyboardK"</span>),
+<a href=#363 id=363 data-nosnippet>363</a>            (KEY_L, <span class="string">"kHIDUsage_KeyboardL"</span>),
+<a href=#364 id=364 data-nosnippet>364</a>            (KEY_M, <span class="string">"kHIDUsage_KeyboardM"</span>),
+<a href=#365 id=365 data-nosnippet>365</a>            (KEY_N, <span class="string">"kHIDUsage_KeyboardN"</span>),
+<a href=#366 id=366 data-nosnippet>366</a>            (KEY_O, <span class="string">"kHIDUsage_KeyboardO"</span>),
+<a href=#367 id=367 data-nosnippet>367</a>            (KEY_P, <span class="string">"kHIDUsage_KeyboardP"</span>),
+<a href=#368 id=368 data-nosnippet>368</a>            (KEY_Q, <span class="string">"kHIDUsage_KeyboardQ"</span>),
+<a href=#369 id=369 data-nosnippet>369</a>            (KEY_R, <span class="string">"kHIDUsage_KeyboardR"</span>),
+<a href=#370 id=370 data-nosnippet>370</a>            (KEY_S, <span class="string">"kHIDUsage_KeyboardS"</span>),
+<a href=#371 id=371 data-nosnippet>371</a>            (KEY_T, <span class="string">"kHIDUsage_KeyboardT"</span>),
+<a href=#372 id=372 data-nosnippet>372</a>            (KEY_U, <span class="string">"kHIDUsage_KeyboardU"</span>),
+<a href=#373 id=373 data-nosnippet>373</a>            (KEY_V, <span class="string">"kHIDUsage_KeyboardV"</span>),
+<a href=#374 id=374 data-nosnippet>374</a>            (KEY_W, <span class="string">"kHIDUsage_KeyboardW"</span>),
+<a href=#375 id=375 data-nosnippet>375</a>            (KEY_X, <span class="string">"kHIDUsage_KeyboardX"</span>),
+<a href=#376 id=376 data-nosnippet>376</a>            (KEY_Y, <span class="string">"kHIDUsage_KeyboardY"</span>),
+<a href=#377 id=377 data-nosnippet>377</a>            (KEY_Z, <span class="string">"kHIDUsage_KeyboardZ"</span>),
+<a href=#378 id=378 data-nosnippet>378</a>            (ONE, <span class="string">"kHIDUsage_Keyboard1"</span>),
+<a href=#379 id=379 data-nosnippet>379</a>            (TWO, <span class="string">"kHIDUsage_Keyboard2"</span>),
+<a href=#380 id=380 data-nosnippet>380</a>            (THREE, <span class="string">"kHIDUsage_Keyboard3"</span>),
+<a href=#381 id=381 data-nosnippet>381</a>            (FOUR, <span class="string">"kHIDUsage_Keyboard4"</span>),
+<a href=#382 id=382 data-nosnippet>382</a>            (FIVE, <span class="string">"kHIDUsage_Keyboard5"</span>),
+<a href=#383 id=383 data-nosnippet>383</a>            (SIX, <span class="string">"kHIDUsage_Keyboard6"</span>),
+<a href=#384 id=384 data-nosnippet>384</a>            (SEVEN, <span class="string">"kHIDUsage_Keyboard7"</span>),
+<a href=#385 id=385 data-nosnippet>385</a>            (EIGHT, <span class="string">"kHIDUsage_Keyboard8"</span>),
+<a href=#386 id=386 data-nosnippet>386</a>            (NINE, <span class="string">"kHIDUsage_Keyboard9"</span>),
+<a href=#387 id=387 data-nosnippet>387</a>            (ZERO, <span class="string">"kHIDUsage_Keyboard0"</span>),
+<a href=#388 id=388 data-nosnippet>388</a>            (RETURN_OR_ENTER, <span class="string">"kHIDUsage_KeyboardReturnOrEnter"</span>),
+<a href=#389 id=389 data-nosnippet>389</a>            (ESCAPE, <span class="string">"kHIDUsage_KeyboardEscape"</span>),
+<a href=#390 id=390 data-nosnippet>390</a>            (DELETE_OR_BACKSPACE, <span class="string">"kHIDUsage_KeyboardDeleteOrBackspace"</span>),
+<a href=#391 id=391 data-nosnippet>391</a>            (TAB, <span class="string">"kHIDUsage_KeyboardTab"</span>),
+<a href=#392 id=392 data-nosnippet>392</a>            (SPACEBAR, <span class="string">"kHIDUsage_KeyboardSpacebar"</span>),
+<a href=#393 id=393 data-nosnippet>393</a>            (HYPHEN, <span class="string">"kHIDUsage_KeyboardHyphen"</span>),
+<a href=#394 id=394 data-nosnippet>394</a>            (EQUAL_SIGN, <span class="string">"kHIDUsage_KeyboardEqualSign"</span>),
+<a href=#395 id=395 data-nosnippet>395</a>            (OPEN_BRACKET, <span class="string">"kHIDUsage_KeyboardOpenBracket"</span>),
+<a href=#396 id=396 data-nosnippet>396</a>            (CLOSE_BRACKET, <span class="string">"kHIDUsage_KeyboardCloseBracket"</span>),
+<a href=#397 id=397 data-nosnippet>397</a>            (BACKSLASH, <span class="string">"kHIDUsage_KeyboardBackslash"</span>),
+<a href=#398 id=398 data-nosnippet>398</a>            (NON_US_POUND, <span class="string">"kHIDUsage_KeyboardNonUSPound"</span>),
+<a href=#399 id=399 data-nosnippet>399</a>            (SEMICOLON, <span class="string">"kHIDUsage_KeyboardSemicolon"</span>),
+<a href=#400 id=400 data-nosnippet>400</a>            (QUOTE, <span class="string">"kHIDUsage_KeyboardQuote"</span>),
+<a href=#401 id=401 data-nosnippet>401</a>            (
+<a href=#402 id=402 data-nosnippet>402</a>                GRAVE_ACCENT_AND_TILDE,
+<a href=#403 id=403 data-nosnippet>403</a>                <span class="string">"kHIDUsage_KeyboardGraveAccentAndTilde"</span>,
+<a href=#404 id=404 data-nosnippet>404</a>            ),
+<a href=#405 id=405 data-nosnippet>405</a>            (COMMA, <span class="string">"kHIDUsage_KeyboardComma"</span>),
+<a href=#406 id=406 data-nosnippet>406</a>            (PERIOD, <span class="string">"kHIDUsage_KeyboardPeriod"</span>),
+<a href=#407 id=407 data-nosnippet>407</a>            (SLASH, <span class="string">"kHIDUsage_KeyboardSlash"</span>),
+<a href=#408 id=408 data-nosnippet>408</a>            (CAPS_LOCK, <span class="string">"kHIDUsage_KeyboardCapsLock"</span>),
+<a href=#409 id=409 data-nosnippet>409</a>            (F1, <span class="string">"kHIDUsage_KeyboardF1"</span>),
+<a href=#410 id=410 data-nosnippet>410</a>            (F2, <span class="string">"kHIDUsage_KeyboardF2"</span>),
+<a href=#411 id=411 data-nosnippet>411</a>            (F3, <span class="string">"kHIDUsage_KeyboardF3"</span>),
+<a href=#412 id=412 data-nosnippet>412</a>            (F4, <span class="string">"kHIDUsage_KeyboardF4"</span>),
+<a href=#413 id=413 data-nosnippet>413</a>            (F5, <span class="string">"kHIDUsage_KeyboardF5"</span>),
+<a href=#414 id=414 data-nosnippet>414</a>            (F6, <span class="string">"kHIDUsage_KeyboardF6"</span>),
+<a href=#415 id=415 data-nosnippet>415</a>            (F7, <span class="string">"kHIDUsage_KeyboardF7"</span>),
+<a href=#416 id=416 data-nosnippet>416</a>            (F8, <span class="string">"kHIDUsage_KeyboardF8"</span>),
+<a href=#417 id=417 data-nosnippet>417</a>            (F9, <span class="string">"kHIDUsage_KeyboardF9"</span>),
+<a href=#418 id=418 data-nosnippet>418</a>            (F10, <span class="string">"kHIDUsage_KeyboardF10"</span>),
+<a href=#419 id=419 data-nosnippet>419</a>            (F11, <span class="string">"kHIDUsage_KeyboardF11"</span>),
+<a href=#420 id=420 data-nosnippet>420</a>            (F12, <span class="string">"kHIDUsage_KeyboardF12"</span>),
+<a href=#421 id=421 data-nosnippet>421</a>            (PRINT_SCREEN, <span class="string">"kHIDUsage_KeyboardPrintScreen"</span>),
+<a href=#422 id=422 data-nosnippet>422</a>            (SCROLL_LOCK, <span class="string">"kHIDUsage_KeyboardScrollLock"</span>),
+<a href=#423 id=423 data-nosnippet>423</a>            (PAUSE, <span class="string">"kHIDUsage_KeyboardPause"</span>),
+<a href=#424 id=424 data-nosnippet>424</a>            (INSERT, <span class="string">"kHIDUsage_KeyboardInsert"</span>),
+<a href=#425 id=425 data-nosnippet>425</a>            (HOME, <span class="string">"kHIDUsage_KeyboardHome"</span>),
+<a href=#426 id=426 data-nosnippet>426</a>            (PAGE_UP, <span class="string">"kHIDUsage_KeyboardPageUp"</span>),
+<a href=#427 id=427 data-nosnippet>427</a>            (DELETE_FORWARD, <span class="string">"kHIDUsage_KeyboardDeleteForward"</span>),
+<a href=#428 id=428 data-nosnippet>428</a>            (END, <span class="string">"kHIDUsage_KeyboardEnd"</span>),
+<a href=#429 id=429 data-nosnippet>429</a>            (PAGE_DOWN, <span class="string">"kHIDUsage_KeyboardPageDown"</span>),
+<a href=#430 id=430 data-nosnippet>430</a>            (RIGHT_ARROW, <span class="string">"kHIDUsage_KeyboardRightArrow"</span>),
+<a href=#431 id=431 data-nosnippet>431</a>            (LEFT_ARROW, <span class="string">"kHIDUsage_KeyboardLeftArrow"</span>),
+<a href=#432 id=432 data-nosnippet>432</a>            (DOWN_ARROW, <span class="string">"kHIDUsage_KeyboardDownArrow"</span>),
+<a href=#433 id=433 data-nosnippet>433</a>            (UP_ARROW, <span class="string">"kHIDUsage_KeyboardUpArrow"</span>),
+<a href=#434 id=434 data-nosnippet>434</a>            (KEYPAD_NUM_LOCK, <span class="string">"kHIDUsage_KeypadNumLock"</span>),
+<a href=#435 id=435 data-nosnippet>435</a>            (KEYPAD_SLASH, <span class="string">"kHIDUsage_KeypadSlash"</span>),
+<a href=#436 id=436 data-nosnippet>436</a>            (KEYPAD_ASTERISK, <span class="string">"kHIDUsage_KeypadAsterisk"</span>),
+<a href=#437 id=437 data-nosnippet>437</a>            (KEYPAD_HYPHEN, <span class="string">"kHIDUsage_KeypadHyphen"</span>),
+<a href=#438 id=438 data-nosnippet>438</a>            (KEYPAD_PLUS, <span class="string">"kHIDUsage_KeypadPlus"</span>),
+<a href=#439 id=439 data-nosnippet>439</a>            (KEYPAD_ENTER, <span class="string">"kHIDUsage_KeypadEnter"</span>),
+<a href=#440 id=440 data-nosnippet>440</a>            (KEYPAD1, <span class="string">"kHIDUsage_Keypad1"</span>),
+<a href=#441 id=441 data-nosnippet>441</a>            (KEYPAD2, <span class="string">"kHIDUsage_Keypad2"</span>),
+<a href=#442 id=442 data-nosnippet>442</a>            (KEYPAD3, <span class="string">"kHIDUsage_Keypad3"</span>),
+<a href=#443 id=443 data-nosnippet>443</a>            (KEYPAD4, <span class="string">"kHIDUsage_Keypad4"</span>),
+<a href=#444 id=444 data-nosnippet>444</a>            (KEYPAD5, <span class="string">"kHIDUsage_Keypad5"</span>),
+<a href=#445 id=445 data-nosnippet>445</a>            (KEYPAD6, <span class="string">"kHIDUsage_Keypad6"</span>),
+<a href=#446 id=446 data-nosnippet>446</a>            (KEYPAD7, <span class="string">"kHIDUsage_Keypad7"</span>),
+<a href=#447 id=447 data-nosnippet>447</a>            (KEYPAD8, <span class="string">"kHIDUsage_Keypad8"</span>),
+<a href=#448 id=448 data-nosnippet>448</a>            (KEYPAD9, <span class="string">"kHIDUsage_Keypad9"</span>),
+<a href=#449 id=449 data-nosnippet>449</a>            (KEYPAD0, <span class="string">"kHIDUsage_Keypad0"</span>),
+<a href=#450 id=450 data-nosnippet>450</a>            (KEYPAD_PERIOD, <span class="string">"kHIDUsage_KeypadPeriod"</span>),
+<a href=#451 id=451 data-nosnippet>451</a>            (NON_US_BACKSLASH, <span class="string">"kHIDUsage_KeyboardNonUSBackslash"</span>),
+<a href=#452 id=452 data-nosnippet>452</a>            (APPLICATION, <span class="string">"kHIDUsage_KeyboardApplication"</span>),
+<a href=#453 id=453 data-nosnippet>453</a>            (POWER, <span class="string">"kHIDUsage_KeyboardPower"</span>),
+<a href=#454 id=454 data-nosnippet>454</a>            (KEYPAD_EQUAL_SIGN, <span class="string">"kHIDUsage_KeypadEqualSign"</span>),
+<a href=#455 id=455 data-nosnippet>455</a>            (F13, <span class="string">"kHIDUsage_KeyboardF13"</span>),
+<a href=#456 id=456 data-nosnippet>456</a>            (F14, <span class="string">"kHIDUsage_KeyboardF14"</span>),
+<a href=#457 id=457 data-nosnippet>457</a>            (F15, <span class="string">"kHIDUsage_KeyboardF15"</span>),
+<a href=#458 id=458 data-nosnippet>458</a>            (F16, <span class="string">"kHIDUsage_KeyboardF16"</span>),
+<a href=#459 id=459 data-nosnippet>459</a>            (F17, <span class="string">"kHIDUsage_KeyboardF17"</span>),
+<a href=#460 id=460 data-nosnippet>460</a>            (F18, <span class="string">"kHIDUsage_KeyboardF18"</span>),
+<a href=#461 id=461 data-nosnippet>461</a>            (F19, <span class="string">"kHIDUsage_KeyboardF19"</span>),
+<a href=#462 id=462 data-nosnippet>462</a>            (F20, <span class="string">"kHIDUsage_KeyboardF20"</span>),
+<a href=#463 id=463 data-nosnippet>463</a>            (INTERNATIONAL1, <span class="string">"kHIDUsage_KeyboardInternational1"</span>),
+<a href=#464 id=464 data-nosnippet>464</a>            (INTERNATIONAL2, <span class="string">"kHIDUsage_KeyboardInternational2"</span>),
+<a href=#465 id=465 data-nosnippet>465</a>            (INTERNATIONAL3, <span class="string">"kHIDUsage_KeyboardInternational3"</span>),
+<a href=#466 id=466 data-nosnippet>466</a>            (INTERNATIONAL4, <span class="string">"kHIDUsage_KeyboardInternational4"</span>),
+<a href=#467 id=467 data-nosnippet>467</a>            (INTERNATIONAL5, <span class="string">"kHIDUsage_KeyboardInternational5"</span>),
+<a href=#468 id=468 data-nosnippet>468</a>            (INTERNATIONAL6, <span class="string">"kHIDUsage_KeyboardInternational6"</span>),
+<a href=#469 id=469 data-nosnippet>469</a>            (INTERNATIONAL7, <span class="string">"kHIDUsage_KeyboardInternational7"</span>),
+<a href=#470 id=470 data-nosnippet>470</a>            (INTERNATIONAL8, <span class="string">"kHIDUsage_KeyboardInternational8"</span>),
+<a href=#471 id=471 data-nosnippet>471</a>            (INTERNATIONAL9, <span class="string">"kHIDUsage_KeyboardInternational9"</span>),
+<a href=#472 id=472 data-nosnippet>472</a>            (LANG1, <span class="string">"kHIDUsage_KeyboardLANG1"</span>),
+<a href=#473 id=473 data-nosnippet>473</a>            (LANG2, <span class="string">"kHIDUsage_KeyboardLANG2"</span>),
+<a href=#474 id=474 data-nosnippet>474</a>            (LANG3, <span class="string">"kHIDUsage_KeyboardLANG3"</span>),
+<a href=#475 id=475 data-nosnippet>475</a>            (LANG4, <span class="string">"kHIDUsage_KeyboardLANG4"</span>),
+<a href=#476 id=476 data-nosnippet>476</a>            (LANG5, <span class="string">"kHIDUsage_KeyboardLANG5"</span>),
+<a href=#477 id=477 data-nosnippet>477</a>            (LANG6, <span class="string">"kHIDUsage_KeyboardLANG6"</span>),
+<a href=#478 id=478 data-nosnippet>478</a>            (LANG7, <span class="string">"kHIDUsage_KeyboardLANG7"</span>),
+<a href=#479 id=479 data-nosnippet>479</a>            (LANG8, <span class="string">"kHIDUsage_KeyboardLANG8"</span>),
+<a href=#480 id=480 data-nosnippet>480</a>            (LANG9, <span class="string">"kHIDUsage_KeyboardLANG9"</span>),
+<a href=#481 id=481 data-nosnippet>481</a>            (LEFT_CONTROL, <span class="string">"kHIDUsage_KeyboardLeftControl"</span>),
+<a href=#482 id=482 data-nosnippet>482</a>            (LEFT_SHIFT, <span class="string">"kHIDUsage_KeyboardLeftShift"</span>),
+<a href=#483 id=483 data-nosnippet>483</a>            (LEFT_ALT, <span class="string">"kHIDUsage_KeyboardLeftAlt"</span>),
+<a href=#484 id=484 data-nosnippet>484</a>            (LEFT_GUI, <span class="string">"kHIDUsage_KeyboardLeftGUI"</span>),
+<a href=#485 id=485 data-nosnippet>485</a>            (RIGHT_CONTROL, <span class="string">"kHIDUsage_KeyboardRightControl"</span>),
+<a href=#486 id=486 data-nosnippet>486</a>            (RIGHT_SHIFT, <span class="string">"kHIDUsage_KeyboardRightShift"</span>),
+<a href=#487 id=487 data-nosnippet>487</a>            (RIGHT_ALT, <span class="string">"kHIDUsage_KeyboardRightAlt"</span>),
+<a href=#488 id=488 data-nosnippet>488</a>            (RIGHT_GUI, <span class="string">"kHIDUsage_KeyboardRightGUI"</span>),
+<a href=#489 id=489 data-nosnippet>489</a>        ];
+<a href=#490 id=490 data-nosnippet>490</a>
+<a href=#491 id=491 data-nosnippet>491</a>        <span class="kw">for </span>(actual, symbol) <span class="kw">in </span>cases {
+<a href=#492 id=492 data-nosnippet>492</a>            <span class="macro">assert_eq!</span>(actual, hid_usage(<span class="kw-2">&amp;</span>header, symbol), <span class="string">"mismatch for {symbol}"</span>);
+<a href=#493 id=493 data-nosnippet>493</a>        }
+<a href=#494 id=494 data-nosnippet>494</a>    }
+<a href=#495 id=495 data-nosnippet>495</a>
+<a href=#496 id=496 data-nosnippet>496</a>    <span class="attr">#[test]
+<a href=#497 id=497 data-nosnippet>497</a>    </span><span class="kw">fn </span>gc_key_codes_do_not_match_cg_virtual_keycodes() {
+<a href=#498 id=498 data-nosnippet>498</a>        <span class="kw">let </span>gc = [KEY_A, SPACEBAR, F1, KEYPAD1];
+<a href=#499 id=499 data-nosnippet>499</a>        <span class="kw">let </span>cg = [<span class="number">0 </span><span class="kw">as </span>KeyCode, <span class="number">49 </span><span class="kw">as </span>KeyCode, <span class="number">122 </span><span class="kw">as </span>KeyCode, <span class="number">83 </span><span class="kw">as </span>KeyCode];
+<a href=#500 id=500 data-nosnippet>500</a>
+<a href=#501 id=501 data-nosnippet>501</a>        <span class="macro">assert_ne!</span>(gc, cg);
+<a href=#502 id=502 data-nosnippet>502</a>    }
+<a href=#503 id=503 data-nosnippet>503</a>}</code></pre></div></section></main></body></html>

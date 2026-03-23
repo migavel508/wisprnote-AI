@@ -1,0 +1,1 @@
+window.SIDEBAR_ITEMS = {"fn":["ciff","exif","gif","gps","heic","heif","png","raw","tiff","webp"]};

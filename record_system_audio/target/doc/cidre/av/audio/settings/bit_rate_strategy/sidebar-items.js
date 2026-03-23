@@ -1,0 +1,1 @@
+window.SIDEBAR_ITEMS = {"fn":["constant","long_term_average","variable","variable_constrained"]};

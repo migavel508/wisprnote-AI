@@ -1,0 +1,1 @@
+window.SIDEBAR_ITEMS = {"fn":["set_uncaught_exception_handler","try_catch","try_catch_err","uncaught_exception_handler"],"struct":["Exception"],"type":["UncaughtExceptionHandler"]};

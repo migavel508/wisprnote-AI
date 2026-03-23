@@ -1,0 +1,1 @@
+window.SIDEBAR_ITEMS = {"fn":["_axpy_f32","_copy_f32","_dot_f32","_i_abs_max_f32"]};

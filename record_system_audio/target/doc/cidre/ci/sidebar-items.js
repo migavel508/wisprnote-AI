@@ -1,0 +1,1 @@
+window.SIDEBAR_ITEMS = {"struct":["BarcodeDesc","Context","Format","Image","ImageOpt","Vec"]};

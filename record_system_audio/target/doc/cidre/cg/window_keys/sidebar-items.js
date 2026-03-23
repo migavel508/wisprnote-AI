@@ -1,0 +1,1 @@
+window.SIDEBAR_ITEMS = {"fn":["alpha","backing_location_video_memory","bounds","is_on_screen","layer","memory_usage","name","number","owner_name","owner_pid","sharing_state","store_type","workspace"]};

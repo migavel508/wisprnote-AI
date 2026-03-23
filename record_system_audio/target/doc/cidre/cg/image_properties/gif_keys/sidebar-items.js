@@ -1,0 +1,1 @@
+window.SIDEBAR_ITEMS = {"fn":["canvas_pixel_height","canvas_pixel_width","delay_time","frame_info_array","has_global_color_map","image_color_map","loop_count","unclamped_delay_time"]};

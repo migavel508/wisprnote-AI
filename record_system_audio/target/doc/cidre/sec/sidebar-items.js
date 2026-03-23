@@ -1,0 +1,1 @@
+window.SIDEBAR_ITEMS = {"fn":["err_msg_string"],"mod":["certificate","err","identity","item","policy","ssl_err"],"struct":["Access","AccessControl","Acl","Cert","Identity","Key","Keychain","KeychainAttr","KeychainAttrInfo","KeychainAttrList","KeychainItem","KeychainSearch","Password","Policy","TrustedApp"],"type":["KeychainAttrType","KeychainStatus"]};

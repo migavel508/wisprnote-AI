@@ -1,0 +1,1 @@
+window.SIDEBAR_ITEMS = {"fn":["height","horizontal_offset","vertical_offset","width"]};

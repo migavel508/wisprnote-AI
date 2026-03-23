@@ -1,0 +1,1 @@
+window.SIDEBAR_ITEMS = {"fn":["AudioHardwareCreateProcessTap","AudioHardwareDestroyProcessTap"],"struct":["Tap","TapGuard"]};

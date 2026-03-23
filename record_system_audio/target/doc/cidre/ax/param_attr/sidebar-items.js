@@ -1,0 +1,1 @@
+window.SIDEBAR_ITEMS = {"fn":["attr_string_for_range","bounds_for_range","cell_for_col_and_row","layout_point_for_screen_point","layout_size_for_screen_size","line_for_index","range_for_index","range_for_line","range_for_pos","rtf_for_range","screen_point_for_layout_point","screen_size_for_layout_size","string_for_range","style_range_for_index"]};

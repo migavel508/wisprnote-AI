@@ -1,0 +1,1 @@
+window.SIDEBAR_ITEMS = {"fn":["is_hardware_decode_supported","is_stereo_mv_hevc_decode_supported"],"struct":["OutputCbRecord","Session"],"type":["MultiImageCapableOutputHandler","OutputCb","OutputMultiImageCb"]};
