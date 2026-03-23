@@ -12,6 +12,17 @@ interface NotesPageProps {
 
 type NoteTab = 'transcription' | 'summary' | 'notes';
 
+// Helper function to format transcription with bold speaker labels
+function formatTranscriptionWithBoldSpeakers(text: string): string {
+  if (!text) return '';
+  
+  // Match patterns like "Speaker 1:", "Speaker 2:", "Speaker A:", etc.
+  // Also match common variations like "Host:", "Guest:", "Interviewer:", etc.
+  const speakerPattern = /^(Speaker\s*\d+|Speaker\s*[A-Z]|Host|Guest|Interviewer|Interviewee|Moderator|Participant\s*\d*|Person\s*\d*)\s*:/gim;
+  
+  return text.replace(speakerPattern, (match) => `**${match.trim()}**`);
+}
+
 export default function NotesPage({ selectedTask, onNavigateToAssets }: NotesPageProps) {
   const [noteTab, setNoteTab] = useState<NoteTab>('transcription');
 
@@ -81,8 +92,8 @@ export default function NotesPage({ selectedTask, onNavigateToAssets }: NotesPag
                 className="markdown-body"
               >
                 {noteTab === 'transcription' && (
-                  <div className="space-y-4">
-                    <Markdown remarkPlugins={[remarkGfm]}>{selectedTask.transcription}</Markdown>
+                  <div className="space-y-4 transcription-content">
+                    <Markdown remarkPlugins={[remarkGfm]}>{formatTranscriptionWithBoldSpeakers(selectedTask.transcription)}</Markdown>
                   </div>
                 )}
                 {noteTab === 'summary' && (

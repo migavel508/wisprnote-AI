@@ -42,7 +42,8 @@ import {
   Mic,
   StopCircle,
   PauseCircle,
-  PlayCircle
+  PlayCircle,
+  Sidebar as SidebarIcon
 } from 'lucide-react';
 import { motion, AnimatePresence } from 'motion/react';
 import Markdown from 'react-markdown';
@@ -1574,19 +1575,19 @@ export default function App() {
         )}
       </AnimatePresence>
 
-      {/* Sidebar Toggle when closed */}
+      {/* Sidebar Toggle when closed - floating button */}
       {!isSidebarOpen && (
         <button 
           onClick={() => setIsSidebarOpen(true)}
-          className="fixed top-4 left-4 z-50 w-8 h-8 bg-white border border-[#e5e5e5] rounded-lg flex items-center justify-center text-[#595959] hover:text-[#1a1a1a] hover:bg-[#f5f5f5] transition-colors shadow-sm"
+          className="fixed top-4 left-4 z-50 text-[#595959] hover:text-[#1a1a1a] transition-colors rounded-[8px] p-2 border border-[#e3e3e0] bg-white hover:bg-[#f5f5f5] shadow-sm"
         >
-          <ChevronRight className="w-4 h-4" />
+          <SidebarIcon className="w-4 h-4" strokeWidth={2} />
         </button>
       )}
 
       {/* Main Content Area */}
       <div className="flex-1 flex overflow-hidden relative">
-        <main className={`flex-1 bg-[#faf9f7] w-full relative overflow-y-auto`}>
+        <main className="flex-1 bg-white w-full relative overflow-y-auto">
           <AnimatePresence mode="wait">
             {currentView === 'process' && (
               <motion.div 

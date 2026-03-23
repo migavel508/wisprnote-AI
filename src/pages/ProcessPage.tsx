@@ -125,17 +125,17 @@ export default function ProcessPage({
   const isProcessing = status === 'processing' || status === 'splitting';
 
   return (
-    <div className="flex flex-col h-full bg-[#faf9f7] font-[system-ui] overflow-hidden relative">
+    <div className="flex flex-col h-full bg-white font-[system-ui] overflow-hidden relative">
       {/* Main Content Area */}
-      <main className="flex-1 overflow-y-auto w-full flex justify-center pt-12 pb-48">
-        <div className="w-full max-w-[760px] px-8">
+      <main className="flex-1 overflow-y-auto w-full flex justify-center pt-8 sm:pt-12 pb-32 sm:pb-48">
+        <div className="w-full max-w-[760px] px-4 sm:px-8">
           {/* Title */}
-          <h1 className="text-[32px] font-serif text-[#141414]/30 mb-6">
+          <h1 className="text-[24px] sm:text-[32px] font-serif text-[#141414]/30 mb-4 sm:mb-6">
             {file ? file.name.replace(/\.[^/.]+$/, '') : 'New Recording'}
           </h1>
           
           {/* Tags/Status */}
-          <div className="flex items-center gap-2 mb-10">
+          <div className="flex flex-wrap items-center gap-2 mb-6 sm:mb-10">
             <button className="flex items-center gap-1.5 px-3 py-1.5 text-[13px] font-medium text-[#141414] bg-white border border-[#141414]/10 hover:bg-[#F5F5F5] rounded-lg transition-colors shadow-sm">
               <Mic className="w-3.5 h-3.5 text-[#141414]/50" />
               <span>{inputMode === 'upload' ? 'Upload' : 'Record'}</span>
@@ -228,26 +228,26 @@ export default function ProcessPage({
 
       {/* Start Processing Button - Shows above collapsed bar when file is ready */}
       {file && !isRecording && !isProcessing && viewState === 'collapsed' && (
-        <div className="fixed bottom-[100px] left-1/2 transform -translate-x-1/2 z-50">
+        <div className="fixed bottom-[90px] sm:bottom-[100px] left-1/2 transform -translate-x-1/2 z-50 px-4 w-full sm:w-auto flex justify-center">
           <motion.button 
             initial={{ opacity: 0, y: 20 }}
             animate={{ opacity: 1, y: 0 }}
             onClick={startProcessing}
-            className="flex items-center gap-2.5 px-6 py-3.5 bg-[#141414] hover:bg-[#333] text-white rounded-full shadow-lg transition-all hover:scale-105"
+            className="flex items-center gap-2.5 px-5 sm:px-6 py-3 sm:py-3.5 bg-[#141414] hover:bg-[#333] text-white rounded-full shadow-lg transition-all hover:scale-105"
           >
             <Play className="w-4 h-4 fill-current" />
-            <span className="text-[14px] font-semibold tracking-wide">Start Processing</span>
+            <span className="text-[13px] sm:text-[14px] font-semibold tracking-wide">Start Processing</span>
           </motion.button>
         </div>
       )}
 
       {/* Processing Progress Bar - Shows during processing */}
       {isProcessing && (
-        <div className="fixed bottom-[100px] left-1/2 transform -translate-x-1/2 z-50 w-[600px]">
+        <div className="fixed bottom-[90px] sm:bottom-[100px] left-1/2 transform -translate-x-1/2 z-50 w-[calc(100%-32px)] sm:w-[600px] max-w-[600px]">
           <motion.div 
             initial={{ opacity: 0, y: 20 }}
             animate={{ opacity: 1, y: 0 }}
-            className="bg-white rounded-full shadow-[0_4px_20px_rgba(0,0,0,0.12)] border border-[#141414]/10 px-5 py-3 flex items-center justify-between"
+            className="bg-white rounded-full shadow-[0_4px_20px_rgba(0,0,0,0.12)] border border-[#141414]/10 px-4 sm:px-5 py-3 flex items-center justify-between"
           >
             <div className="flex items-center gap-3">
               <Loader2 className="w-4 h-4 text-[#141414] animate-spin" />
@@ -269,8 +269,8 @@ export default function ProcessPage({
 
       {/* Bottom Bar - Collapsed State */}
       {viewState === 'collapsed' && (
-        <div className="fixed bottom-6 left-1/2 transform -translate-x-1/2 z-50">
-          <div className="flex items-center gap-2">
+        <div className="fixed bottom-4 sm:bottom-6 left-1/2 transform -translate-x-1/2 z-50 w-[calc(100%-32px)] sm:w-auto max-w-[600px]">
+          <div className="flex items-center gap-2 w-full sm:w-auto">
             {/* Wave Animation Button */}
             <div 
               className="relative flex items-center bg-white rounded-full shadow-[0_2px_16px_rgba(0,0,0,0.1)] border border-[#141414]/10"
@@ -328,30 +328,30 @@ export default function ProcessPage({
             </div>
 
             {/* Main Action Bar */}
-            <div className="flex items-center bg-white rounded-full shadow-[0_2px_16px_rgba(0,0,0,0.1)] border border-[#141414]/10">
+            <div className="flex-1 sm:flex-none flex items-center bg-white rounded-full shadow-[0_2px_16px_rgba(0,0,0,0.1)] border border-[#141414]/10">
               <div 
                 onClick={() => setViewState('expanded')}
-                className="flex items-center px-5 py-3 cursor-pointer min-w-[280px]"
+                className="flex-1 flex items-center px-4 sm:px-5 py-3 cursor-pointer sm:min-w-[280px] overflow-hidden"
               >
-                <span className="text-[14px] text-[#141414]/40">
-                  {file ? file.name : 'Drop audio or start recording...'}
+                <span className="text-[13px] sm:text-[14px] text-[#141414]/40 truncate">
+                  {file ? file.name : 'Drop audio or record...'}
                 </span>
               </div>
 
               {/* Mode toggle button */}
               <button 
                 onClick={() => setInputMode(inputMode === 'upload' ? 'record' : 'upload')}
-                className="flex items-center gap-2 px-4 py-2 mr-2 text-[13px] font-medium text-[#141414] bg-white border border-[#141414]/10 hover:bg-[#F5F5F5] rounded-full transition-colors whitespace-nowrap shadow-sm"
+                className="flex-shrink-0 flex items-center gap-1.5 sm:gap-2 px-3 sm:px-4 py-2 mr-2 text-[12px] sm:text-[13px] font-medium text-[#141414] bg-white border border-[#141414]/10 hover:bg-[#F5F5F5] rounded-full transition-colors whitespace-nowrap shadow-sm"
               >
                 {inputMode === 'upload' ? (
                   <>
-                    <Mic className="w-4 h-4 text-[#141414]/50" />
-                    <span>Record</span>
+                    <Mic className="w-3.5 sm:w-4 h-3.5 sm:h-4 text-[#141414]/50" />
+                    <span className="hidden sm:inline">Record</span>
                   </>
                 ) : (
                   <>
-                    <Upload className="w-4 h-4 text-[#141414]/50" />
-                    <span>Upload</span>
+                    <Upload className="w-3.5 sm:w-4 h-3.5 sm:h-4 text-[#141414]/50" />
+                    <span className="hidden sm:inline">Upload</span>
                   </>
                 )}
               </button>
@@ -368,8 +368,8 @@ export default function ProcessPage({
             animate={{ y: 0, opacity: 1 }}
             exit={{ y: '100%', opacity: 0 }}
             transition={{ type: 'spring', damping: 25, stiffness: 300 }}
-            className="fixed bottom-0 left-1/2 transform -translate-x-1/2 w-[720px] bg-white rounded-t-[24px] shadow-[0_-4px_40px_rgba(0,0,0,0.12)] border border-[#141414]/10 border-b-0 flex flex-col z-50 overflow-hidden"
-            style={{ height: '420px' }}
+            className="fixed bottom-0 left-0 right-0 sm:left-1/2 sm:right-auto sm:transform sm:-translate-x-1/2 w-full sm:w-[720px] bg-white rounded-t-[20px] sm:rounded-t-[24px] shadow-[0_-4px_40px_rgba(0,0,0,0.12)] border border-[#141414]/10 border-b-0 flex flex-col z-50 overflow-hidden"
+            style={{ height: '70vh', maxHeight: '420px' }}
           >
             {/* Header */}
             <div className="flex items-center justify-between px-5 py-3 border-b border-[#141414]/5">
@@ -407,7 +407,7 @@ export default function ProcessPage({
             </div>
 
             {/* Content */}
-            <div className="flex-1 overflow-y-auto p-6">
+            <div className="flex-1 overflow-y-auto p-4 sm:p-6">
               {inputMode === 'upload' ? (
                 /* Upload Mode */
                 <div 
