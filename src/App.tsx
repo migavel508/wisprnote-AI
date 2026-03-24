@@ -1322,7 +1322,13 @@ export default function App() {
   };
 
   const handleSendMessage = async () => {
-    if (!chatInput.trim() || !selectedTask || isChatting) return;
+    if (!chatInput.trim() || !selectedTask || !selectedTask.id || isChatting) return;
+
+    // Ensure we have transcription content
+    if (!selectedTask.transcription) {
+      setChatMessages(prev => [...prev, { role: 'model', text: 'Unable to chat: No transcription content available for this meeting.' }]);
+      return;
+    }
 
     const userMessage: Message = { role: 'user', text: chatInput };
     const userInput = chatInput;
@@ -1333,7 +1339,7 @@ export default function App() {
     try {
       // Save user message to Supabase
       await saveChatMessage({
-        task_id: selectedTask.id!,
+        task_id: selectedTask.id,
         role: 'user',
         text: userInput
       });
@@ -1343,8 +1349,15 @@ export default function App() {
         parts: [{ text: m.text }]
       }));
 
+      // Build context from available content
+      const context = [
+        selectedTask.transcription,
+        selectedTask.summary || '',
+        selectedTask.notes || ''
+      ].filter(Boolean).join('\n\n');
+
       const response = await chatWithNotes(
-        selectedTask.transcription + '\n\n' + (selectedTask.summary || '') + '\n\n' + (selectedTask.notes || ''),
+        context,
         userInput,
         history
       );
