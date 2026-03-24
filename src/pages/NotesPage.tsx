@@ -1,15 +1,17 @@
 import { useState } from 'react';
 import { motion, AnimatePresence } from 'framer-motion';
-import { BookOpen, FileBox } from 'lucide-react';
+import { BookOpen, FileBox, Sparkles, Loader2, Check } from 'lucide-react';
 import Markdown from 'react-markdown';
 import remarkGfm from 'remark-gfm';
-import { TaskHistory } from '../services/supabaseService';
+import { TaskHistory, updateTaskTitle } from '../services/supabaseService';
+import { generateMeetingTitle } from '../services/geminiService';
 import { NotesPageSkeleton } from '../components/Skeleton';
 
 interface NotesPageProps {
   selectedTask: TaskHistory | null;
   onNavigateToAssets: () => void;
   isLoading?: boolean;
+  onTaskUpdated?: (task: TaskHistory) => void;
 }
 
 type NoteTab = 'transcription' | 'summary' | 'notes';
@@ -25,13 +27,38 @@ function formatTranscriptionWithBoldSpeakers(text: string): string {
   return text.replace(speakerPattern, (match) => `**${match.trim()}**`);
 }
 
-export default function NotesPage({ selectedTask, onNavigateToAssets, isLoading = false }: NotesPageProps) {
+export default function NotesPage({ selectedTask, onNavigateToAssets, isLoading = false, onTaskUpdated }: NotesPageProps) {
   const [noteTab, setNoteTab] = useState<NoteTab>('transcription');
+  const [isGeneratingTitle, setIsGeneratingTitle] = useState(false);
+  const [titleGenerated, setTitleGenerated] = useState(false);
 
   // Show skeleton while loading
   if (isLoading || !selectedTask) {
     return <NotesPageSkeleton />;
   }
+
+  const handleGenerateTitle = async () => {
+    if (!selectedTask.id || !selectedTask.transcription) return;
+    
+    setIsGeneratingTitle(true);
+    setTitleGenerated(false);
+    
+    try {
+      const newTitle = await generateMeetingTitle(selectedTask.transcription);
+      const updatedTask = await updateTaskTitle(selectedTask.id, newTitle);
+      
+      if (onTaskUpdated) {
+        onTaskUpdated(updatedTask);
+      }
+      
+      setTitleGenerated(true);
+      setTimeout(() => setTitleGenerated(false), 2000);
+    } catch (error) {
+      console.error('Error generating title:', error);
+    } finally {
+      setIsGeneratingTitle(false);
+    }
+  };
 
   return (
     <div className="absolute inset-0 flex flex-col bg-white overflow-hidden">
@@ -56,6 +83,21 @@ export default function NotesPage({ selectedTask, onNavigateToAssets, isLoading 
           {/* Title + Meta inline */}
           <div className="flex items-center gap-4 mb-3">
             <h1 className="text-lg sm:text-xl font-bold tracking-tight truncate flex-1">{selectedTask.filename}</h1>
+            <button
+              onClick={handleGenerateTitle}
+              disabled={isGeneratingTitle}
+              className="flex-shrink-0 flex items-center gap-1.5 px-2 py-1 text-[10px] font-mono opacity-60 hover:opacity-100 hover:bg-gray-100 rounded transition-all disabled:opacity-40"
+              title="Generate AI title based on content"
+            >
+              {isGeneratingTitle ? (
+                <Loader2 className="w-3 h-3 animate-spin" />
+              ) : titleGenerated ? (
+                <Check className="w-3 h-3 text-green-600" />
+              ) : (
+                <Sparkles className="w-3 h-3" />
+              )}
+              <span className="hidden sm:inline">{titleGenerated ? 'Done!' : 'Generate Title'}</span>
+            </button>
             <span className="text-[10px] font-mono opacity-40 flex-shrink-0 hidden sm:block">
               {new Date(selectedTask.created_at!).toLocaleDateString()}
             </span>

@@ -1,13 +1,15 @@
 import { useState, useMemo, useEffect, useRef, useCallback } from 'react';
 import { motion } from 'framer-motion';
-import { FileAudio, Search, ChevronRight, X, Loader2 } from 'lucide-react';
-import { TaskHistory, TaskMetadata, getTasksLightweight, getTaskById } from '../services/supabaseService';
+import { FileAudio, Search, ChevronRight, X, Loader2, Sparkles } from 'lucide-react';
+import { TaskHistory, TaskMetadata, getTasksLightweight, getTaskById, updateTaskTitle } from '../services/supabaseService';
+import { generateMeetingTitle } from '../services/geminiService';
 import { MeetingGridSkeleton } from '../components/Skeleton';
 
 interface HistoryPageProps {
   history: TaskHistory[];
   onSelectTask: (task: TaskHistory) => void;
   isLoading?: boolean;
+  onTaskUpdated?: (task: TaskHistory) => void;
 }
 
 // Cache for full task details to avoid re-fetching
@@ -73,13 +75,38 @@ function searchMeetings(meetings: (TaskHistory | TaskMetadata)[], query: string)
 
 const PAGE_SIZE = 12; // Number of items to show initially and load more
 
-export default function HistoryPage({ history, onSelectTask, isLoading = false }: HistoryPageProps) {
+export default function HistoryPage({ history, onSelectTask, isLoading = false, onTaskUpdated }: HistoryPageProps) {
   const [searchQuery, setSearchQuery] = useState('');
   const [loadingTaskId, setLoadingTaskId] = useState<string | null>(null);
+  const [generatingTitleId, setGeneratingTitleId] = useState<string | null>(null);
   const [visibleCount, setVisibleCount] = useState(PAGE_SIZE);
   const [isLoadingMore, setIsLoadingMore] = useState(false);
   const scrollContainerRef = useRef<HTMLDivElement>(null);
   const loadMoreRef = useRef<HTMLDivElement>(null);
+  
+  // Handle generating title for a task
+  const handleGenerateTitle = useCallback(async (e: React.MouseEvent, task: TaskHistory) => {
+    e.stopPropagation(); // Prevent card click
+    if (!task.id || !task.transcription) return;
+    
+    setGeneratingTitleId(task.id);
+    
+    try {
+      const newTitle = await generateMeetingTitle(task.transcription);
+      const updatedTask = await updateTaskTitle(task.id, newTitle);
+      
+      if (onTaskUpdated) {
+        onTaskUpdated(updatedTask);
+      }
+      
+      // Update cache
+      taskCache.set(task.id, updatedTask);
+    } catch (error) {
+      console.error('Error generating title:', error);
+    } finally {
+      setGeneratingTitleId(null);
+    }
+  }, [onTaskUpdated]);
   
   // Memoized filtered results
   const filteredHistory = useMemo(() => {
@@ -232,7 +259,21 @@ export default function HistoryPage({ history, onSelectTask, isLoading = false }
                       {new Date(task.created_at!).toLocaleDateString()}
                     </span>
                   </div>
-                  <h3 className="font-bold text-sm mb-2 group-hover:underline truncate">{task.filename}</h3>
+                  <div className="flex items-center gap-2 mb-2">
+                    <h3 className="font-bold text-sm group-hover:underline truncate flex-1">{task.filename}</h3>
+                    <button
+                      onClick={(e) => handleGenerateTitle(e, task)}
+                      disabled={generatingTitleId === task.id}
+                      className="flex-shrink-0 p-1 opacity-0 group-hover:opacity-60 hover:!opacity-100 hover:bg-gray-100 rounded transition-all disabled:opacity-40"
+                      title="Generate AI title"
+                    >
+                      {generatingTitleId === task.id ? (
+                        <Loader2 className="w-3.5 h-3.5 animate-spin" />
+                      ) : (
+                        <Sparkles className="w-3.5 h-3.5" />
+                      )}
+                    </button>
+                  </div>
                   <p className="text-[10px] opacity-50 line-clamp-3 font-mono mb-4">
                     {task.summary || (task.transcription ? task.transcription.substring(0, 100) + '...' : 'No summary available')}
                   </p>
