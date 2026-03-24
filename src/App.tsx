@@ -65,7 +65,8 @@ import {
   generateWikiContent,
   generatePodcastScript,
   chatWithPodcast,
-  extractKnowledgeGraph
+  extractKnowledgeGraph,
+  generateMeetingTitle
 } from './services/geminiService';
 import { 
   supabase, 
@@ -1416,6 +1417,18 @@ export default function App() {
     }
   };
 
+  // Handler to update a task in history (e.g., when title is regenerated)
+  const handleTaskUpdated = (updatedTask: TaskHistory) => {
+    // Update history array
+    setHistory(prev => prev.map(task => 
+      task.id === updatedTask.id ? updatedTask : task
+    ));
+    // Update selectedTask if it's the same task
+    if (selectedTask?.id === updatedTask.id) {
+      setSelectedTask(updatedTask);
+    }
+  };
+
   const handleFileChange = (e: React.ChangeEvent<HTMLInputElement>) => {
     const selectedFile = e.target.files?.[0];
     if (selectedFile) {
@@ -1459,9 +1472,12 @@ export default function App() {
 
       setStatus('completed');
 
-      // Generate summary and notes automatically
-      const summary = await generateSummary(fullTranscription);
-      const notes = await generateNotes(fullTranscription);
+      // Generate title, summary and notes automatically (run title generation in parallel)
+      const [meetingTitle, summary, notes] = await Promise.all([
+        generateMeetingTitle(fullTranscription),
+        generateSummary(fullTranscription),
+        generateNotes(fullTranscription)
+      ]);
 
       // Get audio duration
       const getDuration = (): Promise<number> => {
@@ -1477,9 +1493,9 @@ export default function App() {
       };
       const duration = await getDuration();
 
-      // Save to Supabase
+      // Save to Supabase with AI-generated title
       const newTask: TaskHistory = {
-        filename: file.name,
+        filename: meetingTitle,
         transcription: fullTranscription,
         summary,
         notes,
@@ -1626,6 +1642,7 @@ export default function App() {
                   setSelectedTask(task);
                   setCurrentView('notes', task.id);
                 }}
+                onTaskUpdated={handleTaskUpdated}
               />
             )}
 
@@ -1634,6 +1651,7 @@ export default function App() {
                 <NotesPage
                   selectedTask={selectedTask}
                   onNavigateToAssets={() => setCurrentView('assets', selectedTask.id)}
+                  onTaskUpdated={handleTaskUpdated}
                 />
               ) : (
                 <HistoryPage
@@ -1642,6 +1660,7 @@ export default function App() {
                     setSelectedTask(task);
                     setCurrentView('notes', task.id);
                   }}
+                  onTaskUpdated={handleTaskUpdated}
                 />
               )
             )}
@@ -1665,6 +1684,7 @@ export default function App() {
                     setSelectedTask(task);
                     setCurrentView('chat', task.id);
                   }}
+                  onTaskUpdated={handleTaskUpdated}
                 />
               )
             )}
@@ -1690,6 +1710,7 @@ export default function App() {
                     setSelectedTask(task);
                     setCurrentView('assets', task.id);
                   }}
+                  onTaskUpdated={handleTaskUpdated}
                 />
               )
             )}

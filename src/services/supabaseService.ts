@@ -45,6 +45,25 @@ export async function saveTask(task: TaskHistory) {
   return data[0];
 }
 
+export async function updateTaskTitle(taskId: string, newTitle: string): Promise<TaskHistory> {
+  const { data: { user } } = await supabase.auth.getUser();
+  if (!user) throw new Error('User not authenticated');
+
+  const { data, error } = await supabase
+    .from('task_history')
+    .update({ filename: newTitle })
+    .eq('id', taskId)
+    .eq('user_id', user.id)
+    .select()
+    .single();
+  
+  if (error) {
+    console.error('Error updating task title:', error);
+    throw error;
+  }
+  return data as TaskHistory;
+}
+
 // Lightweight task metadata for list views (no heavy transcription/notes)
 export interface TaskMetadata {
   id: string;

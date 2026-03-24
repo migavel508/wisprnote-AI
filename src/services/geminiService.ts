@@ -92,6 +92,30 @@ export async function generateSummary(text: string): Promise<string> {
   return response.text || "";
 }
 
+export async function generateMeetingTitle(transcription: string): Promise<string> {
+  // Use only first 500 chars to minimize token usage - enough to understand context
+  const snippet = transcription.substring(0, 500).trim();
+  
+  const response = await generateWithFallback({
+    model: "gemini-2.0-flash", // Use faster, cheaper model for simple title generation
+    contents: `Title this meeting in 3-6 words. No quotes. Just the title.
+
+Content: ${snippet}`,
+  });
+  
+  // Clean up the response
+  let title = (response.text || "").trim();
+  title = title.replace(/^["']|["']$/g, '');
+  title = title.replace(/\n.*/g, '');
+  title = title.trim();
+  
+  if (!title || title.length > 60) {
+    return "Untitled Meeting";
+  }
+  
+  return title;
+}
+
 export async function generateNotes(text: string): Promise<string> {
   const response = await generateWithFallback({
     model: "gemini-3-flash-preview",
