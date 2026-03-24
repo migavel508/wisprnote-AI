@@ -54,7 +54,7 @@ export async function updateTaskTitle(taskId: string, newTitle: string): Promise
     .update({ filename: newTitle })
     .eq('id', taskId)
     .eq('user_id', user.id)
-    .select()
+    .select('id, created_at, filename, transcription, summary, notes, prompt, status, duration')
     .single();
   
   if (error) {

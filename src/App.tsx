@@ -1419,13 +1419,13 @@ export default function App() {
 
   // Handler to update a task in history (e.g., when title is regenerated)
   const handleTaskUpdated = (updatedTask: TaskHistory) => {
-    // Update history array
+    // Update history array - merge with existing data to preserve all fields
     setHistory(prev => prev.map(task => 
-      task.id === updatedTask.id ? updatedTask : task
+      task.id === updatedTask.id ? { ...task, ...updatedTask } : task
     ));
-    // Update selectedTask if it's the same task
+    // Update selectedTask if it's the same task - merge to preserve all fields
     if (selectedTask?.id === updatedTask.id) {
-      setSelectedTask(updatedTask);
+      setSelectedTask(prev => prev ? { ...prev, ...updatedTask } : updatedTask);
     }
   };
 
