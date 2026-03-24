@@ -1485,12 +1485,14 @@ export default function App() {
 
       setStatus('completed');
 
-      // Generate title, summary and notes automatically (run title generation in parallel)
-      const [meetingTitle, summary, notes] = await Promise.all([
-        generateMeetingTitle(fullTranscription),
+      // Generate summary and notes first (these are the heavy operations)
+      const [summary, notes] = await Promise.all([
         generateSummary(fullTranscription),
         generateNotes(fullTranscription)
       ]);
+
+      // Generate title AFTER summary/notes to avoid rate limits (lightweight call)
+      const meetingTitle = await generateMeetingTitle(fullTranscription);
 
       // Get audio duration
       const getDuration = (): Promise<number> => {
