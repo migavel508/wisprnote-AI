@@ -95,12 +95,15 @@ export default function HistoryPage({ history, onSelectTask, isLoading = false, 
       const newTitle = await generateMeetingTitle(task.transcription);
       const updatedTask = await updateTaskTitle(task.id, newTitle);
       
+      // Merge with original task to ensure all fields are preserved
+      const mergedTask = { ...task, ...updatedTask };
+      
       if (onTaskUpdated) {
-        onTaskUpdated(updatedTask);
+        onTaskUpdated(mergedTask);
       }
       
-      // Update cache
-      taskCache.set(task.id, updatedTask);
+      // Update cache with merged task
+      taskCache.set(task.id, mergedTask);
     } catch (error) {
       console.error('Error generating title:', error);
     } finally {

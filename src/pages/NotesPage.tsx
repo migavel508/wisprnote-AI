@@ -47,8 +47,11 @@ export default function NotesPage({ selectedTask, onNavigateToAssets, isLoading 
       const newTitle = await generateMeetingTitle(selectedTask.transcription);
       const updatedTask = await updateTaskTitle(selectedTask.id, newTitle);
       
+      // Merge with original task to ensure all fields are preserved
+      const mergedTask = { ...selectedTask, ...updatedTask };
+      
       if (onTaskUpdated) {
-        onTaskUpdated(updatedTask);
+        onTaskUpdated(mergedTask);
       }
       
       setTitleGenerated(true);
