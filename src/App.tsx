@@ -52,7 +52,6 @@ import PptxGenJS from 'pptxgenjs';
 import { Document, Packer, Paragraph, TextRun, HeadingLevel } from 'docx';
 import { saveAs } from 'file-saver';
 import ForceGraph2D from 'react-force-graph-2d';
-import { splitAudio, AudioBatch } from './services/audioService';
 import { 
   processAudioBatch, 
   generateSummary, 
@@ -66,7 +65,11 @@ import {
   generatePodcastScript,
   chatWithPodcast,
   extractKnowledgeGraph,
-  generateMeetingTitle
+  generateMeetingTitle,
+  uploadAudioToFileAPI,
+  waitForFileActive,
+  deleteFromFileAPI,
+  transcribeViaFileAPI,
 } from './services/geminiService';
 import { 
   supabase, 
@@ -81,8 +84,20 @@ import {
   KnowledgeGraphEntry,
   saveChatMessage,
   getChatHistory,
-  ChatMessage
+  ChatMessage,
+  ManualNote,
+  updateTaskSummary,
+  updateTaskNotes,
 } from './services/supabaseService';
+import { Session } from '@supabase/supabase-js';
+import { splitAudio, AudioBatch } from './services/audioService';
+import { 
+  progressStorage, 
+  generateProgressId, 
+  getMostRecentIncompleteProgress,
+  ProcessingProgress 
+} from './services/progressStorage';
+
 import Auth from './components/Auth';
 import ChatPage from './pages/ChatPage';
 import NotesPage from './pages/NotesPage';
@@ -91,7 +106,8 @@ import HistoryPage from './pages/HistoryPage';
 import KnowledgePage from './pages/KnowledgePage';
 import ProcessPage from './pages/ProcessPage';
 import MainSidebar from './components/MainSidebar';
-import { Session } from '@supabase/supabase-js';
+import { ManualNotesList } from './components/ManualNotes/ManualNotesList';
+import { ManualNoteEditor } from './components/ManualNotes/ManualNoteEditor';
 
 declare global {
   interface Window {
@@ -102,7 +118,7 @@ declare global {
   }
 }
 
-type View = 'process' | 'history' | 'notes' | 'chat' | 'assets' | 'agents' | 'knowledge';
+type View = 'process' | 'history' | 'notes' | 'chat' | 'assets' | 'agents' | 'knowledge' | 'notebooks';
 type Status = 'idle' | 'splitting' | 'processing' | 'completed' | 'error';
 type NoteTab = 'transcription' | 'summary' | 'notes';
 
@@ -132,6 +148,7 @@ export default function App() {
     if (path.startsWith('/assets')) return 'assets';
     if (path === '/agents') return 'agents';
     if (path === '/knowledge') return 'knowledge';
+    if (path === '/notebooks') return 'notebooks';
     return 'process';
   };
   
@@ -161,6 +178,9 @@ export default function App() {
       case 'knowledge':
         navigate('/knowledge');
         break;
+      case 'notebooks':
+        navigate('/notebooks');
+        break;
     }
   };
 
@@ -171,6 +191,17 @@ export default function App() {
   const [batches, setBatches] = useState<BatchStatus[]>([]);
   const [error, setError] = useState<string | null>(null);
   
+  // Recovery state
+  const [hasRecoverableProgress, setHasRecoverableProgress] = useState(false);
+  const [recoverableProgress, setRecoverableProgress] = useState<ProcessingProgress | null>(null);
+  const [showRecoveryPrompt, setShowRecoveryPrompt] = useState(false);
+  const currentProgressIdRef = useRef<string | null>(null);
+  
+  // Network status
+  const [isOnline, setIsOnline] = useState(navigator.onLine);
+  const [wasOffline, setWasOffline] = useState(false);
+  const [showReconnectingMessage, setShowReconnectingMessage] = useState(false);
+  
   // Recording State
   const [inputMode, setInputMode] = useState<'upload' | 'record'>('upload');
   const [isRecording, setIsRecording] = useState(false);
@@ -179,6 +210,10 @@ export default function App() {
   const mediaRecorderRef = useRef<MediaRecorder | null>(null);
   const audioChunksRef = useRef<Blob[]>([]);
   const timerRef = useRef<NodeJS.Timeout | null>(null);
+
+  // Notebooks (manual notes) state
+  const [activeNote, setActiveNote] = useState<ManualNote | null>(null);
+  const [notebookRefreshKey, setNotebookRefreshKey] = useState(0);
 
   const [history, setHistory] = useState<TaskHistory[]>([]);
   const [selectedTask, setSelectedTask] = useState<TaskHistory | null>(null);
@@ -286,6 +321,66 @@ export default function App() {
 
     return () => subscription.unsubscribe();
   }, []);
+
+  // Network status monitoring
+  useEffect(() => {
+    const handleOnline = async () => {
+      setIsOnline(true);
+      
+      // If we were processing when we went offline, auto-resume
+      if (wasOffline && currentProgressIdRef.current) {
+        setShowReconnectingMessage(true);
+        try {
+          const progress = await progressStorage.getProgress(currentProgressIdRef.current);
+          if (progress && progress.completedBatches < progress.totalBatches) {
+            console.log('Network reconnected - auto-resuming processing');
+            await startProcessing(progress);
+          }
+        } catch (err) {
+          console.error('Failed to auto-resume:', err);
+        } finally {
+          setShowReconnectingMessage(false);
+          setWasOffline(false);
+        }
+      }
+    };
+    
+    const handleOffline = () => {
+      setIsOnline(false);
+      if (status === 'processing') {
+        setWasOffline(true);
+      }
+    };
+    
+    window.addEventListener('online', handleOnline);
+    window.addEventListener('offline', handleOffline);
+    
+    return () => {
+      window.removeEventListener('online', handleOnline);
+      window.removeEventListener('offline', handleOffline);
+    };
+  }, [wasOffline, status]);
+
+  // Check for recoverable progress on mount (only if not currently processing)
+  useEffect(() => {
+    const checkRecovery = async () => {
+      try {
+        await progressStorage.init();
+        await progressStorage.clearOldProgress(24 * 60 * 60 * 1000);
+        const incomplete = await getMostRecentIncompleteProgress();
+        if (incomplete && status === 'idle') {
+          setRecoverableProgress(incomplete);
+          setHasRecoverableProgress(true);
+          setShowRecoveryPrompt(true);
+        }
+      } catch (err) {
+        console.error('Failed to check recovery:', err);
+      }
+    };
+    if (session) {
+      checkRecovery();
+    }
+  }, [session]);
 
   useEffect(() => {
     if (session) {
@@ -1349,17 +1444,12 @@ export default function App() {
         parts: [{ text: m.text }]
       }));
 
-      // Build context from available content
-      const context = [
-        selectedTask.transcription,
-        selectedTask.summary || '',
-        selectedTask.notes || ''
-      ].filter(Boolean).join('\n\n');
-
+      // Use only transcription for RAG - it will chunk and retrieve relevant parts
       const response = await chatWithNotes(
-        context,
+        selectedTask.transcription,
         userInput,
-        history
+        history,
+        true // Enable RAG
       );
 
       const modelMessage: Message = { role: 'model', text: response };
@@ -1452,63 +1542,173 @@ export default function App() {
     }
   };
 
-  const startProcessing = async () => {
-    if (!file) return;
+  const startProcessing = async (resumeFromProgress?: ProcessingProgress) => {
+    if (!file && !resumeFromProgress) return;
 
     try {
-      setStatus('splitting');
-      setError(null);
-      
-      const audioBatches = await splitAudio(file, 15);
-      const initialBatches: BatchStatus[] = audioBatches.map(b => ({ ...b, status: 'pending' }));
-      setBatches(initialBatches);
-      setStatus('processing');
+      let progressId: string;
+      let audioBatches: AudioBatch[];
+      let results: BatchStatus[];
 
-      const results: BatchStatus[] = [...initialBatches];
-      let fullTranscription = '';
-      
-      for (let i = 0; i < results.length; i++) {
-        results[i].status = 'processing';
-        setBatches([...results]);
-
-        try {
-          const result = await processAudioBatch(results[i], prompt);
-          results[i].status = 'completed';
-          results[i].result = result.text;
-          fullTranscription += result.text + '\n\n';
-        } catch (err: any) {
-          results[i].status = 'error';
-          results[i].error = err.message || 'Unknown error';
+      if (resumeFromProgress) {
+        // Resume from saved progress
+        progressId = resumeFromProgress.id;
+        currentProgressIdRef.current = progressId;
+        
+        setStatus('processing');
+        setPrompt(resumeFromProgress.prompt);
+        
+        // Reconstruct batches from saved progress
+        results = resumeFromProgress.batches.map(b => ({
+          blob: new Blob(), // Will be regenerated if needed
+          mimeType: 'audio/wav',
+          index: b.index,
+          total: resumeFromProgress.totalBatches,
+          startTime: b.startTime,
+          endTime: b.endTime,
+          status: b.status,
+          result: b.result,
+          error: b.error,
+        }));
+        
+        setBatches(results);
+        
+        // If we have the audio blob, recreate the file
+        if (resumeFromProgress.audioBlob) {
+          const recoveredFile = new File([resumeFromProgress.audioBlob], resumeFromProgress.filename, {
+            type: resumeFromProgress.audioBlob.type
+          });
+          setFile(recoveredFile);
+          
+          // Re-split audio to get batch blobs
+          audioBatches = await splitAudio(recoveredFile, 15);
+          
+          // Merge blob data back into results
+          results = results.map((r, idx) => ({
+            ...r,
+            blob: audioBatches[idx]?.blob || r.blob,
+            mimeType: audioBatches[idx]?.mimeType || r.mimeType,
+          }));
+        } else {
+          throw new Error('Cannot resume: audio data not found');
         }
-        setBatches([...results]);
+      } else {
+        // Fresh start
+        progressId = generateProgressId(file!.name);
+        currentProgressIdRef.current = progressId;
+        
+        setStatus('splitting');
+        setError(null);
+
+        audioBatches = await splitAudio(file!, 15);
+        const initialBatches: BatchStatus[] = audioBatches.map(b => ({ ...b, status: 'pending' as const }));
+        setBatches(initialBatches);
+        
+        results = [...initialBatches];
+        
+        // Save initial progress
+        await progressStorage.saveProgress({
+          id: progressId,
+          filename: file!.name,
+          prompt,
+          totalBatches: results.length,
+          completedBatches: 0,
+          batches: results.map(b => ({
+            index: b.index,
+            status: b.status,
+            startTime: b.startTime,
+            endTime: b.endTime,
+          })),
+          audioBlob: file!,
+          createdAt: Date.now(),
+          updatedAt: Date.now(),
+        });
       }
+
+      setStatus('processing');
+      const CONCURRENCY = 3;
+
+      // Process only pending/error batches
+      const batchesToProcess = results
+        .map((b, idx) => ({ batch: b, originalIndex: idx }))
+        .filter(({ batch }) => batch.status === 'pending' || batch.status === 'error');
+
+      for (let i = 0; i < batchesToProcess.length; i += CONCURRENCY) {
+        const chunkEnd = Math.min(i + CONCURRENCY, batchesToProcess.length);
+        const chunk = batchesToProcess.slice(i, chunkEnd);
+
+        // Mark as processing
+        chunk.forEach(({ originalIndex }) => {
+          results[originalIndex] = { ...results[originalIndex], status: 'processing' };
+        });
+        setBatches([...results]);
+
+        // Process in parallel
+        await Promise.allSettled(
+          chunk.map(async ({ batch, originalIndex }) => {
+            try {
+              const result = await processAudioBatch(batch, prompt);
+              results[originalIndex] = { ...results[originalIndex], status: 'completed', result: result.text };
+            } catch (err: any) {
+              results[originalIndex] = { ...results[originalIndex], status: 'error', error: err.message || 'Unknown error' };
+            }
+            
+            // Save progress after each batch completes
+            const completedCount = results.filter(r => r.status === 'completed').length;
+            await progressStorage.saveProgress({
+              id: progressId,
+              filename: file?.name || resumeFromProgress?.filename || 'recording',
+              prompt,
+              totalBatches: results.length,
+              completedBatches: completedCount,
+              batches: results.map(b => ({
+                index: b.index,
+                status: b.status,
+                result: b.result,
+                error: b.error,
+                startTime: b.startTime,
+                endTime: b.endTime,
+              })),
+              audioBlob: file || resumeFromProgress?.audioBlob,
+              createdAt: resumeFromProgress?.createdAt || Date.now(),
+              updatedAt: Date.now(),
+            });
+            
+            setBatches([...results]);
+          })
+        );
+      }
+
+      const fullTranscription = results
+        .filter(b => b.status === 'completed')
+        .sort((a, b) => a.index - b.index)
+        .map(b => b.result || '')
+        .join('\n\n');
 
       setStatus('completed');
 
-      // Generate summary and notes first (these are the heavy operations)
-      const [summary, notes] = await Promise.all([
-        generateSummary(fullTranscription),
-        generateNotes(fullTranscription)
-      ]);
+      if (!fullTranscription.trim()) {
+        throw new Error('Transcription returned empty — please check the audio file and try again.');
+      }
 
-      // Generate title AFTER summary/notes to avoid rate limits (lightweight call)
-      const meetingTitle = await generateMeetingTitle(fullTranscription);
-
-      // Get audio duration
-      const getDuration = (): Promise<number> => {
-        return new Promise((resolve) => {
+      // ── Post-processing: run summary, notes, title & duration all in parallel ─
+      const getDuration = (): Promise<number> =>
+        new Promise(resolve => {
+          const audioFile = file || (resumeFromProgress?.audioBlob ? new File([resumeFromProgress.audioBlob], 'audio') : null);
+          if (!audioFile) { resolve(0); return; }
           const audio = new Audio();
-          audio.src = URL.createObjectURL(file);
-          audio.onloadedmetadata = () => {
-            URL.revokeObjectURL(audio.src);
-            resolve(Math.round(audio.duration));
-          };
+          audio.src = URL.createObjectURL(audioFile);
+          audio.onloadedmetadata = () => { URL.revokeObjectURL(audio.src); resolve(Math.round(audio.duration)); };
           audio.onerror = () => resolve(0);
         });
-      };
-      const duration = await getDuration();
 
-      // Save to Supabase with AI-generated title
+      const [summary, notes, meetingTitle, duration] = await Promise.all([
+        generateSummary(fullTranscription),
+        generateNotes(fullTranscription),
+        generateMeetingTitle(fullTranscription),
+        getDuration(),
+      ]);
+
       const newTask: TaskHistory = {
         filename: meetingTitle,
         transcription: fullTranscription,
@@ -1516,15 +1716,17 @@ export default function App() {
         notes,
         prompt,
         status: 'completed',
-        duration
+        duration,
       };
-      
+
       const savedTask = await saveTask(newTask);
       
-      // Attempt to immediately process knowledge graph data in the background
+      // Clean up progress storage after successful completion
+      await progressStorage.deleteProgress(progressId);
+      currentProgressIdRef.current = null;
+
       if (savedTask && savedTask.id) {
         setIsExtractingNewKG(true);
-        // Run without blocking the main thread
         extractKnowledgeGraph(savedTask.id, savedTask.filename, savedTask.transcription)
           .then(async (result) => {
             const entryToSave: KnowledgeGraphEntry = {
@@ -1534,18 +1736,11 @@ export default function App() {
               decisions: result.decisions || [],
               people: result.people || [],
               action_items: result.actionItems || [],
-              refs: result.references || []
+              refs: result.references || [],
             };
-            
-            // Save to Supabase
             await saveKnowledgeGraphBatch([entryToSave]);
-            
-            // Update local state if we already have graph data loaded
             setKgData(prevData => {
-              // If prevData is empty, we haven't built the graph yet, so no need to append
               if (prevData.length === 0) return prevData;
-              
-              // Remove if already exists (just in case), then append
               const filtered = prevData.filter(d => d.meetingId !== result.meetingId);
               return [...filtered, result];
             });
@@ -1566,6 +1761,22 @@ export default function App() {
     }
   };
 
+  const handleResumeProcessing = async () => {
+    if (!recoverableProgress) return;
+    setShowRecoveryPrompt(false);
+    await startProcessing(recoverableProgress);
+    setRecoverableProgress(null);
+    setHasRecoverableProgress(false);
+  };
+
+  const handleDiscardRecovery = async () => {
+    if (!recoverableProgress) return;
+    await progressStorage.deleteProgress(recoverableProgress.id);
+    setShowRecoveryPrompt(false);
+    setRecoverableProgress(null);
+    setHasRecoverableProgress(false);
+  };
+
   const totalProgress = batches.length > 0 
     ? (batches.filter(b => b.status === 'completed').length / batches.length) * 100 
     : 0;
@@ -1581,6 +1792,104 @@ export default function App() {
 
   return (
     <div className="h-screen bg-[#faf9f7] text-[#1a1a1a] font-[system-ui] selection:bg-[#1a1a1a] selection:text-white flex overflow-hidden">
+      {/* Network Status Banner */}
+      <AnimatePresence>
+        {!isOnline && (
+          <motion.div
+            initial={{ y: -100 }}
+            animate={{ y: 0 }}
+            exit={{ y: -100 }}
+            className="fixed top-0 left-0 right-0 z-[10000] bg-orange-500 text-white px-4 py-3 flex items-center justify-center gap-2 shadow-lg"
+          >
+            <AlertCircle className="w-5 h-5" />
+            <span className="font-medium">No internet connection - Processing paused</span>
+          </motion.div>
+        )}
+        {showReconnectingMessage && (
+          <motion.div
+            initial={{ y: -100 }}
+            animate={{ y: 0 }}
+            exit={{ y: -100 }}
+            className="fixed top-0 left-0 right-0 z-[10000] bg-green-500 text-white px-4 py-3 flex items-center justify-center gap-2 shadow-lg"
+          >
+            <Loader2 className="w-5 h-5 animate-spin" />
+            <span className="font-medium">Reconnected - Resuming processing...</span>
+          </motion.div>
+        )}
+      </AnimatePresence>
+
+      {/* Recovery Modal */}
+      <AnimatePresence>
+        {showRecoveryPrompt && recoverableProgress && (
+          <motion.div
+            initial={{ opacity: 0 }}
+            animate={{ opacity: 1 }}
+            exit={{ opacity: 0 }}
+            className="fixed inset-0 z-[9999] flex items-center justify-center bg-black/50 backdrop-blur-sm"
+            onClick={(e) => e.target === e.currentTarget && handleDiscardRecovery()}
+          >
+            <motion.div
+              initial={{ scale: 0.95, opacity: 0 }}
+              animate={{ scale: 1, opacity: 1 }}
+              exit={{ scale: 0.95, opacity: 0 }}
+              className="bg-white rounded-2xl shadow-2xl max-w-md w-full mx-4 overflow-hidden"
+            >
+              <div className="p-6 border-b border-gray-100">
+                <div className="flex items-center gap-3 mb-2">
+                  <div className="w-10 h-10 rounded-full bg-blue-100 flex items-center justify-center">
+                    <History className="w-5 h-5 text-blue-600" />
+                  </div>
+                  <h2 className="text-xl font-bold">Resume Processing?</h2>
+                </div>
+                <p className="text-sm text-gray-600 mt-2">
+                  We found an interrupted transcription session. Would you like to continue where you left off?
+                </p>
+              </div>
+              
+              <div className="p-6 space-y-4">
+                <div className="bg-gray-50 rounded-lg p-4 space-y-2">
+                  <div className="flex justify-between text-sm">
+                    <span className="text-gray-600">File:</span>
+                    <span className="font-medium truncate ml-2 max-w-[200px]">{recoverableProgress.filename}</span>
+                  </div>
+                  <div className="flex justify-between text-sm">
+                    <span className="text-gray-600">Progress:</span>
+                    <span className="font-medium">
+                      {recoverableProgress.completedBatches} / {recoverableProgress.totalBatches} batches
+                    </span>
+                  </div>
+                  <div className="w-full bg-gray-200 rounded-full h-2 mt-2">
+                    <div
+                      className="bg-blue-600 h-2 rounded-full transition-all"
+                      style={{ width: `${(recoverableProgress.completedBatches / recoverableProgress.totalBatches) * 100}%` }}
+                    />
+                  </div>
+                  <p className="text-xs text-gray-500 mt-2">
+                    Last updated: {new Date(recoverableProgress.updatedAt).toLocaleString()}
+                  </p>
+                </div>
+
+                <div className="flex gap-3">
+                  <button
+                    onClick={handleDiscardRecovery}
+                    className="flex-1 px-4 py-2.5 rounded-lg border border-gray-300 text-gray-700 hover:bg-gray-50 transition-colors font-medium"
+                  >
+                    Start Fresh
+                  </button>
+                  <button
+                    onClick={handleResumeProcessing}
+                    className="flex-1 px-4 py-2.5 rounded-lg bg-blue-600 text-white hover:bg-blue-700 transition-colors font-medium flex items-center justify-center gap-2"
+                  >
+                    <PlayCircle className="w-4 h-4" />
+                    Resume
+                  </button>
+                </div>
+              </div>
+            </motion.div>
+          </motion.div>
+        )}
+      </AnimatePresence>
+
       {/* Main Sidebar Navigation */}
       <AnimatePresence initial={false}>
         {isSidebarOpen && (
@@ -2208,6 +2517,33 @@ export default function App() {
                     </div>
                   </div>
                 </div>
+              </motion.div>
+            )}
+
+            {currentView === 'notebooks' && (
+              <motion.div
+                key="notebooks"
+                initial={{ opacity: 0 }}
+                animate={{ opacity: 1 }}
+                exit={{ opacity: 0 }}
+                className="h-full"
+              >
+                {activeNote !== undefined && activeNote !== null ? (
+                  <ManualNoteEditor
+                    note={activeNote}
+                    onSave={(saved) => setActiveNote(saved)}
+                    onBack={() => {
+                      setActiveNote(null);
+                      setNotebookRefreshKey(k => k + 1);
+                    }}
+                  />
+                ) : (
+                  <ManualNotesList
+                    key={notebookRefreshKey}
+                    onSelectNote={(note) => setActiveNote(note)}
+                    onCreateNote={() => setActiveNote({ title: 'Untitled', content: '' })}
+                  />
+                )}
               </motion.div>
             )}
 

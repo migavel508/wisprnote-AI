@@ -116,38 +116,51 @@ export async function splitAudio(file: File, maxChunkSizeMB: number = 15): Promi
 
   const duration = audioBuffer.duration;
   const numChannels = audioBuffer.numberOfChannels;
-  const sampleRate = audioBuffer.sampleRate;
-  
-  // Estimate how many seconds fit in maxChunkSizeMB
-  // WAV 16-bit mono: sampleRate * 2 bytes per second
-  const bytesPerSecond = sampleRate * 2;
+  const srcRate = audioBuffer.sampleRate;
+  // 16 kHz is the industry-standard rate for speech recognition.
+  // Downsampling reduces WAV size ~2.75× vs 44.1 kHz, cutting chunk count
+  // from ~11 to ~4 for a 30-min meeting and improving parallelism.
+  const outRate = Math.min(srcRate, 16000);
+
+  // 16-bit mono at target rate
+  const bytesPerSecond = outRate * 2;
   const maxBytesPerChunk = maxChunkSizeMB * 1024 * 1024;
   const secondsPerChunk = Math.floor(maxBytesPerChunk / bytesPerSecond);
-  
+
   const batches: AudioBatch[] = [];
   const totalChunks = Math.ceil(duration / secondsPerChunk);
-  
+  const ratio = srcRate / outRate;
+
   for (let i = 0; i < totalChunks; i++) {
     const startSec = i * secondsPerChunk;
     const endSec = Math.min((i + 1) * secondsPerChunk, duration);
-    
-    const startFrame = Math.floor(startSec * sampleRate);
-    const endFrame = Math.floor(endSec * sampleRate);
-    const frameCount = endFrame - startFrame;
-    
-    // Extract mono samples (mix down if necessary)
-    const chunkSamples = new Float32Array(frameCount);
-    const channelData = audioBuffer.getChannelData(0); // Use first channel for mono
-    
-    for (let j = 0; j < frameCount; j++) {
+
+    const startFrame = Math.floor(startSec * srcRate);
+    const endFrame = Math.floor(endSec * srcRate);
+    const srcFrameCount = endFrame - startFrame;
+    const outFrameCount = Math.ceil(srcFrameCount / ratio);
+
+    // Mix all channels down to mono
+    const monoSrc = new Float32Array(srcFrameCount);
+    for (let j = 0; j < srcFrameCount; j++) {
       let sample = 0;
       for (let c = 0; c < numChannels; c++) {
         sample += audioBuffer.getChannelData(c)[startFrame + j];
       }
-      chunkSamples[j] = sample / numChannels;
+      monoSrc[j] = sample / numChannels;
     }
-    
-    const blob = encodeWAV(chunkSamples, sampleRate);
+
+    // Linear-interpolation downsampling to target rate
+    const outSamples = new Float32Array(outFrameCount);
+    for (let j = 0; j < outFrameCount; j++) {
+      const src = j * ratio;
+      const lo = Math.floor(src);
+      const hi = Math.min(lo + 1, srcFrameCount - 1);
+      const t = src - lo;
+      outSamples[j] = monoSrc[lo] * (1 - t) + monoSrc[hi] * t;
+    }
+
+    const blob = encodeWAV(outSamples, outRate);
     batches.push({
       blob,
       mimeType: 'audio/wav',
@@ -157,7 +170,7 @@ export async function splitAudio(file: File, maxChunkSizeMB: number = 15): Promi
       endTime: endSec
     });
   }
-  
+
   await audioCtx.close();
   return batches;
 }
