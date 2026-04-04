@@ -2562,28 +2562,6 @@ export default function App() {
         </main>
       </div>
 
-      {/* Global Progress Overlay */}
-      {(status === 'processing' || status === 'splitting') && (
-        <div className="fixed bottom-8 right-8 z-[100] bg-[#141414] text-[#E4E3E0] p-6 rounded-2xl shadow-2xl border border-white/10 w-80">
-          <div className="flex items-center justify-between mb-4">
-            <div className="flex items-center gap-3">
-              <Loader2 className="w-5 h-5 animate-spin" />
-              <span className="text-xs font-mono uppercase tracking-widest">Processing Audio</span>
-            </div>
-            <span className="text-xs font-mono">{Math.round(totalProgress)}%</span>
-          </div>
-          <div className="w-full h-1 bg-white/10 rounded-full overflow-hidden">
-            <motion.div 
-              className="h-full bg-white"
-              initial={{ width: 0 }}
-              animate={{ width: `${totalProgress}%` }}
-            />
-          </div>
-          <p className="text-[10px] opacity-50 mt-3 font-mono">
-            {status === 'splitting' ? 'Decoding audio stream...' : `Processing batch ${batches.filter(b => b.status === 'completed').length + 1} of ${batches.length}`}
-          </p>
-        </div>
-      )}
     </div>
   );
 }
