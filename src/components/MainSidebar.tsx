@@ -15,11 +15,12 @@ import {
   User,
   FileOutput,
   Mic,
-  LogOut
+  LogOut,
+  BookMarked
 } from 'lucide-react';
 import { Session } from '@supabase/supabase-js';
 
-type View = 'process' | 'history' | 'notes' | 'chat' | 'assets' | 'agents' | 'knowledge';
+type View = 'process' | 'history' | 'notes' | 'chat' | 'assets' | 'agents' | 'knowledge' | 'notebooks';
 
 interface MainSidebarProps {
   currentView: View;
@@ -47,6 +48,7 @@ export default function MainSidebar({
     { id: 'notes' as View, label: 'Notes', icon: FileText },
     { id: 'chat' as View, label: 'Chat', icon: MessageCircle },
     { id: 'assets' as View, label: 'Assets', icon: FolderOpen },
+    { id: 'notebooks' as View, label: 'Notebooks', icon: BookMarked },
     { id: 'agents' as View, label: 'Agents', icon: Bot },
     { id: 'knowledge' as View, label: 'Knowledge', icon: Share2 },
   ];

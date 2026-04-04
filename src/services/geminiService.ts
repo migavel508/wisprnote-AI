@@ -3,25 +3,66 @@ import { AudioBatch, blobToBase64 } from "./audioService";
 
 const ai = new GoogleGenAI({ apiKey: process.env.GEMINI_API_KEY || "" });
 
+// ─── Retry Utility ───────────────────────────────────────────────────────────
+// Retryable HTTP status codes and message patterns
+const RETRYABLE_STATUSES = new Set([429, 500, 502, 503, 504]);
+const RETRYABLE_MSGS = ['rate limit', 'quota', 'overloaded', 'fetch failed', 'network error', 'etimedout', 'econnreset'];
+
+async function withRetry<T>(fn: () => Promise<T>, maxRetries = 5, baseDelayMs = 2000): Promise<T> {
+  let lastError: any;
+  for (let attempt = 0; attempt <= maxRetries; attempt++) {
+    try {
+      return await fn();
+    } catch (error: any) {
+      lastError = error;
+      if (attempt === maxRetries) break;
+      
+      // The Google Gen AI SDK can nest the status in different ways
+      const status: number = error.status ?? error.statusCode ?? error?.error?.code ?? error?.code ?? 0;
+      const msg = (error.message ?? '').toLowerCase();
+      
+      const retryable = RETRYABLE_STATUSES.has(status) ||
+        RETRYABLE_MSGS.some(m => msg.includes(m)) ||
+        status === 0; // network-level failures have no status
+        
+      if (!retryable) throw error;
+      
+      const delay = baseDelayMs * Math.pow(2, attempt) + Math.random() * 1000;
+      console.warn(`[Gemini] Retry ${attempt + 1}/${maxRetries} in ${Math.round(delay)}ms — (Status: ${status}) ${error.message}`);
+      await new Promise(r => setTimeout(r, delay));
+    }
+  }
+  throw lastError;
+}
+
+function getApiKey(): string {
+  return (process.env.GEMINI_API_KEY as string) ||
+    ((import.meta as any).env?.VITE_GEMINI_API_KEY ?? '');
+}
+
 // Utility to try a model and fallback if it fails (e.g. 503 Service Unavailable)
 async function generateWithFallback(
   requestOptions: any,
-  fallbackModels: string[] = ["gemini-2.5-flash", "gemini-2.0-flash"]
+  fallbackModels: string[] = ["gemini-3.1-flash-lite-preview", "gemini-3-flash-preview"]
 ): Promise<GenerateContentResponse> {
   let lastError;
   const modelsToTry = [requestOptions.model, ...fallbackModels];
 
-  for (const model of modelsToTry) {
+  for (let mi = 0; mi < modelsToTry.length; mi++) {
+    const model = modelsToTry[mi];
+    const retries = mi === 0 ? 4 : 2; // more patience for the primary model
     try {
-      return await ai.models.generateContent({
-        ...requestOptions,
-        model
-      });
+      return await withRetry(
+        () => ai.models.generateContent({ ...requestOptions, model }),
+        retries
+      );
     } catch (error: any) {
-      console.warn(`Model ${model} failed:`, error.message);
+      console.warn(`Model ${model} exhausted retries:`, error.message);
       lastError = error;
-      // Only fallback on 503 or 429 (overloaded/unavailable)
-      if (error.status !== 503 && error.status !== 429) {
+      // The Google Gen AI SDK can nest the status in different ways
+      const status: number = error.status ?? error.statusCode ?? error?.error?.code ?? error?.code ?? 0;
+      // Only advance to next model on quota/availability errors
+      if (status !== 503 && status !== 429) {
         throw error;
       }
     }
@@ -84,10 +125,145 @@ Now transcribe the audio:`;
   };
 }
 
+// ─── Gemini File API ──────────────────────────────────────────────────────────
+// Uploads an audio Blob to the Gemini File API via resumable upload.
+// Returns the file URI and internal name needed for subsequent calls.
+export async function uploadAudioToFileAPI(
+  blob: Blob,
+  mimeType: string,
+  displayName: string
+): Promise<{ uri: string; name: string }> {
+  const apiKey = getApiKey();
+  if (!apiKey) throw new Error('GEMINI_API_KEY is not configured');
+
+  // Step 1 — initiate resumable upload session
+  const initRes = await withRetry(() => fetch(
+    `https://generativelanguage.googleapis.com/upload/v1beta/files?uploadType=resumable&key=${apiKey}`,
+    {
+      method: 'POST',
+      headers: {
+        'X-Goog-Upload-Protocol': 'resumable',
+        'X-Goog-Upload-Command': 'start',
+        'X-Goog-Upload-Header-Content-Length': String(blob.size),
+        'X-Goog-Upload-Header-Content-Type': mimeType,
+        'Content-Type': 'application/json',
+      },
+      body: JSON.stringify({ file: { displayName } }),
+    }
+  ), 3);
+
+  if (!initRes.ok) {
+    const err = await initRes.text();
+    throw new Error(`File API init failed (${initRes.status}): ${err}`);
+  }
+
+  const uploadUrl = initRes.headers.get('X-Goog-Upload-URL');
+  if (!uploadUrl) throw new Error('File API did not return an upload URL');
+
+  // Step 2 — stream the binary data
+  const arrayBuffer = await blob.arrayBuffer();
+  const uploadRes = await withRetry(() => fetch(uploadUrl, {
+    method: 'PUT',
+    headers: {
+      'Content-Length': String(blob.size),
+      'X-Goog-Upload-Offset': '0',
+      'X-Goog-Upload-Command': 'upload, finalize',
+    },
+    body: arrayBuffer,
+  }), 3);
+
+  if (!uploadRes.ok) {
+    const err = await uploadRes.text();
+    throw new Error(`File API upload failed (${uploadRes.status}): ${err}`);
+  }
+
+  const data = await uploadRes.json();
+  return {
+    uri: data.file?.uri ?? data.uri,
+    name: data.file?.name ?? data.name,
+  };
+}
+
+// Polls until the uploaded file reaches ACTIVE state (ready to use).
+export async function waitForFileActive(name: string, maxWaitMs = 90000): Promise<void> {
+  const apiKey = getApiKey();
+  const deadline = Date.now() + maxWaitMs;
+  while (Date.now() < deadline) {
+    const res = await fetch(
+      `https://generativelanguage.googleapis.com/v1beta/${name}?key=${apiKey}`
+    );
+    if (!res.ok) return; // if we can't check status, optimistically proceed
+    const data = await res.json();
+    if (data.state === 'ACTIVE') return;
+    if (data.state === 'FAILED') throw new Error('Gemini File API: file processing FAILED');
+    await new Promise(r => setTimeout(r, 2000));
+  }
+}
+
+// Best-effort deletion — never throws.
+export async function deleteFromFileAPI(name: string): Promise<void> {
+  const apiKey = getApiKey();
+  try {
+    await fetch(
+      `https://generativelanguage.googleapis.com/v1beta/${name}?key=${apiKey}`,
+      { method: 'DELETE' }
+    );
+  } catch { /* best-effort */ }
+}
+
+// Transcribes a file already uploaded to the File API via a single model call.
+export async function transcribeViaFileAPI(
+  fileUri: string,
+  mimeType: string,
+  prompt: string
+): Promise<string> {
+  const transcriptionPrompt = `You are a professional transcription service. Your ONLY task is to transcribe all spoken words in this audio accurately.
+
+IMPORTANT RULES:
+- Output ONLY the exact words spoken in the audio
+- Do NOT summarize, analyze, or interpret the content
+- Do NOT add any commentary, notes, or explanations
+- Do NOT use bullet points or formatting - just plain text paragraphs
+- Include speaker labels if multiple speakers are detected (e.g., "Speaker 1:", "Speaker 2:")
+- Preserve natural speech patterns including filler words (um, uh, etc.) if present
+- If audio is unclear, use [inaudible] for unclear portions
+${prompt ? `\nAdditional context: ${prompt}` : ''}
+
+Now transcribe the complete audio:`;
+
+  const response = await generateWithFallback({
+    model: 'gemini-3-flash-preview',
+    contents: [{
+      parts: [
+        { fileData: { mimeType, fileUri } } as any,
+        { text: transcriptionPrompt },
+      ],
+    }],
+  });
+  return response.text ?? '';
+}
+
 export async function generateSummary(text: string): Promise<string> {
   const response = await generateWithFallback({
     model: "gemini-3-flash-preview",
-    contents: `Please provide a concise summary of the following transcription:\n\n${text}`,
+    contents: `You are a professional meeting summarizer. Create a comprehensive summary of the following transcription.
+
+IMPORTANT INSTRUCTIONS:
+- If the transcription contains multiple languages, TRANSLATE all non-English content to English
+- Base your summary ONLY on what is explicitly stated in the transcription
+- Do NOT add information, assumptions, or interpretations that are not in the original text
+- Do NOT hallucinate or make up details
+- Preserve all key points, decisions, and action items mentioned
+- Use clear, professional language
+- Structure the summary with:
+  • Executive Summary (2-3 sentences)
+  • Key Discussion Points (bullet points)
+  • Decisions Made (if any)
+  • Action Items (if any)
+  • Next Steps (if mentioned)
+
+Transcription:
+${text}`,
   });
   return response.text || "";
 }
@@ -97,7 +273,7 @@ export async function generateMeetingTitle(transcription: string): Promise<strin
   const snippet = transcription.substring(0, 500).trim();
   
   const response = await generateWithFallback({
-    model: "gemini-2.0-flash", // Use faster, cheaper model for simple title generation
+    model: "gemini-3.1-flash-lite-preview", // Use faster, cheaper model for simple title generation
     contents: `Title this meeting in 3-6 words. No quotes. Just the title.
 
 Content: ${snippet}`,
@@ -119,36 +295,98 @@ Content: ${snippet}`,
 export async function generateNotes(text: string): Promise<string> {
   const response = await generateWithFallback({
     model: "gemini-3-flash-preview",
-    contents: `Please transform the following transcription into a structured set of notes (Notion-style). Use headings, bullet points, and highlight key takeaways:\n\n${text}`,
+    contents: `You are a professional note-taker. Transform the following transcription into structured, comprehensive notes.
+
+IMPORTANT INSTRUCTIONS:
+- If the transcription contains multiple languages, TRANSLATE all non-English content to English
+- Extract ONLY information that is explicitly mentioned in the transcription
+- Do NOT add assumptions, interpretations, or made-up details
+- Do NOT hallucinate or invent information
+- Preserve the chronological flow and context of the discussion
+- Use Notion-style formatting with clear hierarchy
+- Include:
+  • Main topics discussed (with ## headings)
+  • Key points under each topic (bullet points)
+  • Specific details, numbers, dates mentioned
+  • Speaker attributions when important (e.g., "John mentioned...")
+  • Questions raised and answers provided
+  • Any concerns or blockers mentioned
+
+Format using Markdown:
+- Use ## for main topics
+- Use ### for subtopics
+- Use bullet points (-) for details
+- Use **bold** for emphasis on critical items
+- Use > for important quotes or decisions
+
+Transcription:
+${text}`,
   });
   return response.text || "";
 }
 
-export async function chatWithNotes(context: string, message: string, history: { role: 'user' | 'model', parts: { text: string }[] }[]): Promise<string> {
+export async function chatWithNotes(
+  fullTranscription: string, 
+  message: string, 
+  history: { role: 'user' | 'model', parts: { text: string }[] }[],
+  useRAG: boolean = true
+): Promise<string> {
+  let contextToUse = '';
+  let noMatchFound = false;
+
+  if (useRAG) {
+    const { chunkTranscription, retrieveRelevantChunks, prepareContext } = await import('./ragService');
+
+    const chunks = chunkTranscription(fullTranscription);
+    const relevantResults = await retrieveRelevantChunks(message, chunks, 4);
+
+    contextToUse = prepareContext(relevantResults);
+
+    if (!contextToUse.trim()) {
+      noMatchFound = true;
+      // Soft fallback: first 2000 chars so AI can still try
+      contextToUse = fullTranscription.substring(0, 2000);
+    }
+  } else {
+    contextToUse = fullTranscription;
+  }
+
+  const systemInstruction = noMatchFound
+    ? `You are a precise meeting assistant.
+The user's question could not be matched to a specific part of the transcription.
+You may look at the opening excerpt below, but if the answer is genuinely not present, respond with:
+"I couldn't find specific information about that in this meeting's transcription."
+
+Opening excerpt:
+${contextToUse}`
+    : `You are a precise meeting assistant. Your job is to answer questions using ONLY the exact excerpts retrieved from the transcription below.
+
+STRICT RULES — follow every one, no exceptions:
+1. Answer ONLY from the EXCERPTS provided. Do not use any outside knowledge.
+2. If the answer is clearly in the excerpts, quote or paraphrase the relevant sentence(s) directly.
+3. Do NOT summarise the whole meeting. Do NOT list everything that was discussed.
+4. If multiple excerpts are relevant, answer using each one separately rather than merging them into a broad overview.
+5. If the answer is NOT in the excerpts, say exactly: "I couldn't find specific information about that in the retrieved parts of this meeting."
+6. Never fabricate, infer, or generalise beyond what is literally written in the excerpts.
+7. Keep your answer focused and concise — one paragraph or a short bullet list at most.
+
+RETRIEVED EXCERPTS (these are the ONLY source you may use):
+${contextToUse}`;
+
   const response = await generateWithFallback({
     model: "gemini-3-flash-preview",
     contents: [
       ...history,
-      {
-        role: 'user',
-        parts: [{ text: message }]
-      }
+      { role: 'user', parts: [{ text: message }] }
     ],
-    config: {
-      systemInstruction: `You are an AI assistant helping a user understand their audio transcription and notes. 
-      Context of the transcription:
-      ${context}
-      
-      Answer questions based on this context. Be concise and helpful.`
-    }
+    config: { systemInstruction }
   });
   return response.text || "";
 }
 
 export async function generateConceptImage(description: string): Promise<string | null> {
-  // Use gemini-2.5-flash-image for free tier visualizations
   const response: GenerateContentResponse = await ai.models.generateContent({
-    model: 'gemini-2.5-flash-image',
+    model: 'gemini-3.1-flash-image-preview',
     contents: {
       parts: [
         {
@@ -158,12 +396,7 @@ export async function generateConceptImage(description: string): Promise<string 
           Ensure all elements are clearly defined and the layout is logically structured.`,
         },
       ],
-    },
-    config: {
-      imageConfig: {
-        aspectRatio: "16:9",
-      },
-    },
+    }
   });
 
   for (const part of response.candidates?.[0]?.content?.parts || []) {
@@ -172,6 +405,121 @@ export async function generateConceptImage(description: string): Promise<string 
     }
   }
   return null;
+}
+
+export async function generateNotesVisualization(notes: string): Promise<string | null> {
+  try {
+    const prompt = `Generate a sketchnote image that looks EXACTLY like it was hand-drawn by a professional graphic recorder live during a meeting, using black Staedtler marker pens and blue/red Sharpie markers on a large off-white A1 paper sheet.
+
+CRITICAL — WHAT THIS IMAGE MUST NOT LOOK LIKE:
+❌ DO NOT generate a digital infographic, a PowerPoint slide, a Canva template, or any computer-designed layout.
+❌ DO NOT use any computer fonts — all text must look genuinely handwritten with visible stroke variation.
+❌ DO NOT draw perfectly straight lines, perfect circles, or perfect rectangles — all lines must have slight natural wobble and imperfection.
+❌ DO NOT use the same layout template as any other meeting — the arrangement must be completely unique to this meeting's topic.
+❌ DO NOT fill large areas with solid color blocks — use hatching, cross-hatching, or light blue ink washes for shading.
+❌ DO NOT write full sentences — only short punchy phrases, key numbers, and names.
+
+PHYSICAL MEDIUM TO SIMULATE:
+The image must look like it was drawn using:
+- A thick black Sharpie marker for main outlines, headers, and borders (thick strokes, slightly uneven edges)
+- A medium black fineliner (Staedtler 0.5mm) for body text and fine details (thin lines, slightly irregular)
+- A BLUE Copic marker or Sharpie for highlights, underlines, fill shading (light blue washes, not solid fills)
+- A RED marker only for warnings, blockers, urgent callouts
+- Paper texture: slightly off-white, warm, like a paper flip chart pad
+
+HAND-LETTERING RULES:
+- All headers: ALL-CAPS, thick marker letterforms with slight weight variation between strokes. Letters slightly touch or overlap. NOT a font.
+- Sub-headers: Mixed case, medium weight, letters slightly uneven in height
+- Body text: Small printed handwriting style — letters slightly varied in size, baseline gently undulating
+- Numbers and statistics: Write them large and bold, circled or underlined by hand
+
+UNIQUE LAYOUT BASED ON TOPIC:
+Before drawing, identify the meeting type and adapt the layout accordingly:
+- Sprint/standup → columns per team member or workstream, progress bar, clock icon
+- Strategy/business review → rocket or arrow motif, performance charts, goals section
+- Interview → person portrait sketch in one section, comparison boxes, decision callout
+- Product/design → wireframe sketches, flow diagram, user quote bubble
+- Workshop/ideation → brain or lightbulb, concept cards laid out, prioritization grid
+- Any meeting → always different from the others, layout driven by the topic
+
+PAGE STRUCTURE:
+1. TOP BANNER: Full-width bold hand-lettered title (ALL CAPS, thick marker style). Underline with a wavy double line in blue. Subtitle below in smaller handwriting (date, duration, attendees, goal).
+2. MIDDLE ZONES: 2-3 irregular column zones of varying widths and heights — NOT a uniform grid. Each zone contains 1-2 sections.
+3. BOTTOM STRIP: 1-2 wide sections for action items, decisions, or next steps — full width or nearly full width.
+4. CONNECTING ARROWS: Bold hand-drawn curved or diagonal arrows connecting related sections, showing flow.
+
+SECTION BORDER VARIETY (use all of these within one image):
+- Solid hand-drawn rectangle with slightly imperfect corners
+- Dashed/dotted border (like torn paper edge)
+- Cloud or thought bubble outline
+- Jagged "explode" star shape for important callouts
+- No border — just a bold underlined header with content below
+
+ILLUSTRATION RULES (CRITICAL for non-boring look):
+- Draw 3-5 small hand-drawn sketch illustrations relevant to the meeting content. These are NOT icons from a library — they are quick but expressive sketches:
+  • A person's face/upper body (simple but recognizable) for candidates or team sections
+  • A product sketch (laptop, phone, can, bottle) for product meetings
+  • A rocket with flames for growth/strategy
+  • A brain with electricity lines for ideation
+  • A trophy or star cluster for achievements
+  • A declining/rising hand-drawn graph for performance data
+  • A calendar page for deadlines
+  • A speech bubble with a key quote
+- These illustrations must look genuinely hand-drawn, NOT clipart. Slight imperfections and visible ink strokes are DESIRED.
+
+INLINE DATA VISUALIZATION (draw these by hand, not digitally):
+- Progress/status → horizontal bar drawn with thick marker, partially filled, labeled "XX%"
+- Percentages/distribution → small pie chart with 2-3 hand-drawn wedges, labeled in handwriting
+- Sequence/flow → boxes or circles connected with thick arrows: Step 1 → Step 2 → Step 3
+- Comparison → two boxes side by side "OPTION A ✗" vs "OPTION B ✓" with hand-drawn X and checkmark
+- Prioritization → simple dot grid or ranked list with numbers circled
+- Action items → hand-drawn checkbox squares ☐ before each item, ☑ for done
+
+COLOR USAGE — ADAPT PALETTE TO MEETING TYPE:
+First, identify the meeting type from the notes, then pick ONE matching palette below:
+- Tech / Engineering / Sprint / Dev standup → Primary: COBALT BLUE. Secondary: RED (for blockers only)
+- Strategy / Business review / OKRs / Revenue → Primary: DEEP NAVY BLUE + GOLD/AMBER accents. Secondary: RED for risks
+- Product / Design / UX / Creative → Primary: TEAL/CYAN. Secondary: CORAL ORANGE
+- Marketing / Brand / Launch / Campaign → Primary: WARM ORANGE. Secondary: DEEP PURPLE
+- HR / Hiring / Interview / Recruitment → Primary: SLATE BLUE. Secondary: GREEN (for strengths/approvals)
+- Finance / Budget / Quarterly → Primary: FOREST GREEN. Secondary: RED (for deficits/risks)
+- Workshop / Ideation / Brainstorm → Primary: VIVID PURPLE. Secondary: BRIGHT YELLOW highlights
+- Sales / Client / Partnership → Primary: WARM TEAL. Secondary: ORANGE
+- General / Unknown → Primary: COBALT BLUE. Secondary: RED
+
+APPLY THE PALETTE:
+- Background: Off-white/warm white paper texture
+- 90% of all lines, borders, and text: BLACK marker ink — this never changes
+- Primary color: Use for section header underlines, connecting arrows, key number highlights, and light wash shading on illustrations
+- Secondary color: Use SPARINGLY — only for the most critical callouts, urgent items, or blockers
+- Do NOT use any colors outside the selected palette
+- Do NOT paint large solid color fills — use light washes, hatching, and underlines only
+
+CONTENT RULES:
+- Infer 4-6 section titles from the content (e.g. "TEAM UPDATES", "BLOCKERS", "SPRINT GOAL", "KEY DECISIONS", "ACTION ITEMS", "NEXT STEPS", "PERFORMANCE", "GOALS", "BACKGROUND", "RISKS")
+- Maximum 6-8 words per bullet point. No sentences.
+- Key numbers and statistics must be LARGE and visually prominent
+- Urgent items prefixed with red △ or "⚠ BLOCKER:"
+- If names mentioned, add a small "ATTENDEES:" cluster
+
+═══ MEETING NOTES ═══
+${notes}`;
+
+    const response = await ai.models.generateContent({
+      model: 'gemini-3.1-flash-image-preview',
+      contents: prompt,
+    });
+
+    for (const part of response.candidates?.[0]?.content?.parts || []) {
+      if (part.inlineData) {
+        return `data:${part.inlineData.mimeType || 'image/jpeg'};base64,${part.inlineData.data}`;
+      }
+    }
+    return null;
+  } catch (error) {
+    console.error('Error generating visualization:', error);
+    return null;
+  }
 }
 
 export async function generatePPTContent(text: string, slideCount: number = 5): Promise<any> {
