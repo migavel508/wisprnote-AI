@@ -2,11 +2,8 @@ import { useState } from 'react';
 import { motion, AnimatePresence } from 'framer-motion';
 import { 
   Search, 
-  Home, 
   FileText, 
   MessageCircle, 
-  FolderOpen, 
-  Bot, 
   Share2, 
   History,
   Sidebar as SidebarIcon, 
@@ -20,7 +17,7 @@ import {
 } from 'lucide-react';
 import { Session } from '@supabase/supabase-js';
 
-type View = 'process' | 'history' | 'notes' | 'chat' | 'assets' | 'agents' | 'knowledge' | 'notebooks';
+type View = 'process' | 'history' | 'notes' | 'chat' | 'knowledge' | 'notebooks';
 
 interface MainSidebarProps {
   currentView: View;
@@ -47,9 +44,7 @@ export default function MainSidebar({
     { id: 'process' as View, label: 'Process', icon: Mic },
     { id: 'notes' as View, label: 'Notes', icon: FileText },
     { id: 'chat' as View, label: 'Chat', icon: MessageCircle },
-    { id: 'assets' as View, label: 'Assets', icon: FolderOpen },
     { id: 'notebooks' as View, label: 'Notebooks', icon: BookMarked },
-    { id: 'agents' as View, label: 'Agents', icon: Bot },
     { id: 'knowledge' as View, label: 'Knowledge', icon: Share2 },
   ];
 

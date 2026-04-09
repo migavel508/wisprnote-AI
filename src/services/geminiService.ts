@@ -80,23 +80,44 @@ export interface ProcessResult {
 export async function processAudioBatch(batch: AudioBatch, prompt: string): Promise<ProcessResult> {
   const base64Data = await blobToBase64(batch.blob);
   
+  // ─── Fetch User Identity ──────────────────────────────────────────────────
+  let userName = "the user";
+  try {
+    const { supabase } = await import('./supabaseService');
+    const { data: { session } } = await supabase.auth.getSession();
+    if (session?.user) {
+      // Use user metadata name if available, else fallback to email prefix
+      const name = session.user.user_metadata?.full_name || session.user.user_metadata?.name;
+      const emailName = session.user.email?.split('@')[0];
+      if (name || emailName) {
+        userName = name || emailName || "the user";
+      }
+    }
+  } catch (e) {
+    console.warn("Failed to get user session for prompt", e);
+  }
+  
   // Use a transcription-focused prompt to get clean transcription output
   const transcriptionPrompt = `You are a professional transcription service. Your ONLY task is to transcribe the spoken words in this audio accurately and verbatim.
 
-IMPORTANT RULES:
+CRITICAL RULES AGAINST HALLUCINATIONS (MUST FOLLOW STRICTLY):
+- If the audio contains ONLY silence, breathing, background noise, static, typing, or music — output ABSOLUTELY NOTHING. Do not invent dialogue.
+- Do NOT hallucinate words that are not clearly spoken. If you are not 100% sure what was said, output [inaudible].
+- If there is a long gap of silence, do not fill it with fabricated text. Simply output the spoken words before and after the gap.
+- Do NOT write a summary, analysis, or description of the audio (e.g. do not write "The audio is a recording of a meeting"). Only output the transcript.
+
+FORMATTING RULES & SPEAKER ID:
 - Output ONLY the exact words spoken in the audio
-- Do NOT summarize, analyze, or interpret the content
-- Do NOT add any commentary, notes, or explanations
-- Do NOT use bullet points or formatting - just plain text paragraphs
-- Include speaker labels if multiple speakers are detected (e.g., "Speaker 1:", "Speaker 2:")
+- Do NOT use bullet points or markdown formatting - just plain text paragraphs
+- Include speaker labels if multiple speakers are detected.
+- IMPORTANT IDENTITY RULE: The primary user of this app is named "${userName}". If the speaker refers to themselves as "me" or "I" and you need to assign a speaker label, or if someone addresses them by name, use "${userName}:" as the speaker label.
 - Preserve natural speech patterns including filler words (um, uh, etc.) if present
-- If audio is unclear, use [inaudible] for unclear portions
 
 This is part ${batch.index + 1} of ${batch.total} of the audio recording (from ${Math.floor(batch.startTime)}s to ${Math.floor(batch.endTime)}s).
 
-${prompt ? `Additional context: ${prompt}` : ''}
+${prompt ? `Additional context (domain vocabulary to look out for): ${prompt}` : ''}
 
-Now transcribe the audio:`;
+Now transcribe the spoken audio verbatim (if no speech is present, return empty text):`;
 
   const response = await generateWithFallback({
     model: "gemini-3-flash-preview",
@@ -325,53 +346,103 @@ ${text}`,
   return response.text || "";
 }
 
+export interface ChatTaskData {
+  transcription: string;
+  notes?: string;
+  summary?: string;
+  title?: string;
+}
+
 export async function chatWithNotes(
-  fullTranscription: string, 
-  message: string, 
+  taskData: ChatTaskData | string,
+  message: string,
   history: { role: 'user' | 'model', parts: { text: string }[] }[],
   useRAG: boolean = true
 ): Promise<string> {
-  let contextToUse = '';
-  let noMatchFound = false;
+  // Backwards-compat: accept plain string (legacy call sites)
+  const data: ChatTaskData = typeof taskData === 'string'
+    ? { transcription: taskData }
+    : taskData;
 
-  if (useRAG) {
-    const { chunkTranscription, retrieveRelevantChunks, prepareContext } = await import('./ragService');
+  const { transcription, notes, summary, title } = data;
 
-    const chunks = chunkTranscription(fullTranscription);
-    const relevantResults = await retrieveRelevantChunks(message, chunks, 4);
+  const {
+    chunkTranscription,
+    retrieveRelevantChunks,
+    prepareContext,
+    detectQueryIntent,
+  } = await import('./ragService');
 
-    contextToUse = prepareContext(relevantResults);
+  const intent = detectQueryIntent(message);
+  const isOverview = intent === 'overview';
 
-    if (!contextToUse.trim()) {
-      noMatchFound = true;
-      // Soft fallback: first 2000 chars so AI can still try
-      contextToUse = fullTranscription.substring(0, 2000);
+  // ── Build rich context from all available sources ──────────────────────────
+  let contextSections: string[] = [];
+
+  // 1. Always include structured notes and summary when available (highest quality)
+  if (summary?.trim()) {
+    contextSections.push(`=== AI-GENERATED MEETING SUMMARY ===\n${summary.trim()}`);
+  }
+  if (notes?.trim()) {
+    // Strip HTML tags from notes (TipTap saves HTML)
+    const plainNotes = notes.replace(/<[^>]+>/g, ' ').replace(/\s{2,}/g, ' ').trim();
+    if (plainNotes.length > 20) {
+      contextSections.push(`=== MEETING NOTES ===\n${plainNotes}`);
     }
-  } else {
-    contextToUse = fullTranscription;
   }
 
-  const systemInstruction = noMatchFound
-    ? `You are a precise meeting assistant.
-The user's question could not be matched to a specific part of the transcription.
-You may look at the opening excerpt below, but if the answer is genuinely not present, respond with:
-"I couldn't find specific information about that in this meeting's transcription."
+  // 2. Add transcription chunks via BM25 retrieval
+  if (transcription?.trim() && useRAG) {
+    const chunks = chunkTranscription(transcription);
+    // For overview queries fetch more chunks; for specific queries fewer but more precise
+    const topK = isOverview ? 10 : 6;
+    const results = await retrieveRelevantChunks(message, chunks, topK);
+    const retrieved = prepareContext(results);
 
-Opening excerpt:
-${contextToUse}`
-    : `You are a precise meeting assistant. Your job is to answer questions using ONLY the exact excerpts retrieved from the transcription below.
+    if (retrieved.trim()) {
+      contextSections.push(`=== TRANSCRIPTION EXCERPTS ===\n${retrieved}`);
+    } else if (transcription.trim()) {
+      // Fallback: use entire transcription (capped at 6000 chars) when BM25 finds nothing
+      contextSections.push(`=== FULL TRANSCRIPTION ===\n${transcription.substring(0, 6000)}${transcription.length > 6000 ? '\n[... truncated ...]' : ''}`);
+    }
+  } else if (transcription?.trim()) {
+    contextSections.push(`=== TRANSCRIPTION ===\n${transcription}`);
+  }
 
-STRICT RULES — follow every one, no exceptions:
-1. Answer ONLY from the EXCERPTS provided. Do not use any outside knowledge.
-2. If the answer is clearly in the excerpts, quote or paraphrase the relevant sentence(s) directly.
-3. Do NOT summarise the whole meeting. Do NOT list everything that was discussed.
-4. If multiple excerpts are relevant, answer using each one separately rather than merging them into a broad overview.
-5. If the answer is NOT in the excerpts, say exactly: "I couldn't find specific information about that in the retrieved parts of this meeting."
-6. Never fabricate, infer, or generalise beyond what is literally written in the excerpts.
-7. Keep your answer focused and concise — one paragraph or a short bullet list at most.
+  const fullContext = contextSections.join('\n\n');
+  const meetingLabel = title ? `"${title}"` : 'this meeting';
 
-RETRIEVED EXCERPTS (these are the ONLY source you may use):
-${contextToUse}`;
+  // ── System prompt adapts to query intent ──────────────────────────────────
+  const systemInstruction = isOverview
+    ? `You are an expert meeting assistant with access to comprehensive data for ${meetingLabel}.
+
+Your task: Provide a thorough, detailed, well-structured answer to the user's question.
+
+GUIDELINES:
+- Use ALL provided context sources (summary, notes, transcription excerpts) to give the most complete answer.
+- Organise your response with clear headings, bullet points, or numbered lists as appropriate.
+- When the user asks for detail, provide FULL detail — do not truncate or over-summarise.
+- Cite specific speakers, decisions, or action items by name when present in the context.
+- If information from multiple sources agrees, synthesise it into one cohesive answer.
+- Only say information is unavailable if it is genuinely absent from ALL provided sources.
+
+MEETING CONTEXT:
+${fullContext}`
+
+    : `You are a precise meeting assistant for ${meetingLabel}.
+
+Your task: Answer the user's specific question accurately using the provided meeting context.
+
+GUIDELINES:
+- Answer directly and specifically — do not pad with irrelevant details.
+- Quote or closely paraphrase the relevant section(s) from the context.
+- If multiple pieces of context are relevant, address each one.
+- If a speaker made the relevant statement, name them.
+- If the answer is genuinely not present in any of the provided context, say: "I couldn't find that specific information in this meeting's records."
+- Never fabricate or infer facts not present in the context.
+
+MEETING CONTEXT:
+${fullContext}`;
 
   const response = await generateWithFallback({
     model: "gemini-3-flash-preview",
@@ -379,7 +450,10 @@ ${contextToUse}`;
       ...history,
       { role: 'user', parts: [{ text: message }] }
     ],
-    config: { systemInstruction }
+    config: {
+      systemInstruction,
+      maxOutputTokens: isOverview ? 2048 : 1024,
+    }
   });
   return response.text || "";
 }
@@ -519,85 +593,6 @@ ${notes}`;
   } catch (error) {
     console.error('Error generating visualization:', error);
     return null;
-  }
-}
-
-export async function generatePPTContent(text: string, slideCount: number = 5): Promise<any> {
-  const response: GenerateContentResponse = await ai.models.generateContent({
-    model: "gemini-3-flash-preview",
-    contents: `Based on the following transcription, generate content for a ${slideCount}-slide PowerPoint presentation. 
-    Include a title slide and content slides.
-    
-    Transcription: ${text}`,
-    config: {
-      responseMimeType: "application/json",
-      responseSchema: {
-        type: Type.OBJECT,
-        properties: {
-          title: { type: Type.STRING, description: "The main title of the presentation" },
-          slides: {
-            type: Type.ARRAY,
-            items: {
-              type: Type.OBJECT,
-              properties: {
-                title: { type: Type.STRING, description: "The title of the slide" },
-                content: { 
-                  type: Type.ARRAY, 
-                  items: { type: Type.STRING },
-                  description: "Bullet points for the slide"
-                }
-              },
-              required: ["title", "content"]
-            }
-          }
-        },
-        required: ["title", "slides"]
-      }
-    }
-  });
-  
-  try {
-    return JSON.parse(response.text || "{}");
-  } catch (e) {
-    console.error("Failed to parse PPT JSON:", e);
-    return { title: "Presentation", slides: [] };
-  }
-}
-
-export async function generateReportContent(text: string): Promise<any> {
-  const response: GenerateContentResponse = await ai.models.generateContent({
-    model: "gemini-3-flash-preview",
-    contents: `Based on the following transcription, generate a structured professional report.
-    
-    Transcription: ${text}`,
-    config: {
-      responseMimeType: "application/json",
-      responseSchema: {
-        type: Type.OBJECT,
-        properties: {
-          title: { type: Type.STRING, description: "The title of the report" },
-          sections: {
-            type: Type.ARRAY,
-            items: {
-              type: Type.OBJECT,
-              properties: {
-                heading: { type: Type.STRING, description: "The heading of the section" },
-                body: { type: Type.STRING, description: "The detailed content of the section" }
-              },
-              required: ["heading", "body"]
-            }
-          }
-        },
-        required: ["title", "sections"]
-      }
-    }
-  });
-
-  try {
-    return JSON.parse(response.text || "{}");
-  } catch (e) {
-    console.error("Failed to parse Report JSON:", e);
-    return { title: "Report", sections: [] };
   }
 }
 
