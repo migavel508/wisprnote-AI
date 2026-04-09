@@ -1,6 +1,6 @@
 import { useState, useEffect } from 'react';
 import { motion, AnimatePresence } from 'framer-motion';
-import { BookOpen, FileBox, Sparkles, Loader2, Check, RefreshCw, Image as ImageIcon } from 'lucide-react';
+import { BookOpen, Sparkles, Loader2, Check, RefreshCw, Image as ImageIcon } from 'lucide-react';
 import Markdown from 'react-markdown';
 import remarkGfm from 'remark-gfm';
 import { TaskHistory, updateTaskTitle, updateTaskSummary, updateTaskNotes, updateTaskVisualization } from '../services/supabaseService';
@@ -10,7 +10,7 @@ import { MeetingNoteTab } from '../components/ManualNotes/MeetingNoteTab';
 
 interface NotesPageProps {
   selectedTask: TaskHistory | null;
-  onNavigateToAssets: () => void;
+  onNavigateToAssets?: () => void;
   isLoading?: boolean;
   onTaskUpdated?: (task: TaskHistory) => void;
 }
@@ -155,19 +155,10 @@ export default function NotesPage({ selectedTask, onNavigateToAssets, isLoading 
       {/* Compact Fixed Header */}
       <div className="flex-none bg-white border-b border-[#141414]/10">
         <div className="max-w-4xl mx-auto w-full px-4 sm:px-6 py-3">
-          {/* Top row: Breadcrumb + Assets button */}
-          <div className="flex items-center justify-between gap-4 mb-2">
-            <div className="flex items-center gap-2 opacity-50 text-xs overflow-hidden">
-              <BookOpen className="w-3 h-3 flex-shrink-0" />
-              <span className="truncate">{selectedTask.filename}</span>
-            </div>
-            <button 
-              onClick={onNavigateToAssets}
-              className="flex-shrink-0 flex items-center gap-1.5 px-3 py-1.5 border border-[#141414] text-[10px] font-mono uppercase tracking-wider hover:bg-[#141414] hover:text-white transition-all"
-            >
-              <FileBox className="w-3 h-3" />
-              Assets
-            </button>
+          {/* Top row: Breadcrumb */}
+          <div className="flex items-center gap-2 mb-2 opacity-50 text-xs overflow-hidden">
+            <BookOpen className="w-3 h-3 flex-shrink-0" />
+            <span className="truncate">{selectedTask.filename}</span>
           </div>
           
           {/* Title + Meta inline */}

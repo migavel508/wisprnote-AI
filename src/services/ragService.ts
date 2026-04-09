@@ -93,8 +93,8 @@ export function chunkTranscription(transcription: string): TextChunk[] {
     .map(s => s.trim())
     .filter(Boolean);
 
-  // Further split long turns at sentence boundaries (~400 chars max)
-  const MAX_CHUNK = 400;
+  // Further split long turns at sentence boundaries (~700 chars max)
+  const MAX_CHUNK = 700;
   const sentences: string[] = [];
 
   for (const seg of rawSegments) {
@@ -116,11 +116,12 @@ export function chunkTranscription(transcription: string): TextChunk[] {
     }
   }
 
-  // Build overlapping chunks: each chunk = current + next sentence (50% overlap)
+  // Build overlapping chunks: 3-sentence windows with 2-sentence step (66% overlap)
   const chunks: TextChunk[] = [];
   for (let i = 0; i < sentences.length; i++) {
     const window = [sentences[i]];
     if (i + 1 < sentences.length) window.push(sentences[i + 1]);
+    if (i + 2 < sentences.length) window.push(sentences[i + 2]);
     const text = window.join('\n');
 
     // Extract speaker labels present in this chunk
@@ -146,7 +147,7 @@ const BM25_B  = 0.75;
 export async function retrieveRelevantChunks(
   query: string,
   chunks: TextChunk[],
-  topK: number = 4
+  topK: number = 6
 ): Promise<RetrievalResult[]> {
   const rawTokens   = tokenize(query);
   const queryTokens = expandQuery(rawTokens);
@@ -227,5 +228,20 @@ export function prepareContext(results: RetrievalResult[]): string {
       : '';
     return `[EXCERPT ${i + 1}${speakerTag}]\n${r.chunk.text}`;
   }).join('\n\n');
+}
+
+// ─── Detect query intent ────────────────────────────────────────────────────────
+export type QueryIntent = 'overview' | 'specific';
+
+export function detectQueryIntent(query: string): QueryIntent {
+  const q = query.toLowerCase();
+  const overviewPatterns = [
+    'summarize','summary','overview','everything','all about','full picture',
+    'tell me about','explain','what happened','what was discussed','what did they',
+    'what were','what are the','give me','detail','in detail','comprehensive',
+    'breakdown','recap','highlights','key points','main points','discuss',
+    'covered','topics','agenda','notes','entire','whole','complete',
+  ];
+  return overviewPatterns.some(p => q.includes(p)) ? 'overview' : 'specific';
 }
 
