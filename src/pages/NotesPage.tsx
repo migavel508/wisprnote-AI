@@ -151,9 +151,9 @@ export default function NotesPage({ selectedTask, onNavigateToAssets, isLoading 
   };
 
   return (
-    <div className="absolute inset-0 flex flex-col bg-white overflow-hidden">
+    <div className="absolute inset-0 flex flex-col bg-[#faf9f7] overflow-hidden">
       {/* Compact Fixed Header */}
-      <div className="flex-none bg-white border-b border-[#141414]/10">
+      <div className="flex-none bg-[#faf9f7] border-b border-[#141414]/10">
         <div className="max-w-4xl mx-auto w-full px-4 sm:px-6 py-3">
           {/* Top row: Breadcrumb */}
           <div className="flex items-center gap-2 mb-2 opacity-50 text-xs overflow-hidden">

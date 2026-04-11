@@ -125,7 +125,7 @@ export default function ProcessPage({
   const isProcessing = status === 'processing' || status === 'splitting';
 
   return (
-    <div className="flex flex-col h-full bg-white font-[system-ui] overflow-hidden relative">
+    <div className="flex flex-col h-full bg-[#faf9f7] font-[system-ui] overflow-hidden relative">
       {/* Main Content Area */}
       <main className="flex-1 overflow-y-auto w-full flex justify-center pt-8 sm:pt-12 pb-32 sm:pb-48">
         <div className="w-full max-w-[760px] px-4 sm:px-8">

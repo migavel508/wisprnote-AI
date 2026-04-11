@@ -147,9 +147,9 @@ export default function ChatPage({
   const isEmpty = chatMessages.length === 0 && agentAssetHistory.length === 0 && !pendingSlashCmd && !isGeneratingAsset;
 
   return (
-    <div className="h-full w-full bg-white flex flex-col overflow-hidden">
+    <div className="h-full w-full bg-[#faf9f7] flex flex-col overflow-hidden">
       {/* Header */}
-      <div className="flex-none flex items-center gap-3 px-6 py-4 text-xs font-mono uppercase tracking-widest overflow-x-auto no-scrollbar whitespace-nowrap border-b border-[#141414]/10 bg-white z-10">
+      <div className="flex-none flex items-center gap-3 px-6 py-4 text-xs font-mono uppercase tracking-widest overflow-x-auto no-scrollbar whitespace-nowrap border-b border-[#141414]/10 bg-[#faf9f7] z-10">
         <MessageSquare className="w-4 h-4 flex-shrink-0 opacity-40" />
         <span className="truncate opacity-40">{selectedTask.filename}</span>
         <span className="opacity-40">/</span>
@@ -370,7 +370,7 @@ export default function ChatPage({
       </div>
 
       {/* Input area — fixed at bottom */}
-      <div className="flex-none bg-white border-t border-[#141414]/10 px-4 sm:px-8 py-4">
+      <div className="flex-none bg-[#faf9f7] border-t border-[#141414]/10 px-4 sm:px-8 py-4">
         <div className="max-w-3xl mx-auto relative">
 
           {/* Slash command dropdown */}

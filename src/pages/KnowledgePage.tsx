@@ -621,9 +621,9 @@ Answer the user's question based on this data. Be concise and helpful. If you ca
   }
 
   return (
-    <div className="absolute inset-0 flex flex-col bg-white overflow-hidden">
+    <div className="absolute inset-0 flex flex-col bg-[#faf9f7] overflow-hidden">
       {/* Header */}
-      <div className="flex-none bg-white border-b border-[#141414]/10 px-4 sm:px-6 py-3 sm:py-4">
+      <div className="flex-none bg-[#faf9f7] border-b border-[#141414]/10 px-4 sm:px-6 py-3 sm:py-4">
         <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-3 sm:gap-4">
           <div>
             <h2 className="text-lg sm:text-xl font-serif italic font-bold flex items-center gap-2">
