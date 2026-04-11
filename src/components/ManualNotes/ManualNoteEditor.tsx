@@ -43,9 +43,9 @@ export function ManualNoteEditor({ note, onSave, onBack }: ManualNoteEditorProps
   useEffect(() => { scheduleSave(); }, [title]);
 
   return (
-    <div className="flex flex-col h-full bg-white">
+    <div className="flex flex-col h-full bg-[#faf9f7]">
       {/* Header */}
-      <div className="flex-none flex items-center justify-between px-8 py-3 border-b border-[#e5e5e5] bg-white/90 backdrop-blur sticky top-0 z-10">
+      <div className="flex-none flex items-center justify-between px-8 py-3 border-b border-[#e5e5e5] bg-[#faf9f7]/90 backdrop-blur sticky top-0 z-10">
         <button
           onClick={onBack}
           className="flex items-center gap-1.5 text-[13px] text-[#595959] hover:text-[#1a1a1a] transition-colors"

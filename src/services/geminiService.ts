@@ -97,6 +97,11 @@ export async function processAudioBatch(batch: AudioBatch, prompt: string): Prom
     console.warn("Failed to get user session for prompt", e);
   }
   
+  // Calculate overlap info for the prompt
+  const overlapInfo = batch.overlapStart && batch.overlapStart > 0
+    ? `\nNOTE: The first ~${batch.overlapStart} seconds of this chunk overlap with the previous chunk for continuity. This is intentional to ensure no content is lost at boundaries.`
+    : '';
+  
   // Use a transcription-focused prompt to get clean transcription output
   const transcriptionPrompt = `You are a professional transcription service. Your ONLY task is to transcribe the spoken words in this audio accurately and verbatim.
 
@@ -106,6 +111,12 @@ CRITICAL RULES AGAINST HALLUCINATIONS (MUST FOLLOW STRICTLY):
 - If there is a long gap of silence, do not fill it with fabricated text. Simply output the spoken words before and after the gap.
 - Do NOT write a summary, analysis, or description of the audio (e.g. do not write "The audio is a recording of a meeting"). Only output the transcript.
 
+HANDLING SILENCE AND NOISE:
+- Silence, pauses, and gaps are NORMAL in audio recordings. Do not interpret them as missing content.
+- Background noise (fans, AC, typing, traffic) should be IGNORED — only transcribe actual speech.
+- If someone coughs, clears throat, or makes non-verbal sounds, you may note [cough] or [clears throat] but do not invent words.
+- Low audio quality or distant speech should be marked as [inaudible] rather than guessed.
+
 FORMATTING RULES & SPEAKER ID:
 - Output ONLY the exact words spoken in the audio
 - Do NOT use bullet points or markdown formatting - just plain text paragraphs
@@ -113,11 +124,11 @@ FORMATTING RULES & SPEAKER ID:
 - IMPORTANT IDENTITY RULE: The primary user of this app is named "${userName}". If the speaker refers to themselves as "me" or "I" and you need to assign a speaker label, or if someone addresses them by name, use "${userName}:" as the speaker label.
 - Preserve natural speech patterns including filler words (um, uh, etc.) if present
 
-This is part ${batch.index + 1} of ${batch.total} of the audio recording (from ${Math.floor(batch.startTime)}s to ${Math.floor(batch.endTime)}s).
+This is part ${batch.index + 1} of ${batch.total} of the audio recording (from ${Math.floor(batch.startTime)}s to ${Math.floor(batch.endTime)}s).${overlapInfo}
 
 ${prompt ? `Additional context (domain vocabulary to look out for): ${prompt}` : ''}
 
-Now transcribe the spoken audio verbatim (if no speech is present, return empty text):`;
+Now transcribe the spoken audio verbatim. If no speech is present, return empty text. Do not apologize or explain — just output the transcript:`;
 
   const response = await generateWithFallback({
     model: "gemini-3-flash-preview",
@@ -233,24 +244,57 @@ export async function deleteFromFileAPI(name: string): Promise<void> {
 }
 
 // Transcribes a file already uploaded to the File API via a single model call.
+// This is used for large files (>25MB) where batching would be inefficient.
 export async function transcribeViaFileAPI(
   fileUri: string,
   mimeType: string,
   prompt: string
 ): Promise<string> {
-  const transcriptionPrompt = `You are a professional transcription service. Your ONLY task is to transcribe all spoken words in this audio accurately.
+  // ─── Fetch User Identity ──────────────────────────────────────────────────
+  let userName = "the user";
+  try {
+    const { supabase } = await import('./supabaseService');
+    const { data: { session } } = await supabase.auth.getSession();
+    if (session?.user) {
+      const name = session.user.user_metadata?.full_name || session.user.user_metadata?.name;
+      const emailName = session.user.email?.split('@')[0];
+      if (name || emailName) {
+        userName = name || emailName || "the user";
+      }
+    }
+  } catch (e) {
+    console.warn("Failed to get user session for prompt", e);
+  }
 
-IMPORTANT RULES:
+  const transcriptionPrompt = `You are a professional transcription service. Your ONLY task is to transcribe ALL spoken words in this audio accurately and completely.
+
+CRITICAL RULES AGAINST HALLUCINATIONS (MUST FOLLOW STRICTLY):
+- If any section contains ONLY silence, breathing, background noise, static, typing, or music — output nothing for that section. Do not invent dialogue.
+- Do NOT hallucinate words that are not clearly spoken. If you are not 100% sure what was said, output [inaudible].
+- If there is a long gap of silence, do not fill it with fabricated text. Simply output the spoken words before and after the gap.
+- Do NOT write a summary, analysis, or description of the audio. Only output the transcript.
+
+HANDLING SILENCE AND NOISE:
+- Silence, pauses, and gaps are NORMAL in audio recordings. Do not interpret them as missing content.
+- Background noise (fans, AC, typing, traffic) should be IGNORED — only transcribe actual speech.
+- If someone coughs, clears throat, or makes non-verbal sounds, you may note [cough] or [clears throat] but do not invent words.
+- Low audio quality or distant speech should be marked as [inaudible] rather than guessed.
+
+FORMATTING RULES & SPEAKER ID:
 - Output ONLY the exact words spoken in the audio
-- Do NOT summarize, analyze, or interpret the content
-- Do NOT add any commentary, notes, or explanations
-- Do NOT use bullet points or formatting - just plain text paragraphs
+- Do NOT use bullet points or markdown formatting - just plain text paragraphs
 - Include speaker labels if multiple speakers are detected (e.g., "Speaker 1:", "Speaker 2:")
+- IMPORTANT IDENTITY RULE: The primary user of this app is named "${userName}". If the speaker refers to themselves as "me" or "I" and you need to assign a speaker label, or if someone addresses them by name, use "${userName}:" as the speaker label.
 - Preserve natural speech patterns including filler words (um, uh, etc.) if present
-- If audio is unclear, use [inaudible] for unclear portions
-${prompt ? `\nAdditional context: ${prompt}` : ''}
 
-Now transcribe the complete audio:`;
+COMPLETENESS:
+- This is a COMPLETE audio file. Transcribe EVERYTHING from start to finish.
+- Do not skip any sections, even if they seem repetitive or contain long pauses.
+- Ensure the entire audio duration is covered in your transcription.
+
+${prompt ? `Additional context (domain vocabulary to look out for): ${prompt}` : ''}
+
+Now transcribe the complete audio verbatim. If no speech is present, return empty text. Do not apologize or explain — just output the transcript:`;
 
   const response = await generateWithFallback({
     model: 'gemini-3-flash-preview',

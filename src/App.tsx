@@ -76,7 +76,7 @@ import {
   updateTaskNotes,
 } from './services/supabaseService';
 import { Session } from '@supabase/supabase-js';
-import { splitAudio, AudioBatch } from './services/audioService';
+import { splitAudio, AudioBatch, shouldUseFileAPI, FILE_API_THRESHOLD_MB } from './services/audioService';
 import { 
   progressStorage, 
   generateProgressId, 
@@ -1249,148 +1249,256 @@ export default function App() {
     }
   };
 
+  // Helper function to deduplicate overlapping transcription chunks
+  const deduplicateOverlappingTranscriptions = (transcriptions: string[]): string => {
+    if (transcriptions.length <= 1) {
+      return transcriptions.join('\n\n');
+    }
+
+    const result: string[] = [transcriptions[0]];
+    
+    for (let i = 1; i < transcriptions.length; i++) {
+      const prev = transcriptions[i - 1];
+      const curr = transcriptions[i];
+      
+      if (!prev || !curr) {
+        result.push(curr || '');
+        continue;
+      }
+
+      // Find overlapping content by looking for common phrases
+      // Take the last ~200 chars of prev and first ~200 chars of curr
+      const prevEnd = prev.slice(-300).toLowerCase();
+      const currStart = curr.slice(0, 300).toLowerCase();
+      
+      // Find the longest common substring
+      let bestOverlap = 0;
+      
+      // Look for phrases of at least 20 chars that appear in both
+      for (let len = Math.min(100, currStart.length); len >= 20; len--) {
+        const phrase = currStart.slice(0, len);
+        const idx = prevEnd.lastIndexOf(phrase);
+        if (idx !== -1) {
+          bestOverlap = len;
+          break;
+        }
+      }
+      
+      if (bestOverlap > 20) {
+        // Skip the overlapping portion from the current chunk
+        result.push(curr.slice(bestOverlap).trim());
+      } else {
+        // No significant overlap found, just append
+        result.push(curr);
+      }
+    }
+    
+    return result.filter(t => t.trim()).join('\n\n');
+  };
+
   const startProcessing = async (resumeFromProgress?: ProcessingProgress) => {
     if (!file && !resumeFromProgress) return;
 
     try {
-      let progressId: string;
-      let audioBatches: AudioBatch[];
-      let results: BatchStatus[];
+      const currentFile = file || (resumeFromProgress?.audioBlob ? new File([resumeFromProgress.audioBlob], resumeFromProgress.filename) : null);
+      if (!currentFile) {
+        throw new Error('No audio file available');
+      }
 
-      if (resumeFromProgress) {
-        // Resume from saved progress
-        progressId = resumeFromProgress.id;
-        currentProgressIdRef.current = progressId;
-        
+      let fullTranscription: string;
+      
+      // ─── Large File Path: Use Gemini File API ───────────────────────────────
+      if (shouldUseFileAPI(currentFile) && !resumeFromProgress) {
         setStatus('processing');
-        setPrompt(resumeFromProgress.prompt);
-        
-        // Reconstruct batches from saved progress
-        results = resumeFromProgress.batches.map(b => ({
-          blob: new Blob(), // Will be regenerated if needed
-          mimeType: 'audio/wav',
-          index: b.index,
-          total: resumeFromProgress.totalBatches,
-          startTime: b.startTime,
-          endTime: b.endTime,
-          status: b.status,
-          result: b.result,
-          error: b.error,
-        }));
-        
-        setBatches(results);
-        
-        // If we have the audio blob, recreate the file
-        if (resumeFromProgress.audioBlob) {
-          const recoveredFile = new File([resumeFromProgress.audioBlob], resumeFromProgress.filename, {
-            type: resumeFromProgress.audioBlob.type
-          });
-          setFile(recoveredFile);
+        setError(null);
+        setBatches([{
+          blob: currentFile,
+          mimeType: currentFile.type || 'audio/mpeg',
+          index: 0,
+          total: 1,
+          startTime: 0,
+          endTime: 0,
+          status: 'processing'
+        }]);
+
+        try {
+          // Upload to Gemini File API
+          const { uri, name } = await uploadAudioToFileAPI(
+            currentFile,
+            currentFile.type || 'audio/mpeg',
+            currentFile.name
+          );
+
+          // Wait for file to be ready
+          await waitForFileActive(name);
+
+          // Transcribe via File API (single call for entire file)
+          fullTranscription = await transcribeViaFileAPI(uri, currentFile.type || 'audio/mpeg', prompt);
+
+          // Clean up uploaded file
+          await deleteFromFileAPI(name);
+
+          setBatches([{
+            blob: currentFile,
+            mimeType: currentFile.type || 'audio/mpeg',
+            index: 0,
+            total: 1,
+            startTime: 0,
+            endTime: 0,
+            status: 'completed',
+            result: fullTranscription
+          }]);
+
+        } catch (fileApiError: any) {
+          console.warn('File API failed, falling back to batch processing:', fileApiError);
+          // Fall through to batch processing
+          fullTranscription = '';
+        }
+      }
+
+      // ─── Standard Path: Batch Processing with Overlap ───────────────────────
+      if (!fullTranscription) {
+        let progressId: string;
+        let audioBatches: AudioBatch[];
+        let results: BatchStatus[];
+
+        if (resumeFromProgress) {
+          // Resume from saved progress
+          progressId = resumeFromProgress.id;
+          currentProgressIdRef.current = progressId;
+          
+          setStatus('processing');
+          setPrompt(resumeFromProgress.prompt);
+          
+          // Reconstruct batches from saved progress
+          results = resumeFromProgress.batches.map(b => ({
+            blob: new Blob(), // Will be regenerated if needed
+            mimeType: 'audio/wav',
+            index: b.index,
+            total: resumeFromProgress.totalBatches,
+            startTime: b.startTime,
+            endTime: b.endTime,
+            status: b.status,
+            result: b.result,
+            error: b.error,
+          }));
+          
+          setBatches(results);
           
           // Re-split audio to get batch blobs
-          audioBatches = await splitAudio(recoveredFile, 15);
+          audioBatches = await splitAudio(currentFile, 15);
           
           // Merge blob data back into results
           results = results.map((r, idx) => ({
             ...r,
             blob: audioBatches[idx]?.blob || r.blob,
             mimeType: audioBatches[idx]?.mimeType || r.mimeType,
+            overlapStart: audioBatches[idx]?.overlapStart,
           }));
         } else {
-          throw new Error('Cannot resume: audio data not found');
+          // Fresh start
+          progressId = generateProgressId(currentFile.name);
+          currentProgressIdRef.current = progressId;
+          
+          setStatus('splitting');
+          setError(null);
+
+          // Split with overlapping chunks for better boundary handling
+          audioBatches = await splitAudio(currentFile, 15, {
+            overlapSeconds: 10,
+            enableNoiseGate: true,
+            enableNormalization: true,
+          });
+          const initialBatches: BatchStatus[] = audioBatches.map(b => ({ ...b, status: 'pending' as const }));
+          setBatches(initialBatches);
+          
+          results = [...initialBatches];
+          
+          // Save initial progress
+          await progressStorage.saveProgress({
+            id: progressId,
+            filename: currentFile.name,
+            prompt,
+            totalBatches: results.length,
+            completedBatches: 0,
+            batches: results.map(b => ({
+              index: b.index,
+              status: b.status,
+              startTime: b.startTime,
+              endTime: b.endTime,
+            })),
+            audioBlob: currentFile,
+            createdAt: Date.now(),
+            updatedAt: Date.now(),
+          });
         }
-      } else {
-        // Fresh start
-        progressId = generateProgressId(file!.name);
-        currentProgressIdRef.current = progressId;
-        
-        setStatus('splitting');
-        setError(null);
 
-        audioBatches = await splitAudio(file!, 15);
-        const initialBatches: BatchStatus[] = audioBatches.map(b => ({ ...b, status: 'pending' as const }));
-        setBatches(initialBatches);
+        setStatus('processing');
+        const CONCURRENCY = 3;
+
+        // Process only pending/error batches
+        const batchesToProcess = results
+          .map((b, idx) => ({ batch: b, originalIndex: idx }))
+          .filter(({ batch }) => batch.status === 'pending' || batch.status === 'error');
+
+        for (let i = 0; i < batchesToProcess.length; i += CONCURRENCY) {
+          const chunkEnd = Math.min(i + CONCURRENCY, batchesToProcess.length);
+          const chunk = batchesToProcess.slice(i, chunkEnd);
+
+          // Mark as processing
+          chunk.forEach(({ originalIndex }) => {
+            results[originalIndex] = { ...results[originalIndex], status: 'processing' };
+          });
+          setBatches([...results]);
+
+          // Process in parallel
+          await Promise.allSettled(
+            chunk.map(async ({ batch, originalIndex }) => {
+              try {
+                const result = await processAudioBatch(batch, prompt);
+                results[originalIndex] = { ...results[originalIndex], status: 'completed', result: result.text };
+              } catch (err: any) {
+                results[originalIndex] = { ...results[originalIndex], status: 'error', error: err.message || 'Unknown error' };
+              }
+              
+              // Save progress after each batch completes
+              const completedCount = results.filter(r => r.status === 'completed').length;
+              await progressStorage.saveProgress({
+                id: progressId,
+                filename: currentFile.name,
+                prompt,
+                totalBatches: results.length,
+                completedBatches: completedCount,
+                batches: results.map(b => ({
+                  index: b.index,
+                  status: b.status,
+                  result: b.result,
+                  error: b.error,
+                  startTime: b.startTime,
+                  endTime: b.endTime,
+                })),
+                audioBlob: currentFile,
+                createdAt: resumeFromProgress?.createdAt || Date.now(),
+                updatedAt: Date.now(),
+              });
+              
+              setBatches([...results]);
+            })
+          );
+        }
+
+        // Deduplicate overlapping transcriptions
+        const sortedTranscriptions = results
+          .filter(b => b.status === 'completed')
+          .sort((a, b) => a.index - b.index)
+          .map(b => b.result || '');
         
-        results = [...initialBatches];
+        fullTranscription = deduplicateOverlappingTranscriptions(sortedTranscriptions);
         
-        // Save initial progress
-        await progressStorage.saveProgress({
-          id: progressId,
-          filename: file!.name,
-          prompt,
-          totalBatches: results.length,
-          completedBatches: 0,
-          batches: results.map(b => ({
-            index: b.index,
-            status: b.status,
-            startTime: b.startTime,
-            endTime: b.endTime,
-          })),
-          audioBlob: file!,
-          createdAt: Date.now(),
-          updatedAt: Date.now(),
-        });
+        // Clean up progress storage after successful completion
+        await progressStorage.deleteProgress(progressId);
+        currentProgressIdRef.current = null;
       }
-
-      setStatus('processing');
-      const CONCURRENCY = 3;
-
-      // Process only pending/error batches
-      const batchesToProcess = results
-        .map((b, idx) => ({ batch: b, originalIndex: idx }))
-        .filter(({ batch }) => batch.status === 'pending' || batch.status === 'error');
-
-      for (let i = 0; i < batchesToProcess.length; i += CONCURRENCY) {
-        const chunkEnd = Math.min(i + CONCURRENCY, batchesToProcess.length);
-        const chunk = batchesToProcess.slice(i, chunkEnd);
-
-        // Mark as processing
-        chunk.forEach(({ originalIndex }) => {
-          results[originalIndex] = { ...results[originalIndex], status: 'processing' };
-        });
-        setBatches([...results]);
-
-        // Process in parallel
-        await Promise.allSettled(
-          chunk.map(async ({ batch, originalIndex }) => {
-            try {
-              const result = await processAudioBatch(batch, prompt);
-              results[originalIndex] = { ...results[originalIndex], status: 'completed', result: result.text };
-            } catch (err: any) {
-              results[originalIndex] = { ...results[originalIndex], status: 'error', error: err.message || 'Unknown error' };
-            }
-            
-            // Save progress after each batch completes
-            const completedCount = results.filter(r => r.status === 'completed').length;
-            await progressStorage.saveProgress({
-              id: progressId,
-              filename: file?.name || resumeFromProgress?.filename || 'recording',
-              prompt,
-              totalBatches: results.length,
-              completedBatches: completedCount,
-              batches: results.map(b => ({
-                index: b.index,
-                status: b.status,
-                result: b.result,
-                error: b.error,
-                startTime: b.startTime,
-                endTime: b.endTime,
-              })),
-              audioBlob: file || resumeFromProgress?.audioBlob,
-              createdAt: resumeFromProgress?.createdAt || Date.now(),
-              updatedAt: Date.now(),
-            });
-            
-            setBatches([...results]);
-          })
-        );
-      }
-
-      const fullTranscription = results
-        .filter(b => b.status === 'completed')
-        .sort((a, b) => a.index - b.index)
-        .map(b => b.result || '')
-        .join('\n\n');
 
       setStatus('completed');
 
@@ -1427,10 +1535,6 @@ export default function App() {
       };
 
       const savedTask = await saveTask(newTask);
-      
-      // Clean up progress storage after successful completion
-      await progressStorage.deleteProgress(progressId);
-      currentProgressIdRef.current = null;
 
       if (savedTask && savedTask.id) {
         setIsExtractingNewKG(true);
@@ -1632,7 +1736,7 @@ export default function App() {
 
       {/* Main Content Area */}
       <div className="flex-1 flex overflow-hidden relative">
-        <main className="flex-1 bg-white w-full relative overflow-y-auto">
+        <main className="flex-1 bg-[#faf9f7] w-full relative overflow-y-auto">
           <AnimatePresence mode="wait">
             {currentView === 'process' && (
               <motion.div 
