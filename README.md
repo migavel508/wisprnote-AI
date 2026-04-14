@@ -1,3 +1,7 @@
+<div align="center">
+  <img src="./logo.png" alt="Wisprnote AI Logo" width="100" />
+</div>
+
 # 🎙️ Wisprnote AI
 
 <div align="center">

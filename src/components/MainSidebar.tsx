@@ -174,7 +174,10 @@ export default function MainSidebar({
 
         {/* App branding pill */}
         <div className="bg-transparent border border-[#d6d6d4] rounded-[14px] p-[3px] mb-3.5 flex items-center justify-between shadow-sm">
-          <span className="text-[12.5px] text-[#1a1a1a] pl-2 font-medium">Wisprnote AI</span>
+          <div className="flex items-center gap-1.5 pl-1.5">
+            <img src="/logo.png" alt="Logo" className="w-5 h-5 rounded-full object-cover" />
+            <span className="text-[12.5px] text-[#1a1a1a] font-medium">Wisprnote AI</span>
+          </div>
           <div className="px-3 py-1 text-[11px] font-semibold bg-[#262626] text-white rounded-[10px]">
             Pro
           </div>
