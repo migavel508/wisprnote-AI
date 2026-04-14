@@ -708,7 +708,7 @@ export async function generateEmailContent(text: string): Promise<any> {
 }
 
 export async function extractKnowledgeGraph(meetingId: string, meetingTitle: string, text: string): Promise<any> {
-  const geminiApiKey = import.meta.env.VITE_GEMINI_API_KEY || import.meta.env.GEMINI_API_KEY || "AIzaSyB1McBfQnEy2boqAHu5GrGYex5ZMzEpxCQ"; // Fallback to hardcoded key if env is not loaded properly in dev
+  const geminiApiKey = import.meta.env.VITE_GEMINI_API_KEY || import.meta.env.GEMINI_API_KEY || process.env.GEMINI_API_KEY;
   
   if (!geminiApiKey) {
     console.error('Gemini API key is not configured');
@@ -735,26 +735,46 @@ Meeting: ${meetingTitle}
 Transcription: ${text.substring(0, 8000)}`;
 
   try {
-    const response = await fetch(`https://generativelanguage.googleapis.com/v1beta/models/gemini-3.1-flash-lite-preview:generateContent?key=${geminiApiKey}`, {
-      method: 'POST',
-      headers: {
-        'Content-Type': 'application/json',
-      },
-      body: JSON.stringify({
-        contents: [
-          { role: 'user', parts: [{ text: combinedPrompt }] }
-        ],
-        generationConfig: {
-          temperature: 0.1,
-          responseMimeType: "application/json"
-        }
-      })
-    });
+    const modelsToTry = ['gemini-3-flash-preview', 'gemini-3.1-flash-lite-preview'];
+    let response: Response | null = null;
+    const MAX_RETRIES = 4;
+    const BASE_DELAY = 2000;
 
-    if (!response.ok) {
-      const errorText = await response.text();
-      console.error('Gemini API error:', errorText);
-      throw new Error(`Gemini API error: ${response.status}`);
+    for (const model of modelsToTry) {
+      let succeeded = false;
+      for (let attempt = 0; attempt <= MAX_RETRIES; attempt++) {
+        response = await fetch(`https://generativelanguage.googleapis.com/v1beta/models/${model}:generateContent?key=${geminiApiKey}`, {
+          method: 'POST',
+          headers: {
+            'Content-Type': 'application/json',
+          },
+          body: JSON.stringify({
+            contents: [
+              { role: 'user', parts: [{ text: combinedPrompt }] }
+            ],
+            generationConfig: {
+              temperature: 0.1,
+              responseMimeType: "application/json"
+            }
+          })
+        });
+
+        if (response.ok) { succeeded = true; break; }
+        // Only retry on 503 (overloaded) or 429 (rate limited)
+        if (response.status !== 503 && response.status !== 429) break;
+        if (attempt < MAX_RETRIES) {
+          const delay = BASE_DELAY * Math.pow(2, attempt) + Math.random() * 1000;
+          console.warn(`KG extraction ${model} returned ${response.status}, retrying in ${Math.round(delay)}ms (${attempt + 1}/${MAX_RETRIES})…`);
+          await new Promise(r => setTimeout(r, delay));
+        }
+      }
+      if (succeeded) break;
+      const errorText = await response!.text();
+      console.warn(`KG extraction model ${model} failed (${response!.status}):`, errorText);
+    }
+
+    if (!response || !response.ok) {
+      throw new Error(`All KG extraction models failed`);
     }
 
     const data = await response.json();

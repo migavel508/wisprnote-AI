@@ -1,4 +1,4 @@
-import { useState, useRef, useEffect, useCallback } from 'react';
+import { useState, useRef, useEffect, useCallback, useMemo } from 'react';
 import { motion, AnimatePresence } from 'framer-motion';
 import ForceGraph2D from 'react-force-graph-2d';
 import { 
@@ -22,6 +22,16 @@ import {
   Maximize2
 } from 'lucide-react';
 import { KnowledgeGraphSkeleton } from '../components/Skeleton';
+import {
+  type KGBuildArtifact,
+  type MeetingEdge,
+  type MeetingRecord,
+  buildKnowledgeGraphPipeline,
+  buildGraphData as buildGraphDataUtil,
+  findRelatedMeetings as findRelatedMeetingsUtil,
+  searchNodes,
+  buildChatContext,
+} from '../lib/knowledgeGraph.utils';
 
 interface KnowledgePageProps {
   kgData: any[];
@@ -33,47 +43,6 @@ interface KnowledgePageProps {
   historyLength: number;
   isInitialLoading?: boolean;
 }
-
-// Similarity calculation for topic matching
-const calculateSimilarity = (str1: string, str2: string): number => {
-  if (!str1 || !str2) return 0;
-  const s1 = str1.toLowerCase();
-  const s2 = str2.toLowerCase();
-  if (s1 === s2) return 1;
-  
-  const words1 = new Set(s1.split(/\s+/).filter(w => w.length > 2));
-  const words2 = new Set(s2.split(/\s+/).filter(w => w.length > 2));
-  
-  if (words1.size === 0 || words2.size === 0) return 0;
-  
-  let intersection = 0;
-  words1.forEach(w => { if (words2.has(w)) intersection++; });
-  
-  return intersection / Math.max(words1.size, words2.size);
-};
-
-// Find canonical topic ID with similarity matching
-const findCanonicalTopicId = (topicName: string | undefined | null, existingTopics: Map<string, string>): string => {
-  if (!topicName || typeof topicName !== 'string') {
-    return `topic_unknown_${Math.random().toString(36).substring(7)}`;
-  }
-  
-  const normalized = topicName.toLowerCase().replace(/\s+/g, '_');
-  const directId = `topic_${normalized}`;
-  
-  if (existingTopics.has(directId)) {
-    return directId;
-  }
-  
-  for (const [existingId, existingName] of existingTopics.entries()) {
-    if (calculateSimilarity(topicName, existingName) >= 0.5) {
-      return existingId;
-    }
-  }
-  
-  existingTopics.set(directId, topicName);
-  return directId;
-};
 
 export default function KnowledgePage({
   kgData,
@@ -99,6 +68,9 @@ export default function KnowledgePage({
   const kgContainerRef = useRef<HTMLDivElement>(null);
   const graphRef = useRef<any>(null);
   const chatEndRef = useRef<HTMLDivElement>(null);
+  const kgArtifactRef = useRef<KGBuildArtifact | null>(null);
+  const [isEmbedding, setIsEmbedding] = useState(false);
+  const [embedProgress, setEmbedProgress] = useState({ current: 0, total: 3 });
 
   // Handle container resize
   useEffect(() => {
@@ -119,6 +91,55 @@ export default function KnowledgePage({
     return () => observer.disconnect();
   }, [kgBuilt]);
 
+  // Fingerprint of the kgData the last artifact was built from
+  const lastBuildKeyRef = useRef('');
+
+  // Clear the artifact when a rebuild is initiated (kgBuilt goes false)
+  useEffect(() => {
+    if (!kgBuilt) {
+      kgArtifactRef.current = null;
+      lastBuildKeyRef.current = '';
+    }
+  }, [kgBuilt]);
+
+  // Compute a stable data fingerprint so we can detect actual data changes
+  const kgDataKey = useMemo(() => {
+    if (kgData.length === 0) return '';
+    return kgData.map((m: any) => m.meetingId).sort().join(',');
+  }, [kgData]);
+
+  // Embedding pipeline: runs once when kgData is available after extraction
+  // Re-runs if kgData changes (rebuild or new meeting auto-synced)
+  useEffect(() => {
+    if (!kgBuilt || kgData.length === 0 || isEmbedding) return;
+    // Skip if artifact already built from the same data
+    if (kgArtifactRef.current && lastBuildKeyRef.current === kgDataKey) return;
+
+    let cancelled = false;
+    const run = async () => {
+      setIsEmbedding(true);
+      setEmbedProgress({ current: 0, total: 3 });
+      try {
+        const artifact = await buildKnowledgeGraphPipeline(
+          kgData as MeetingRecord[],
+          (current, total) => {
+            if (!cancelled) setEmbedProgress({ current, total });
+          }
+        );
+        if (!cancelled) {
+          kgArtifactRef.current = artifact;
+          lastBuildKeyRef.current = kgDataKey;
+        }
+      } catch (err) {
+        console.error('Embedding pipeline failed:', err);
+      } finally {
+        if (!cancelled) setIsEmbedding(false);
+      }
+    };
+    run();
+    return () => { cancelled = true; };
+  }, [kgBuilt, kgDataKey]);
+
   // Scroll chat to bottom
   useEffect(() => {
     if (chatEndRef.current) {
@@ -126,140 +147,31 @@ export default function KnowledgePage({
     }
   }, [chatMessages]);
 
-  // Build graph data with improved layout parameters
-  const buildGraphData = useCallback(() => {
-    const nodes: any[] = [];
-    const links: any[] = [];
-    const existingTopics = new Map<string, string>();
+  // Build graph data using the artifact from the embedding pipeline
+  // Falls back to a basic graph (no embedding features) while pipeline runs
+  const graphData = useMemo(() => {
+    if (kgData.length === 0) return { nodes: [], links: [] };
 
-    kgData.forEach((meeting) => {
-      const meetingNodeId = `meeting_${meeting.meetingId}`;
-      nodes.push({
-        id: meetingNodeId,
-        label: meeting.meetingTitle?.replace(/\.[^.]+$/, '') || 'Meeting',
-        type: 'meeting',
-        data: meeting,
-        color: '#141414',
-        size: 24
-      });
-
-      (meeting.topics || []).forEach((topic: any) => {
-        const topicId = findCanonicalTopicId(topic.name, existingTopics);
-        
-        if (!nodes.find(n => n.id === topicId)) {
-          const statusColor = 
-            topic.status === 'resolved' ? '#22c55e' :
-            topic.status === 'off-track' ? '#ef4444' :
-            topic.status === 'revisited' ? '#f59e0b' :
-            topic.status === 'ongoing' ? '#3b82f6' : '#8b5cf6';
-          nodes.push({
-            id: topicId,
-            label: topic.name,
-            type: 'topic',
-            data: { ...topic, allStatuses: [topic.status], allSummaries: [topic.summary] },
-            color: statusColor,
-            size: 16
-          });
-        } else {
-          const existingNode = nodes.find(n => n.id === topicId);
-          if (existingNode && existingNode.data) {
-            existingNode.data.allStatuses = [...(existingNode.data.allStatuses || []), topic.status];
-            existingNode.data.allSummaries = [...(existingNode.data.allSummaries || []), topic.summary];
-            if (topic.status === 'off-track') existingNode.color = '#ef4444';
-            else if (topic.status === 'revisited' && existingNode.color !== '#ef4444') existingNode.color = '#f59e0b';
-            existingNode.size = Math.min(existingNode.size + 4, 28);
-          }
-        }
-        
-        links.push({ source: meetingNodeId, target: topicId, type: 'meeting-topic' });
-      });
-
-      (meeting.decisions || []).forEach((dec: any, idx: number) => {
-        if (!dec || !dec.decision) return;
-        const decId = `decision_${meeting.meetingId}_${idx}`;
-        const decText = String(dec.decision);
-        nodes.push({
-          id: decId,
-          label: decText.length > 40 ? decText.substring(0, 40) + '...' : decText,
-          type: 'decision',
-          data: { ...dec, meetingId: meeting.meetingId, meetingTitle: meeting.meetingTitle },
-          color: '#f59e0b',
-          size: 10
-        });
-        
-        const topicId = findCanonicalTopicId(dec.relatedTopic || '', existingTopics);
-        if (nodes.find(n => n.id === topicId)) {
-          links.push({ source: topicId, target: decId, type: 'topic-decision' });
-        } else {
-          links.push({ source: meetingNodeId, target: decId, type: 'meeting-decision' });
-        }
-      });
-
-      (meeting.people || []).forEach((person: string) => {
-        if (!person) return;
-        const personId = `person_${person.toLowerCase().replace(/\s+/g, '_')}`;
-        if (!nodes.find(n => n.id === personId)) {
-          nodes.push({
-            id: personId,
-            label: person,
-            type: 'person',
-            data: { name: person, meetings: [meeting.meetingTitle] },
-            color: '#06b6d4',
-            size: 12
-          });
-        } else {
-          const existingNode = nodes.find(n => n.id === personId);
-          if (existingNode && existingNode.data) {
-            existingNode.data.meetings = [...(existingNode.data.meetings || []), meeting.meetingTitle];
-            existingNode.size = Math.min(existingNode.size + 2, 20);
-          }
-        }
-        links.push({ source: meetingNodeId, target: personId, type: 'meeting-person' });
-      });
-
-      (meeting.actionItems || []).forEach((item: any, idx: number) => {
-        if (!item || !item.task) return;
-        const itemId = `action_${meeting.meetingId}_${idx}`;
-        const taskText = String(item.task);
-        nodes.push({
-          id: itemId,
-          label: taskText.length > 35 ? taskText.substring(0, 35) + '...' : taskText,
-          type: 'action',
-          data: { ...item, meetingId: meeting.meetingId, meetingTitle: meeting.meetingTitle },
-          color: '#ec4899',
-          size: 9
-        });
-        
-        const topicId = findCanonicalTopicId(item.relatedTopic || '', existingTopics);
-        if (nodes.find(n => n.id === topicId)) {
-          links.push({ source: topicId, target: itemId, type: 'topic-action' });
-        } else {
-          links.push({ source: meetingNodeId, target: itemId, type: 'meeting-action' });
-        }
-        
-        const ownerId = `person_${(item.owner || '').toLowerCase().replace(/\s+/g, '_')}`;
-        if (item.owner && nodes.find(n => n.id === ownerId)) {
-          links.push({ source: ownerId, target: itemId, type: 'person-action' });
-        }
-      });
-    });
-
-    // Filter nodes if filter is active
-    let filteredNodes = nodes;
-    let filteredLinks = links;
-    
-    if (filterType) {
-      filteredNodes = nodes.filter(n => n.type === filterType || n.type === 'meeting');
-      const nodeIds = new Set(filteredNodes.map(n => n.id));
-      filteredLinks = links.filter(l => {
-        const sourceId = typeof l.source === 'object' ? l.source.id : l.source;
-        const targetId = typeof l.target === 'object' ? l.target.id : l.target;
-        return nodeIds.has(sourceId) && nodeIds.has(targetId);
-      });
+    const artifact = kgArtifactRef.current;
+    if (artifact && artifact.embeddings.size) {
+      return buildGraphDataUtil(
+        kgData as MeetingRecord[],
+        artifact.embeddings,
+        artifact.meetingEdgeMatrix,
+        artifact.relationships,
+        filterType
+      );
     }
 
-    return { nodes: filteredNodes, links: filteredLinks };
-  }, [kgData, filterType]);
+    // Fallback: build a basic graph from raw kgData without embeddings
+    return buildGraphDataUtil(
+      kgData as MeetingRecord[],
+      new Map(),           // empty embeddings
+      new Map(),           // empty edge matrix
+      [],                  // no relationships
+      filterType
+    );
+  }, [kgDataKey, filterType, isEmbedding]);
 
   // Search functionality
   const handleSearch = useCallback((query: string) => {
@@ -268,41 +180,10 @@ export default function KnowledgePage({
       setSearchResults([]);
       return;
     }
-
     setIsSearching(true);
-    const lowerQuery = query.toLowerCase();
-    const results: any[] = [];
-
-    // Search through all nodes
-    const graphData = buildGraphData();
-    graphData.nodes.forEach(node => {
-      const labelMatch = node.label?.toLowerCase().includes(lowerQuery);
-      const typeMatch = node.type?.toLowerCase().includes(lowerQuery);
-      
-      let dataMatch = false;
-      if (node.data) {
-        if (node.type === 'meeting') {
-          dataMatch = (node.data.topics || []).some((t: any) => 
-            t.name?.toLowerCase().includes(lowerQuery) || 
-            t.summary?.toLowerCase().includes(lowerQuery)
-          );
-        } else if (node.type === 'topic') {
-          dataMatch = node.data.summary?.toLowerCase().includes(lowerQuery);
-        } else if (node.type === 'decision') {
-          dataMatch = node.data.decision?.toLowerCase().includes(lowerQuery);
-        } else if (node.type === 'action') {
-          dataMatch = node.data.task?.toLowerCase().includes(lowerQuery);
-        }
-      }
-
-      if (labelMatch || typeMatch || dataMatch) {
-        results.push(node);
-      }
-    });
-
-    setSearchResults(results.slice(0, 10));
+    setSearchResults(searchNodes(query, graphData.nodes));
     setIsSearching(false);
-  }, [buildGraphData]);
+  }, [graphData]);
 
   // Focus on a node from search
   const focusOnNode = (node: any) => {
@@ -310,9 +191,7 @@ export default function KnowledgePage({
     setSearchQuery('');
     setSearchResults([]);
     
-    // Find the node in the graph and center on it
     if (graphRef.current) {
-      const graphData = buildGraphData();
       const graphNode = graphData.nodes.find((n: any) => n.id === node.id);
       if (graphNode && graphNode.x !== undefined && graphNode.y !== undefined) {
         graphRef.current.centerAt(graphNode.x, graphNode.y, 1000);
@@ -320,97 +199,26 @@ export default function KnowledgePage({
     }
   };
 
-  // Find related meetings for a given meeting ID based on shared topics, people, decisions
-  const findRelatedMeetings = useCallback((meetingId: string) => {
-    const currentMeeting = kgData.find(m => m.meetingId === meetingId);
-    if (!currentMeeting) return [];
+  // O(1) related meetings lookup from pre-built edge matrix
+  const findRelatedMeetings = useCallback((meetingId: string): MeetingEdge[] => {
+    const artifact = kgArtifactRef.current;
+    if (!artifact) return [];
+    return findRelatedMeetingsUtil(meetingId, artifact.meetingEdgeMatrix);
+  }, [isEmbedding]);
 
-    const relatedMeetings: Array<{
-      meetingId: string;
-      meetingTitle: string;
-      sharedTopics: Array<{ name: string; currentStatus: string; otherStatus: string; currentSummary: string; otherSummary: string }>;
-      sharedPeople: string[];
-      sharedDecisionThemes: string[];
-      relevanceScore: number;
-    }> = [];
-
-    const currentTopics = new Set((currentMeeting.topics || [])
-      .filter((t: any) => t && t.name)
-      .map((t: any) => t.name.toLowerCase()));
-    const currentPeople = new Set((currentMeeting.people || [])
-      .filter((p: string) => p)
-      .map((p: string) => p.toLowerCase()));
-
-    kgData.forEach(otherMeeting => {
-      if (otherMeeting.meetingId === meetingId) return;
-
-      const sharedTopics: Array<{ name: string; currentStatus: string; otherStatus: string; currentSummary: string; otherSummary: string }> = [];
-      const sharedPeople: string[] = [];
-      const sharedDecisionThemes: string[] = [];
-
-      // Find shared topics with fuzzy matching
-      (otherMeeting.topics || []).forEach((otherTopic: any) => {
-        if (!otherTopic || !otherTopic.name) return;
-        const otherName = otherTopic.name.toLowerCase();
-        // Check for exact or similar match
-        let matchedCurrentTopic: any = null;
-        (currentMeeting.topics || []).forEach((currentTopic: any) => {
-          if (!currentTopic || !currentTopic.name) return;
-          const similarity = calculateSimilarity(currentTopic.name, otherTopic.name);
-          if (similarity >= 0.4 || currentTopic.name.toLowerCase() === otherName) {
-            matchedCurrentTopic = currentTopic;
-          }
-        });
-        if (matchedCurrentTopic) {
-          sharedTopics.push({
-            name: otherTopic.name,
-            currentStatus: matchedCurrentTopic.status,
-            otherStatus: otherTopic.status,
-            currentSummary: matchedCurrentTopic.summary,
-            otherSummary: otherTopic.summary
-          });
-        }
-      });
-
-      // Find shared people
-      (otherMeeting.people || []).forEach((person: string) => {
-        if (person && currentPeople.has(person.toLowerCase())) {
-          sharedPeople.push(person);
-        }
-      });
-
-      // Find shared decision themes (fuzzy)
-      (otherMeeting.decisions || []).forEach((otherDec: any) => {
-        (currentMeeting.decisions || []).forEach((currentDec: any) => {
-          if (calculateSimilarity(currentDec.decision, otherDec.decision) >= 0.3) {
-            sharedDecisionThemes.push(otherDec.relatedTopic || 'General');
-          }
-        });
-      });
-
-      const relevanceScore = sharedTopics.length * 3 + sharedPeople.length * 2 + sharedDecisionThemes.length;
-      
-      if (relevanceScore > 0) {
-        relatedMeetings.push({
-          meetingId: otherMeeting.meetingId,
-          meetingTitle: otherMeeting.meetingTitle,
-          sharedTopics,
-          sharedPeople: [...new Set(sharedPeople)],
-          sharedDecisionThemes: [...new Set(sharedDecisionThemes)],
-          relevanceScore
-        });
-      }
-    });
-
-    // Sort by relevance score descending
-    return relatedMeetings.sort((a, b) => b.relevanceScore - a.relevanceScore);
-  }, [kgData]);
-
-  // Expandable Meeting Card Component
-  const ExpandableMeetingCard = ({ related, idx }: { related: any, idx: number }) => {
+  // Expandable Meeting Card Component — now receives MeetingEdge
+  const ExpandableMeetingCard = ({ related, idx }: { related: MeetingEdge, idx: number }) => {
     const [isExpanded, setIsExpanded] = useState(false);
-    const relatedMeetingData = kgData.find(m => m.meetingId === related.meetingId);
+    const relatedMeetingData = related.meeting;
     if (!relatedMeetingData) return null;
+
+    const REL_BADGE_COLORS: Record<string, string> = {
+      continuation: 'bg-blue-100 text-blue-700',
+      resolution: 'bg-green-100 text-green-700',
+      escalation: 'bg-red-100 text-red-700',
+      recurring: 'bg-amber-100 text-amber-700',
+      reference: 'bg-purple-100 text-purple-700',
+    };
     
     return (
       <div key={idx} className="bg-gradient-to-br from-purple-50/80 to-blue-50/80 rounded-xl border border-purple-100/50 overflow-hidden transition-all duration-300 hover:shadow-md">
@@ -422,21 +230,21 @@ export default function KnowledgePage({
           <div className="flex-1 min-w-0 pr-3">
             <div className="flex items-center gap-2 mb-1.5">
               <span className="text-sm font-bold text-gray-800 truncate group-hover:text-purple-700 transition-colors">
-                {related.meetingTitle?.replace(/\.[^.]+$/, '') || 'Meeting'}
+                {relatedMeetingData.meetingTitle?.replace(/\.[^.]+$/, '') || 'Meeting'}
               </span>
               <span className="text-[9px] px-2 py-0.5 bg-purple-200/50 text-purple-800 rounded-md font-mono shrink-0 font-medium">
-                {related.relevanceScore} pts
+                {related.totalScore.toFixed(1)} pts
               </span>
             </div>
-            <div className="text-[10px] text-gray-500 truncate flex items-center gap-1.5">
-              {related.sharedTopics.length > 0 && (
-                <span className="flex items-center gap-1 bg-white/60 px-1.5 py-0.5 rounded text-gray-600">
-                  <MessageSquare className="w-3 h-3 text-purple-400" /> {related.sharedTopics.length}
+            <div className="text-[10px] text-gray-500 truncate flex items-center gap-1.5 flex-wrap">
+              {related.relationships.length > 0 && related.relationships.map((r, rIdx) => (
+                <span key={rIdx} className={`text-[8px] px-1.5 py-0.5 rounded font-mono ${REL_BADGE_COLORS[r.relationshipType] || 'bg-gray-100 text-gray-600'}`}>
+                  {r.relationshipType}
                 </span>
-              )}
-              {related.sharedPeople.length > 0 && (
+              ))}
+              {related.embeddingScore > 0 && (
                 <span className="flex items-center gap-1 bg-white/60 px-1.5 py-0.5 rounded text-gray-600">
-                  <Users className="w-3 h-3 text-cyan-400" /> {related.sharedPeople.length}
+                  sim: {(related.embeddingScore * 100).toFixed(0)}%
                 </span>
               )}
             </div>
@@ -450,22 +258,22 @@ export default function KnowledgePage({
         {isExpanded && (
           <div className="p-3 pt-0 border-t border-purple-100 bg-white/40">
             <div className="pt-3">
-              {/* Why This Meeting is Connected */}
-              <div className="mb-3 p-2 bg-white/70 rounded border border-purple-200">
-                <span className="text-[9px] font-mono uppercase text-purple-700 block mb-1">🔗 Connection Details:</span>
-                <div className="text-[10px] text-gray-700">
-                  {related.sharedTopics.length > 0 && (
-                    <span className="block mb-1">
-                      <strong>Topics:</strong> {related.sharedTopics.map((t:any) => t.name).join(', ')}
-                    </span>
-                  )}
-                  {related.sharedPeople.length > 0 && (
-                    <span className="block mb-1">
-                      <strong>People:</strong> {related.sharedPeople.join(', ')}
-                    </span>
-                  )}
+              {/* Contextual Relationships */}
+              {related.relationships.length > 0 && (
+                <div className="mb-3 space-y-1.5">
+                  {related.relationships.map((r, rIdx) => (
+                    <div key={rIdx} className="p-2 bg-white/70 rounded border border-purple-200">
+                      <div className="flex items-center gap-2 mb-1">
+                        <span className={`text-[8px] px-1.5 py-0.5 rounded font-mono font-medium ${REL_BADGE_COLORS[r.relationshipType] || 'bg-gray-100 text-gray-600'}`}>
+                          {r.relationshipType}
+                        </span>
+                        <span className="text-[8px] text-gray-400 font-mono">{r.confidence}</span>
+                      </div>
+                      <p className="text-[10px] text-gray-700">{r.sharedThread}</p>
+                    </div>
+                  ))}
                 </div>
-              </div>
+              )}
               
               {/* What Was Discussed in That Meeting - All Topics */}
               {(relatedMeetingData.topics || []).length > 0 && (
@@ -475,39 +283,22 @@ export default function KnowledgePage({
                     What Was Discussed:
                   </span>
                   <div className="space-y-1.5">
-                    {(relatedMeetingData.topics || []).map((topic: any, tIdx: number) => {
-                      const isShared = related.sharedTopics.some((st:any) => 
-                        calculateSimilarity(st.name, topic.name) >= 0.4
-                      );
-                      const sharedTopic = related.sharedTopics.find((st:any) => 
-                        calculateSimilarity(st.name, topic.name) >= 0.4
-                      );
-                      
-                      return (
-                        <div key={tIdx} className={`p-2 rounded ${isShared ? 'bg-amber-50 border border-amber-200' : 'bg-white/80'}`}>
-                          <div className="flex items-start justify-between gap-2 mb-1">
-                            <span className="text-[10px] font-semibold text-gray-800 flex items-center gap-1">
-                              {isShared && <span className="text-amber-600" title="Shared with current meeting">⭐</span>}
-                              {topic.name}
-                            </span>
-                            <span className={`text-[8px] px-1 py-0.5 rounded font-mono shrink-0 ${
-                              topic.status === 'resolved' ? 'bg-green-100 text-green-700' :
-                              topic.status === 'off-track' ? 'bg-red-100 text-red-700' :
-                              topic.status === 'revisited' ? 'bg-yellow-100 text-yellow-700' :
-                              topic.status === 'ongoing' ? 'bg-blue-100 text-blue-700' : 'bg-purple-100 text-purple-700'
-                            }`}>{topic.status}</span>
-                          </div>
-                          <p className="text-[9px] text-gray-600 leading-relaxed line-clamp-2 hover:line-clamp-none transition-all">"{topic.summary}"</p>
-                          {isShared && sharedTopic && (
-                            <div className="mt-1 pt-1 border-t border-amber-200/50">
-                              <p className="text-[8px] text-amber-800">
-                                Status: {sharedTopic.otherStatus} → {sharedTopic.currentStatus}
-                              </p>
-                            </div>
-                          )}
+                    {(relatedMeetingData.topics || []).map((topic: any, tIdx: number) => (
+                      <div key={tIdx} className="p-2 rounded bg-white/80">
+                        <div className="flex items-start justify-between gap-2 mb-1">
+                          <span className="text-[10px] font-semibold text-gray-800">
+                            {topic.name}
+                          </span>
+                          <span className={`text-[8px] px-1 py-0.5 rounded font-mono shrink-0 ${
+                            topic.status === 'resolved' ? 'bg-green-100 text-green-700' :
+                            topic.status === 'off-track' ? 'bg-red-100 text-red-700' :
+                            topic.status === 'revisited' ? 'bg-yellow-100 text-yellow-700' :
+                            topic.status === 'ongoing' ? 'bg-blue-100 text-blue-700' : 'bg-purple-100 text-purple-700'
+                          }`}>{topic.status}</span>
                         </div>
-                      );
-                    })}
+                        <p className="text-[9px] text-gray-600 leading-relaxed line-clamp-2 hover:line-clamp-none transition-all">"{topic.summary}"</p>
+                      </div>
+                    ))}
                   </div>
                 </div>
               )}
@@ -555,31 +346,20 @@ export default function KnowledgePage({
     setIsChatting(true);
 
     try {
-      // Build context from knowledge graph
-      const context = kgData.map(meeting => ({
-        title: meeting.meetingTitle,
-        topics: meeting.topics?.map((t: any) => `${t.name} (${t.status}): ${t.summary}`).join('; '),
-        decisions: meeting.decisions?.map((d: any) => d.decision).join('; '),
-        people: meeting.people?.join(', '),
-        actions: meeting.actionItems?.map((a: any) => `${a.owner}: ${a.task}`).join('; ')
-      }));
+      const artifact = kgArtifactRef.current;
+      const systemPrompt = artifact
+        ? buildChatContext(
+            kgData as MeetingRecord[],
+            artifact.meetingEdgeMatrix,
+            artifact.relationships
+          )
+        : `You are a helpful assistant that answers questions about the user's meeting knowledge graph.\n${kgData.map((m: any, i: number) => `Meeting ${i + 1}: ${m.meetingTitle}\n- Topics: ${(m.topics || []).map((t: any) => `${t.name} (${t.status}): ${t.summary}`).join('; ') || 'None'}\n- Decisions: ${(m.decisions || []).map((d: any) => d.decision).join('; ') || 'None'}\n- People: ${(m.people || []).join(', ') || 'None'}\n- Actions: ${(m.actionItems || []).map((a: any) => `${a.owner}: ${a.task}`).join('; ') || 'None'}`).join('\n\n')}\n\nAnswer the user's question based on this data. Be concise and helpful.`;
 
-      const systemPrompt = `You are a helpful assistant that answers questions about the user's meeting knowledge graph. 
-You have access to the following meeting data:
+      const geminiApiKey = import.meta.env.VITE_GEMINI_API_KEY || import.meta.env.GEMINI_API_KEY || process.env.GEMINI_API_KEY;
+      if (!geminiApiKey) throw new Error('Missing Gemini API key');
 
-${context.map((m, i) => `
-Meeting ${i + 1}: ${m.title}
-- Topics: ${m.topics || 'None'}
-- Decisions: ${m.decisions || 'None'}
-- People: ${m.people || 'None'}
-- Action Items: ${m.actions || 'None'}
-`).join('\n')}
-
-Answer the user's question based on this data. Be concise and helpful. If you can't find relevant information, say so.`;
-
-      const geminiApiKey = import.meta.env.VITE_GEMINI_API_KEY || import.meta.env.GEMINI_API_KEY || "AIzaSyB1McBfQnEy2boqAHu5GrGYex5ZMzEpxCQ";
       const response = await fetch(
-        `https://generativelanguage.googleapis.com/v1beta/models/gemini-3.1-flash-lite-preview:generateContent?key=${geminiApiKey}`,
+        `https://generativelanguage.googleapis.com/v1beta/models/gemini-3-flash-preview:generateContent?key=${geminiApiKey}`,
         {
           method: 'POST',
           headers: { 'Content-Type': 'application/json' },
@@ -715,6 +495,23 @@ Answer the user's question based on this data. Be concise and helpful. If you ca
                 <span>Extracting latest meeting data...</span>
               </motion.div>
             )}
+            {isEmbedding && kgBuilt && (
+              <motion.div
+                initial={{ opacity: 0, y: -20 }}
+                animate={{ opacity: 1, y: 0 }}
+                exit={{ opacity: 0, y: -20 }}
+                className="absolute top-4 left-1/2 transform -translate-x-1/2 z-50 bg-gradient-to-r from-purple-600 to-blue-600 text-white px-5 py-2.5 rounded-full shadow-lg flex items-center gap-3 text-xs font-mono"
+              >
+                <Loader2 className="w-3 h-3 animate-spin" />
+                <span>
+                  {embedProgress.current === 1 && 'Embedding topics & meetings...'}
+                  {embedProgress.current === 2 && 'Extracting cross-meeting relationships...'}
+                  {embedProgress.current === 3 && 'Building edge matrix & graph...'}
+                  {embedProgress.current === 0 && 'Preparing embedding pipeline...'}
+                </span>
+                <span className="text-white/60">{embedProgress.current}/{embedProgress.total}</span>
+              </motion.div>
+            )}
           </AnimatePresence>
 
           {!kgBuilt && !isExtractingNewKG ? (
@@ -823,15 +620,16 @@ Answer the user's question based on this data. Be concise and helpful. If you ca
 
                 <ForceGraph2D
                   ref={graphRef}
-                  graphData={buildGraphData()}
+                  graphData={graphData}
                   width={kgDimensions.width}
                   height={kgDimensions.height}
                   nodeLabel={(node: any) => `${node.type.toUpperCase()}: ${node.label}`}
                   nodeColor={(node: any) => node.color}
                   nodeVal={(node: any) => node.size}
-                  linkColor={() => '#e5e5e5'}
-                  linkWidth={(link: any) => link.dashed ? 2 : 1.5}
-                  linkLineDash={(link: any) => link.dashed ? [5, 5] : undefined}
+                  linkColor={(link: any) => link.type === 'meeting-sibling' ? (link.color || '#9ca3af') : '#e5e5e5'}
+                  linkWidth={(link: any) => link.type === 'meeting-sibling' ? Math.min(1 + (link.weight || 0) / 5, 2) : 1.5}
+                  linkLineDash={(link: any) => link.type === 'meeting-sibling' ? [4, 3] : undefined}
+                  linkLabel={(link: any) => link.type === 'meeting-sibling' && link.label ? link.label : ''}
                   minZoom={0.3}
                   maxZoom={10}
                   onNodeClick={(node: any) => {
