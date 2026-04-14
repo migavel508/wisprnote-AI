@@ -48,8 +48,8 @@ export default function Auth() {
       >
         <div className="bg-white border-2 border-[#141414] shadow-[8px_8px_0px_0px_rgba(20,20,20,1)] p-8">
           <div className="flex flex-col items-center mb-10">
-            <div className="bg-[#141414] p-3 rounded-xl mb-4">
-              <Layers className="w-8 h-8 text-[#E4E3E0]" />
+            <div className="bg-[#141414] p-2 rounded-xl mb-4">
+              <img src="/logo.png" alt="Logo" className="w-8 h-8 rounded-lg object-cover" />
             </div>
             <h1 className="text-3xl font-bold tracking-tighter uppercase">Wisprnote AI</h1>
             <p className="text-[10px] font-mono uppercase opacity-50 mt-2 tracking-widest">Intelligent Audio Intelligence</p>
