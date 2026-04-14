@@ -65,6 +65,7 @@ import {
   saveAsset,
   getAssets,
   GeneratedAsset,
+  saveKnowledgeGraph,
   saveKnowledgeGraphBatch,
   getKnowledgeGraph,
   KnowledgeGraphEntry,
@@ -505,7 +506,7 @@ export default function App() {
       const syncMissingMeetingsToKG = async () => {
         // Find tasks in history that don't have a corresponding entry in kgData
         const kgTaskIds = new Set(kgData.map(kg => kg.meetingId));
-        const missingTasks = history.filter(task => task.id && !kgTaskIds.has(task.id) && task.status === 'completed');
+        const missingTasks = history.filter(task => task.id && !kgTaskIds.has(task.id) && task.status === 'completed' && task.transcription && task.transcription.trim().length > 0);
         
         if (missingTasks.length === 0) return;
         
@@ -539,7 +540,7 @@ export default function App() {
               
               // Respect API rate limits
               if (i < missingTasks.length - 1) {
-                await new Promise(resolve => setTimeout(resolve, 3000));
+                await new Promise(resolve => setTimeout(resolve, 5000));
               }
             } catch (err) {
               console.error(`Failed to auto-extract KG for ${task.filename}:`, err);
@@ -558,54 +559,118 @@ export default function App() {
     if (history.length === 0 || isLoadingKG) return;
     setIsLoadingKG(true);
     setSelectedNode(null);
-    setKgProgress({ current: 0, total: history.length });
-    
+
+    // ── Shared rate limiter + concurrent worker pool ─────────────────────────
+    // Free-tier Gemini = 15 RPM → 1 token every 4.2 s.
+    // JS is single-threaded so nextSlotAt++ is race-free across workers.
+    const CONCURRENCY = 3;
+    const SLOT_MS = 4200;
+    let nextSlotAt = 0;
+    const rateLimit = async () => {
+      const wait = nextSlotAt - Date.now();
+      if (wait > 0) await new Promise(r => setTimeout(r, wait));
+      nextSlotAt = Date.now() + SLOT_MS;
+    };
+
+    // ── Determine which meetings still need extraction ────────────────────────
+    // Load the latest snapshot from Supabase so a partial previous run is reused.
+    let latestKgData = kgData;
     try {
-      const results = [];
-      // Process sequentially to avoid Gemini API 429 Too Many Requests rate limits
-      for (let i = 0; i < history.length; i++) {
-        const task = history[i];
+      const fresh = await getKnowledgeGraph();
+      if (fresh && fresh.length > 0) {
+        latestKgData = fresh.map(entry => ({
+          meetingId: entry.task_id,
+          meetingTitle: entry.meeting_title,
+          topics: entry.topics || [],
+          decisions: entry.decisions || [],
+          people: entry.people || [],
+          actionItems: entry.action_items || [],
+          references: entry.refs || [],
+        }));
+      }
+    } catch {
+      // proceed with in-memory snapshot
+    }
+
+    const processedIds = new Set(latestKgData.map((k: any) => k.meetingId));
+    const allCompleted = history.filter(t => t.id && t.status === 'completed');
+
+    // Meetings not yet in the KG go first; already-processed ones are reused as-is
+    const toExtract = allCompleted.filter(t => !processedIds.has(t.id!));
+    const alreadyDone = allCompleted
+      .filter(t => processedIds.has(t.id!))
+      .map(t => latestKgData.find((k: any) => k.meetingId === t.id)!);
+
+    // Seed UI immediately with what we already have so the graph stays visible
+    const accumulated = [...alreadyDone];
+    setKgData([...accumulated]);
+    setKgBuilt(alreadyDone.length > 0);
+    setKgProgress({ current: 0, total: toExtract.length });
+
+    console.log(`KG rebuild: ${alreadyDone.length} cached, ${toExtract.length} to extract`);
+
+    // Work-stealing queue: workers grab the next index atomically (safe in JS)
+    let qi = 0;
+    let doneCount = 0;
+
+    const runWorker = async () => {
+      while (qi < toExtract.length) {
+        const i = qi++; // atomic in single-threaded JS
+        if (i >= toExtract.length) break;
+
+        const task = toExtract[i];
+        const hasTranscription = !!(task.transcription && task.transcription.trim().length > 0);
+
+        let result: any;
+        if (hasTranscription) {
+          await rateLimit(); // serialise API slots across all workers
+          try {
+            result = await extractKnowledgeGraph(task.id!, task.filename, task.transcription);
+          } catch (err) {
+            console.error(`KG extraction failed for "${task.filename}":`, err);
+            result = { meetingId: task.id!, meetingTitle: task.filename, topics: [], decisions: [], people: [], actionItems: [], references: [] };
+          }
+        } else {
+          result = { meetingId: task.id!, meetingTitle: task.filename, topics: [], decisions: [], people: [], actionItems: [], references: [] };
+        }
+
+        // Checkpoint-save immediately — progress is durable even if interrupted
         try {
-          const result = await extractKnowledgeGraph(task.id!, task.filename, task.transcription);
-          results.push(result);
-        } catch (taskErr) {
-          console.error(`Failed to extract KG for meeting ${task.id}:`, taskErr);
-          // Push empty/fallback data so we don't drop the meeting entirely
-          results.push({ meetingId: task.id!, meetingTitle: task.filename, topics: [], decisions: [], people: [], actionItems: [], refs: [] });
+          await saveKnowledgeGraph({
+            task_id: result.meetingId,
+            meeting_title: result.meetingTitle,
+            topics: result.topics || [],
+            decisions: result.decisions || [],
+            people: result.people || [],
+            action_items: result.actionItems || [],
+            refs: result.references || [],
+          });
+        } catch (saveErr) {
+          console.error(`Checkpoint save failed for "${task.filename}":`, saveErr);
         }
-        setKgProgress({ current: i + 1, total: history.length });
-        
-        // Wait 3 seconds between requests to respect free tier rate limits (~15 RPM)
-        if (i < history.length - 1) {
-          await new Promise(resolve => setTimeout(resolve, 3000));
-        }
+
+        accumulated.push(result);
+        setKgData([...accumulated]);
+        setKgBuilt(true);
+        setKgProgress({ current: ++doneCount, total: toExtract.length });
       }
-      
-      // Persist to Supabase
-      const entriesToSave: KnowledgeGraphEntry[] = results.map(r => ({
-        task_id: r.meetingId,
-        meeting_title: r.meetingTitle,
-        topics: r.topics || [],
-        decisions: r.decisions || [],
-        people: r.people || [],
-        action_items: r.actionItems || [],
-        refs: r.references || []
-      }));
-      
-      try {
-        await saveKnowledgeGraphBatch(entriesToSave);
-        console.log('Knowledge graph persisted to Supabase');
-      } catch (saveErr) {
-        console.error('Failed to persist KG to Supabase:', saveErr);
-        // Continue anyway - we still have the data in memory
-      }
-      
-      setKgData(results);
-      setKgBuilt(true);
-    } catch (err) {
-      console.error('KG build error:', err);
-      setError('Failed to build knowledge graph.');
+    };
+
+    try {
+      // Launch up to CONCURRENCY workers; they race to drain the queue
+      await Promise.all(
+        Array.from({ length: Math.min(CONCURRENCY, toExtract.length || 1) }, runWorker)
+      );
     } finally {
+      // Reset kgBuilt momentarily so KnowledgePage re-triggers the embedding pipeline
+      // on the complete dataset (not needed if nothing new was extracted)
+      if (toExtract.length > 0) {
+        setKgBuilt(false);
+        setKgData([...accumulated]);
+        requestAnimationFrame(() => {
+          setKgBuilt(true);
+        });
+      }
       setIsLoadingKG(false);
       setKgProgress({ current: 0, total: 0 });
     }
