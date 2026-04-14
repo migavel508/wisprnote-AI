@@ -1,1 +1,0 @@
-window.SIDEBAR_ITEMS = {"mod":["base","development","discovery","error","installation","log"],"struct":["Connected","Session"]};

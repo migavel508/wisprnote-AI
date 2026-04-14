@@ -1,1 +1,0 @@
-window.SIDEBAR_ITEMS = {"mod":["lock","proc"],"struct":["Error","Status"],"type":["Err","Result","Type"]};

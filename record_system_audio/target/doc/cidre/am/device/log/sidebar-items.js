@@ -1,1 +1,0 @@
-window.SIDEBAR_ITEMS = {"fn":["add_file_descriptor","remove_file_descriptor","set_level"]};

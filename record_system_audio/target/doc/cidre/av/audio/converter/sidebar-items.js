@@ -1,1 +1,0 @@
-window.SIDEBAR_ITEMS = {"enum":["InputStatus","OutputStatus","PrimeMethod"],"struct":["Converter","PrimeInfo"],"type":["InputBlock"]};

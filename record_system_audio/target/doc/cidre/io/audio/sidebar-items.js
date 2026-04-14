@@ -1,1 +1,0 @@
-window.SIDEBAR_ITEMS = {"mod":["bidirectional_term","input_term","output_term"]};

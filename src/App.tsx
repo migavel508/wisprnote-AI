@@ -84,6 +84,14 @@ import {
   getMostRecentIncompleteProgress,
   ProcessingProgress 
 } from './services/progressStorage';
+import {
+  checkSystemAudioAvailable,
+  startSystemAudioRecording,
+  stopSystemAudioRecording,
+  checkRealtimeServerAvailable,
+  connectTranscriptStream,
+  RecordingMode,
+} from './services/nativeRecorderService';
 
 import Auth from './components/Auth';
 import ChatPage from './pages/ChatPage';
@@ -188,6 +196,14 @@ export default function App() {
   const mediaRecorderRef = useRef<MediaRecorder | null>(null);
   const audioChunksRef = useRef<Blob[]>([]);
   const timerRef = useRef<NodeJS.Timeout | null>(null);
+
+  // Native Desktop Recording
+  const [nativeServerAvailable, setNativeServerAvailable] = useState(false);
+  const [desktopRecordingMode, setDesktopRecordingMode] = useState<RecordingMode>('batch');
+  const [realtimeTranscript, setRealtimeTranscript] = useState<string[]>([]);
+  const [interimTranscript, setInterimTranscript] = useState('');
+  const wsRef = useRef<WebSocket | null>(null);
+  const realtimeTranscriptRef = useRef<string[]>([]);
 
   // Notebooks (manual notes) state
   const [activeNote, setActiveNote] = useState<ManualNote | null>(null);
@@ -385,12 +401,27 @@ export default function App() {
   };
 
 
+  // Check if native system audio (Tauri) and realtime server (web_transcribe) are available
+  useEffect(() => {
+    checkSystemAudioAvailable().then(setNativeServerAvailable);
+    checkRealtimeServerAvailable().then(available => {
+      if (!available) {
+        // If realtime server not running, default to batch
+        setDesktopRecordingMode('batch');
+      }
+    });
+  }, []);
+
   // Cleanup recording on unmount
   useEffect(() => {
     return () => {
       if (timerRef.current) clearInterval(timerRef.current);
       if (mediaRecorderRef.current && mediaRecorderRef.current.state === 'recording') {
         mediaRecorderRef.current.stop();
+      }
+      if (wsRef.current) {
+        wsRef.current.close();
+        wsRef.current = null;
       }
     };
   }, []);
@@ -402,38 +433,99 @@ export default function App() {
   };
 
   const startRecording = async () => {
-    try {
-      const stream = await navigator.mediaDevices.getUserMedia({ audio: true });
-      const mediaRecorder = new MediaRecorder(stream);
-      mediaRecorderRef.current = mediaRecorder;
-      audioChunksRef.current = [];
+    if (nativeServerAvailable && desktopRecordingMode === 'batch') {
+      // ── Native Batch Recording (mic + system audio via Tauri) ──
+      try {
+        await startSystemAudioRecording();
+        setIsRecording(true);
+        setIsPaused(false);
+        setRecordingTime(0);
+        setFile(null);
+        setRealtimeTranscript([]);
+        realtimeTranscriptRef.current = [];
+        setInterimTranscript('');
 
-      mediaRecorder.ondataavailable = (event) => {
-        if (event.data.size > 0) {
-          audioChunksRef.current.push(event.data);
+        timerRef.current = setInterval(() => {
+          setRecordingTime(prev => prev + 1);
+        }, 1000);
+      } catch (err: any) {
+        console.error('Native recording error:', err);
+        setError(err.message || 'Failed to start system audio recording.');
+      }
+    } else if (desktopRecordingMode === 'realtime') {
+      // ── Real-time mode: web_transcribe provides both recording + Deepgram transcription ──
+      try {
+        const realtimeAvailable = await checkRealtimeServerAvailable();
+        if (!realtimeAvailable) {
+          setError('Real-time server not running. Start it with:\ncd record_system_audio && export DEEPGRAM_API_KEY="..." && cargo run --release --bin web_transcribe');
+          return;
         }
-      };
+        setIsRecording(true);
+        setIsPaused(false);
+        setRecordingTime(0);
+        setFile(null);
+        setRealtimeTranscript([]);
+        realtimeTranscriptRef.current = [];
+        setInterimTranscript('');
 
-      mediaRecorder.onstop = () => {
-        const audioBlob = new Blob(audioChunksRef.current, { type: 'audio/webm' });
-        const audioFile = new File([audioBlob], `Recording_${new Date().toISOString().replace(/[:.]/g, '-')}.webm`, { type: 'audio/webm' });
-        setFile(audioFile);
-        stream.getTracks().forEach(track => track.stop());
-      };
+        timerRef.current = setInterval(() => {
+          setRecordingTime(prev => prev + 1);
+        }, 1000);
 
-      mediaRecorder.start();
-      setIsRecording(true);
-      setIsPaused(false);
-      setRecordingTime(0);
-      setFile(null);
+        // Connect WebSocket for live transcripts from web_transcribe
+        const ws = connectTranscriptStream(
+          (text, isFinal) => {
+            if (isFinal) {
+              realtimeTranscriptRef.current = [...realtimeTranscriptRef.current, text];
+              setRealtimeTranscript(prev => [...prev, text]);
+              setInterimTranscript('');
+            } else {
+              setInterimTranscript(text);
+            }
+          },
+          (err) => console.error('Transcript WebSocket error:', err),
+          () => console.log('Transcript WebSocket closed'),
+        );
+        wsRef.current = ws;
+      } catch (err: any) {
+        console.error('Realtime recording error:', err);
+        setError(err.message || 'Failed to connect to real-time transcription server.');
+      }
+    } else {
+      // ── Browser Recording (microphone only via MediaRecorder) ──
+      try {
+        const stream = await navigator.mediaDevices.getUserMedia({ audio: true });
+        const mediaRecorder = new MediaRecorder(stream);
+        mediaRecorderRef.current = mediaRecorder;
+        audioChunksRef.current = [];
 
-      timerRef.current = setInterval(() => {
-        setRecordingTime(prev => prev + 1);
-      }, 1000);
+        mediaRecorder.ondataavailable = (event) => {
+          if (event.data.size > 0) {
+            audioChunksRef.current.push(event.data);
+          }
+        };
 
-    } catch (err) {
-      console.error('Error accessing microphone:', err);
-      setError('Could not access microphone. Please check permissions.');
+        mediaRecorder.onstop = () => {
+          const audioBlob = new Blob(audioChunksRef.current, { type: 'audio/webm' });
+          const audioFile = new File([audioBlob], `Recording_${new Date().toISOString().replace(/[:.]/g, '-')}.webm`, { type: 'audio/webm' });
+          setFile(audioFile);
+          stream.getTracks().forEach(track => track.stop());
+        };
+
+        mediaRecorder.start();
+        setIsRecording(true);
+        setIsPaused(false);
+        setRecordingTime(0);
+        setFile(null);
+
+        timerRef.current = setInterval(() => {
+          setRecordingTime(prev => prev + 1);
+        }, 1000);
+
+      } catch (err) {
+        console.error('Error accessing microphone:', err);
+        setError('Could not access microphone. Please check permissions.');
+      }
     }
   };
 
@@ -457,14 +549,103 @@ export default function App() {
     }
   };
 
-  const stopRecording = () => {
-    if (mediaRecorderRef.current && (mediaRecorderRef.current.state === 'recording' || mediaRecorderRef.current.state === 'paused')) {
+  const stopRecording = async () => {
+    if (timerRef.current) clearInterval(timerRef.current);
+
+    if (nativeServerAvailable && desktopRecordingMode === 'batch' && isRecording) {
+      // ── Stop Native Batch Recording (Tauri) ──
+      try {
+        const audioFile = await stopSystemAudioRecording();
+        setIsRecording(false);
+        setIsPaused(false);
+        setFile(audioFile);
+      } catch (err: any) {
+        console.error('Stop recording error:', err);
+        setError(err.message || 'Failed to stop recording.');
+        setIsRecording(false);
+        setIsPaused(false);
+      }
+    } else if (desktopRecordingMode === 'realtime' && isRecording) {
+      // ── Stop Real-time mode: collect transcript from WS ──
+      if (wsRef.current) {
+        wsRef.current.close();
+        wsRef.current = null;
+      }
+      setIsRecording(false);
+      setIsPaused(false);
+
+      // Use ref (always up-to-date) instead of state (stale closure)
+      const fullTranscript = realtimeTranscriptRef.current.join(' ');
+      if (fullTranscript.trim()) {
+        await processRealtimeTranscript(fullTranscript);
+      } else {
+        setError('No speech detected during recording. Make sure web_transcribe is running with DEEPGRAM_API_KEY.');
+      }
+    } else if (mediaRecorderRef.current && (mediaRecorderRef.current.state === 'recording' || mediaRecorderRef.current.state === 'paused')) {
+      // ── Stop Browser Recording ──
       mediaRecorderRef.current.stop();
       setIsRecording(false);
       setIsPaused(false);
-      if (timerRef.current) {
-        clearInterval(timerRef.current);
+    }
+  };
+
+  // Process real-time transcript: skip Gemini transcription, use Gemini only for intelligence
+  const processRealtimeTranscript = async (transcript: string) => {
+    try {
+      setStatus('processing');
+      setError(null);
+
+      const [summary, notes, meetingTitle] = await Promise.all([
+        generateSummary(transcript),
+        generateNotes(transcript),
+        generateMeetingTitle(transcript),
+      ]);
+
+      const newTask: TaskHistory = {
+        filename: meetingTitle,
+        transcription: transcript,
+        summary,
+        notes,
+        prompt,
+        status: 'completed',
+        duration: recordingTime,
+      };
+
+      const savedTask = await saveTask(newTask);
+
+      if (savedTask && savedTask.id) {
+        setIsExtractingNewKG(true);
+        extractKnowledgeGraph(savedTask.id, savedTask.filename, savedTask.transcription)
+          .then(async (result) => {
+            const entryToSave: KnowledgeGraphEntry = {
+              task_id: result.meetingId,
+              meeting_title: result.meetingTitle,
+              topics: result.topics || [],
+              decisions: result.decisions || [],
+              people: result.people || [],
+              action_items: result.actionItems || [],
+              refs: result.references || [],
+            };
+            await saveKnowledgeGraphBatch([entryToSave]);
+            setKgData(prevData => {
+              if (prevData.length === 0) return prevData;
+              const filtered = prevData.filter(d => d.meetingId !== result.meetingId);
+              return [...filtered, result];
+            });
+            console.log('Auto-extracted KG for realtime meeting');
+          })
+          .catch(err => console.error('Background KG extraction failed:', err))
+          .finally(() => setIsExtractingNewKG(false));
       }
+
+      setHistory([savedTask, ...history]);
+      setSelectedTask(savedTask);
+      setCurrentView('notes');
+      setNoteTab('notes');
+      setStatus('completed');
+    } catch (err: any) {
+      setError(err.message || 'Failed to process realtime transcript.');
+      setStatus('error');
     }
   };
 
@@ -1829,6 +2010,11 @@ export default function App() {
                   totalProgress={totalProgress}
                   inputMode={inputMode}
                   setInputMode={setInputMode}
+                  nativeServerAvailable={nativeServerAvailable}
+                  desktopRecordingMode={desktopRecordingMode}
+                  setDesktopRecordingMode={setDesktopRecordingMode}
+                  realtimeTranscript={realtimeTranscript}
+                  interimTranscript={interimTranscript}
                 />
               </motion.div>
             )}

@@ -1,1 +1,0 @@
-window.SIDEBAR_ITEMS = {"enum":["EventSrcState","EventTapLocation","EventTapPlacement","GesturePhase","MomentumScrollPhase","MouseButton","ScrollEventUnit","ScrollPhase"],"struct":["Event","EventField","EventFlags","EventSrc","EventTapOpts","EventType"],"type":["EventMask","EventSrcKeyboardType","EventTapCb","EventTapProxy"]};

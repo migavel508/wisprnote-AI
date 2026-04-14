@@ -1,1 +1,0 @@
-window.SIDEBAR_ITEMS = {"fn":["codec_type","component_range","constant","contains_alpha","contains_grayscale","contains_rgb","contains_y_cb_cr","four_cc","name"]};

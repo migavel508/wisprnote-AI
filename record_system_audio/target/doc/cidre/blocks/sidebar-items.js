@@ -1,1 +1,0 @@
-window.SIDEBAR_ITEMS = {"fn":["comp0","comp1","ok","result","retained1"],"struct":["Block","Completion","Desc1","Desc2","Esc","Flags","Layout1","Layout1Mut","NoEsc","Send","StackBlock","StaticBlock","Sync"],"type":["CompletionBlock","ErrCh","EscBlock","NoEscBlock","ResultCh","SendBlock","SyncBlock","WorkBlock"]};

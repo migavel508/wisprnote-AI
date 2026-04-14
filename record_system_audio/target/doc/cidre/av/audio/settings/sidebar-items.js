@@ -1,1 +1,0 @@
-window.SIDEBAR_ITEMS = {"fn":["channel_layout_key"],"mod":["all_formats_keys","bit_rate_strategy","encoder_propery_keys","file_keys","linear_pcm_keys","sample_rate_converer_algorithm","sample_rate_converter_keys"],"struct":["Quality"]};

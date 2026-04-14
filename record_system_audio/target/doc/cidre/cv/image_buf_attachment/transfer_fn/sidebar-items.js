@@ -1,1 +1,0 @@
-window.SIDEBAR_ITEMS = {"fn":["itu_r_2020","itu_r_2100_hlg","itu_r_709_2","linear","smpte_240m_1995","smpte_st_2084_pq","smpte_st_428_1","srgb","use_gamma"]};

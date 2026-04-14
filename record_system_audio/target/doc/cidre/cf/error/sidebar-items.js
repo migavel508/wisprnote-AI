@@ -1,1 +1,0 @@
-window.SIDEBAR_ITEMS = {"fn":["if_false","if_none","if_none_maybe"],"struct":["Error"],"type":["Domain"]};

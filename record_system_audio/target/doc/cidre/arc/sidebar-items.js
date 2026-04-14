@@ -1,1 +1,0 @@
-window.SIDEBAR_ITEMS = {"fn":["downgrade","rar_claim_value","rar_retain","rar_retain_option","return_opt_ar","return_opt_rar","return_rar"],"struct":["Allocated","Retained","ReturnedAutoReleased","Weak"],"trait":["Release","Retain"],"type":["A","R","Rar"]};

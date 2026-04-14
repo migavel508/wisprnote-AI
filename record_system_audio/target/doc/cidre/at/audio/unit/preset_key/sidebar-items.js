@@ -1,1 +1,0 @@
-window.SIDEBAR_ITEMS = {"fn":["cpu_load","data","element_name","file_refs","manufacturer","mas_data","name","part","preset_number","render_quality","subtype","type_","version","vst_data","vst_preset"]};

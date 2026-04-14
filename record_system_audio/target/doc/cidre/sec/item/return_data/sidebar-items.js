@@ -1,1 +1,0 @@
-window.SIDEBAR_ITEMS = {"fn":["attributes","cf_ref","data","persistent_ref"]};

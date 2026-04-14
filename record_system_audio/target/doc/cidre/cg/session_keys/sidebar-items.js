@@ -1,1 +1,0 @@
-window.SIDEBAR_ITEMS = {"fn":["console_set","login_done","on_console","user_id","user_name"]};

@@ -1,1 +1,0 @@
-window.SIDEBAR_ITEMS = {"fn":["profile0_lvl_10","profile0_lvl_45","profile3_lvl_45"]};

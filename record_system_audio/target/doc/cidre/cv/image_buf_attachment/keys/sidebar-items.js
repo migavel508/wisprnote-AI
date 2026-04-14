@@ -1,1 +1,0 @@
-window.SIDEBAR_ITEMS = {"fn":["aspect_ratio","clean_aperture","color_primaries","color_space","display_dimensions","display_mask_rect","display_mask_rect_stereo_left","display_mask_rect_stereo_right","field_count","field_detail","gamma_level","iic_profile","log_transfer_fn","preferred_clean_aperture","transfer_fn","ycbcr_matrix"]};

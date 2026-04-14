@@ -1,1 +1,0 @@
-window.SIDEBAR_ITEMS = {"constant":["NCCS"],"enum":["FlushArg","SetArg"],"struct":["BaudRate","CtrlFlags","InputFlags","LocalFlags","OutputFlags","Termios"],"type":["Cc"]};

@@ -1,1 +1,0 @@
-window.SIDEBAR_ITEMS = {"attr":["available","weak"],"enum":["Platform"],"fn":["ios_available","maccatalyst_available","macos_available","tvos_available","visionos_available","watchos_available"],"macro":["version"],"struct":["DlSym","OsVersion","VersionError"]};

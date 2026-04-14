@@ -1,1 +1,0 @@
-window.SIDEBAR_ITEMS = {"enum":["DistanceType"],"struct":["Embedding","Lang","LangRecognizer"],"type":["Distance"]};

@@ -1,1 +1,0 @@
-window.SIDEBAR_ITEMS = {"fn":["active_space_did_change","app_key","did_activate_app","did_change_file_labels","did_deactivate_app","did_hide_app","did_launch_app","did_terminate_app","did_unhide_app","did_wake","screens_did_sleep","screens_did_wake","session_did_become_active","session_did_resign_active","will_launch_app","will_power_off","will_sleep"]};

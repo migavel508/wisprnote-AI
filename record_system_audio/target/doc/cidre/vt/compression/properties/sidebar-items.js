@@ -1,1 +1,0 @@
-window.SIDEBAR_ITEMS = {"constant":["UNLIMITED_FRAME_DELAY_COUNT"],"mod":["encoder_spec_keys","frame_keys","h264_entropy_mode","hdr_metadata_insertion_mode","keys","preset_keys","profile_level","qp_modulation_level"]};

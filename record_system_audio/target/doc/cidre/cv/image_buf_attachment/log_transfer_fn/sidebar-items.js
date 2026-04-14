@@ -1,1 +1,0 @@
-window.SIDEBAR_ITEMS = {"fn":["apple_log","apple_log2"]};

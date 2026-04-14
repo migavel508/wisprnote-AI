@@ -1,1 +1,0 @@
-window.SIDEBAR_ITEMS = {"enum":["NotificationSuspensionBehavior"],"struct":["NotificationCenter","NotificationName"],"type":["NotificationCallback"]};

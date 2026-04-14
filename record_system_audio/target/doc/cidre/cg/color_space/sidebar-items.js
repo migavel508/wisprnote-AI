@@ -1,1 +1,0 @@
-window.SIDEBAR_ITEMS = {"enum":["ColorRenderingIntent","ColorSpaceModel"],"mod":["names"],"struct":["ColorSpace"]};

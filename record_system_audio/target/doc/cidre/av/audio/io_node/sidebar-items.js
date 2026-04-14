@@ -1,1 +1,0 @@
-window.SIDEBAR_ITEMS = {"enum":["VpOtherAudioDuckingLevel","VpSpeechActivityEvent"],"struct":["InputNode","IoNode","OutputNode","VpOtherAudioDuckingCfg"],"type":["InputBlock"]};

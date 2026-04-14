@@ -36,10 +36,35 @@ struct Channel {
 }
 
 #[derive(Debug, Deserialize)]
+struct Word {
+    word: String,
+    #[serde(default)]
+    speaker: Option<u32>,
+}
+
+#[derive(Debug, Deserialize)]
 struct Alternative {
     transcript: String,
     #[allow(dead_code)]
     confidence: f64,
+    #[serde(default)]
+    words: Vec<Word>,
+}
+
+fn group_words_by_speaker(words: &[Word]) -> Vec<(u32, String)> {
+    let mut segments: Vec<(u32, String)> = Vec::new();
+    for word in words {
+        let speaker = word.speaker.unwrap_or(0);
+        if let Some(last) = segments.last_mut() {
+            if last.0 == speaker {
+                last.1.push(' ');
+                last.1.push_str(&word.word);
+                continue;
+            }
+        }
+        segments.push((speaker, word.word.clone()));
+    }
+    segments
 }
 
 pub struct DeepgramTranscriber {
@@ -154,9 +179,18 @@ impl DeepgramTranscriber {
                             DeepgramResponse::Results { channel, is_final } => {
                                 if let Some(alt) = channel.alternatives.first() {
                                     if !alt.transcript.is_empty() {
-                                        let prefix = if is_final { "[FINAL] " } else { "[INTERIM] " };
-                                        let transcript = format!("{}{}", prefix, alt.transcript);
-                                        let _ = transcript_tx.send(transcript);
+                                        let kind = if is_final { "FINAL" } else { "INTERIM" };
+                                        let segments = group_words_by_speaker(&alt.words);
+                                        if segments.is_empty() {
+                                            // No diarization – emit as unknown speaker
+                                            let msg = format!("[{}:U] {}", kind, alt.transcript);
+                                            let _ = transcript_tx.send(msg);
+                                        } else {
+                                            for (speaker, text) in segments {
+                                                let msg = format!("[{}:{}] {}", kind, speaker, text);
+                                                let _ = transcript_tx.send(msg);
+                                            }
+                                        }
                                     }
                                 }
                             }

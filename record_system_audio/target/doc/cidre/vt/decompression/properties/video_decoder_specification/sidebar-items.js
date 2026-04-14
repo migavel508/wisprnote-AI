@@ -1,1 +1,0 @@
-window.SIDEBAR_ITEMS = {"fn":["enable_hardware_accelerated_video_decoder","preferred_decoder_gpu_registry_id","require_hardware_accelerated_video_decoder","required_decoder_gpu_registry_id"]};

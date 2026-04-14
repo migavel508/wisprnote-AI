@@ -1,1 +1,0 @@
-window.SIDEBAR_ITEMS = {"fn":["network_client_active","prevent_disk_idle","prevent_user_idle_display_sleep","prevent_user_idle_system_sleep"]};

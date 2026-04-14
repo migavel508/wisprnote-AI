@@ -1,1 +1,0 @@
-window.SIDEBAR_ITEMS = {"enum":["ActionAtItemEnd","AudiovisualBackgroundPlaybackPolicy","HdrMode","PlayerLooperItemOrdering","PlayerLooperStatus","Status","TimeControlStatus"],"mod":["item","item_output","item_track"],"struct":["Player","PlayerLooper","QueuePlayer","WaitingReason"]};

@@ -1,1 +1,0 @@
-window.SIDEBAR_ITEMS = {"enum":["MarkerMark","SpeechBoundery","VoiceGender","VoiceQuality"],"struct":["Marker","Synthesizer","Utterance","Voice","VoiceTraits"],"trait":["Delegate","DelegateImpl"]};

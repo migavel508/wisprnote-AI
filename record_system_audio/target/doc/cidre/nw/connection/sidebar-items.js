@@ -1,1 +1,0 @@
-window.SIDEBAR_ITEMS = {"enum":["State"],"mod":["send_completion"],"struct":["Connection"],"type":["BoolEventHandler","PathEventHandler","RecvCompletion","SendCompletion","StateChangedHandler"]};

@@ -1,1 +1,0 @@
-window.SIDEBAR_ITEMS = {"fn":["main"],"mod":["block","data","queue","source","time","work_item"],"struct":["Group","Object","Semaphore"],"type":["Block","Fn"]};

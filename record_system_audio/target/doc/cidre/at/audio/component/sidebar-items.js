@@ -1,1 +1,0 @@
-window.SIDEBAR_ITEMS = {"struct":["Component","Desc","Flags","InitializedState","Instance","InstanceRef","InstantiationOpts","Iter","UninitializedState"],"trait":["State"]};

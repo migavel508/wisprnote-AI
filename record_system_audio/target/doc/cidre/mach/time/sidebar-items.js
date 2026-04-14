@@ -1,1 +1,0 @@
-window.SIDEBAR_ITEMS = {"fn":["abs_time","approximate_time","continuous_approximate_time","continuous_time"],"struct":["TimeBaseInfo"]};

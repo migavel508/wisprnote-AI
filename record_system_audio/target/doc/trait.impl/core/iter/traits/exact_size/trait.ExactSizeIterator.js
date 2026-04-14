@@ -1,9 +1,0 @@
-(function() {
-    var implementors = Object.fromEntries([["cidre",[["impl&lt;'a, T&gt; <a class=\"trait\" href=\"https://doc.rust-lang.org/1.92.0/core/iter/traits/exact_size/trait.ExactSizeIterator.html\" title=\"trait core::iter::traits::exact_size::ExactSizeIterator\">ExactSizeIterator</a> for <a class=\"struct\" href=\"cidre/cf/array/struct.ArrayOfIterator.html\" title=\"struct cidre::cf::array::ArrayOfIterator\">ArrayOfIterator</a>&lt;'a, T&gt;<div class=\"where\">where\n    T: <a class=\"trait\" href=\"cidre/arc/trait.Retain.html\" title=\"trait cidre::arc::Retain\">Retain</a>,</div>"]]]]);
-    if (window.register_implementors) {
-        window.register_implementors(implementors);
-    } else {
-        window.pending_implementors = implementors;
-    }
-})()
-//{"start":57,"fragment_lengths":[542]}

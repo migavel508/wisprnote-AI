@@ -1,1 +1,0 @@
-window.SIDEBAR_ITEMS = {"enum":["MicInjectionPermission","RecordPermission"],"struct":["App"],"type":["MuteChangeHandler"]};

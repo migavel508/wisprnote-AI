@@ -1,1 +1,0 @@
-window.SIDEBAR_ITEMS = {"fn":["flip_horizontal_orientation","flip_vertical_orientation","rotation"]};

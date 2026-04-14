@@ -1,1 +1,0 @@
-window.SIDEBAR_ITEMS = {"type":["f32x2","f32x4","i16x2","i16x4","i32x2","i32x4","i64x2","i64x4","i8x2","i8x4","u16x2","u16x4","u32x2","u32x4","u64x2","u64x4","u8x2","u8x4"]};

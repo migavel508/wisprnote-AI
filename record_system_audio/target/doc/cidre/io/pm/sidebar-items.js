@@ -1,1 +1,0 @@
-window.SIDEBAR_ITEMS = {"mod":["assertions","err"],"struct":["Assertion","AssertionLevel","PowerFlags","UserActiveType"]};

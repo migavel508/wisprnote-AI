@@ -1,1 +1,0 @@
-window.SIDEBAR_ITEMS = {"fn":["crop_src_to_clean_aperture","letter_box","normal","trim"]};

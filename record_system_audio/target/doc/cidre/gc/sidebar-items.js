@@ -1,1 +1,0 @@
-window.SIDEBAR_ITEMS = {"enum":["ControllerPlayerIndex"],"mod":["key_codes"],"struct":["Color","Controller","ControllerButtonInput","ControllerElement","Device","DeviceLight","Keyboard","KeyboardInput","PhysicalInputProfile"],"type":["DeviceButtonInput","DeviceElement","KeyboardValueChangedHandler"]};

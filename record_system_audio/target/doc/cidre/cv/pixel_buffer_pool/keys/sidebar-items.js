@@ -1,1 +1,0 @@
-window.SIDEBAR_ITEMS = {"fn":["maximum_buffer_age","minimum_buffer_count"]};

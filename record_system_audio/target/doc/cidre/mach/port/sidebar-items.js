@@ -1,1 +1,0 @@
-window.SIDEBAR_ITEMS = {"struct":["Name","Right","Type"],"type":["Port"]};

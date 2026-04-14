@@ -1,1 +1,0 @@
-/Users/migavelaishwin/Downloads/wisprnote_exp/record_system_audio/target/release/realtime_transcribe: /Users/migavelaishwin/Downloads/wisprnote_exp/record_system_audio/src/deepgram_transcriber.rs /Users/migavelaishwin/Downloads/wisprnote_exp/record_system_audio/src/realtime_transcribe.rs

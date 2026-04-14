@@ -1,1 +1,0 @@
-window.SIDEBAR_ITEMS = {"fn":["horizontal_spacing","vertical_spacing"]};
