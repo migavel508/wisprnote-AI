@@ -1,1 +1,0 @@
-window.SIDEBAR_ITEMS = {"struct":["Cbs","CbsVersion","CreationFlags","Flags","Tap"],"type":["FinalizeCb","InitCb","PrepareCb","ProcessCb","UnprepareCb"]};

@@ -1,1 +1,0 @@
-window.SIDEBAR_ITEMS = {"struct":["MetadataOutput"],"trait":["MetadataOutputObjsDelegate","MetadataOutputObjsDelegateImpl"]};

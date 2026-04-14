@@ -1,1 +1,0 @@
-window.SIDEBAR_ITEMS = {"constant":["ALLOC_FAILED","INTERNAL","PARAM_ERR"]};

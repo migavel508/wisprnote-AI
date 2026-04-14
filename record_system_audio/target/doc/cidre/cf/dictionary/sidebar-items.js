@@ -1,1 +1,0 @@
-window.SIDEBAR_ITEMS = {"struct":["Dictionary","DictionaryMut","DictionaryOf","DictionaryOfMut","KeyCbs","ValueCbs"],"type":["ApplierFn","CopyDescCb","EqualCb","HashCb","ReleaseCb","RetainCb"]};

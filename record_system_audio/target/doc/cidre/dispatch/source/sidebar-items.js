@@ -1,1 +1,0 @@
-window.SIDEBAR_ITEMS = {"struct":["MachRecvFlags","MachSendFlags","MemoryPressureFlags","ProcFlags","Src","TimerFlags","TimerSrc","Type","VNodeFlags"],"type":["TypeDataAdd","TypeDataOr","TypeDataReplace","TypeMachRecv","TypeMachSend","TypeMemoryPressure","TypeProc","TypeRead","TypeSignal","TypeTimer","TypeVNode","TypeWrite"]};

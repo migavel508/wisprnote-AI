@@ -1,1 +1,0 @@
-window.SIDEBAR_ITEMS = {"fn":["label","localized_label","type_","value"]};

@@ -1,1 +1,0 @@
-window.SIDEBAR_ITEMS = {"fn":["input_method_kb_layout_override","set_input_method_kb_layout_override"],"mod":["categories","notifications","props","src_types"],"struct":["InputSrc"]};

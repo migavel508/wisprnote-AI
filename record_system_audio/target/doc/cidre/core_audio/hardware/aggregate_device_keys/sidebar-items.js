@@ -1,1 +1,0 @@
-window.SIDEBAR_ITEMS = {"fn":["clock_device","is_private","is_stacked","main_sub_device","name","sub_device_list","tap_auto_start","tap_list","uid"]};

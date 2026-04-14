@@ -1,1 +1,0 @@
-window.SIDEBAR_ITEMS = {"fn":["base_frame_qp","force_key_frame"]};

@@ -1,1 +1,0 @@
-window.SIDEBAR_ITEMS = {"fn":["cg_image_comaptibility","extended_pixels_bottom","height","io_surf_props","metal_compatability","metal_compatibility","pixel_format","plane_aligment","width"]};

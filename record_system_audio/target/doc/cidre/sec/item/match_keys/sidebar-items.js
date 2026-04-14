@@ -1,1 +1,0 @@
-window.SIDEBAR_ITEMS = {"fn":["case_insesitive","diacritic_case_insesitive","email_address_if_present","host_or_subdomain_of_host","issuers","item_list","limit","policy","subject_contains","subject_ends_with","subject_starts_with","subject_whole_string","trusted_only","valid_on_date","width_insesitive"]};

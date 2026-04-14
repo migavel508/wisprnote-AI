@@ -1,1 +1,0 @@
-window.SIDEBAR_ITEMS = {"constant":["HIGH","LOW","MAX","MEDIUM","MIN"]};

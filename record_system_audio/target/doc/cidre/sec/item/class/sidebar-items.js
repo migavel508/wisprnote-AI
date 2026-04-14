@@ -1,1 +1,0 @@
-window.SIDEBAR_ITEMS = {"fn":["certificate","generic_password","identitiy","internet_password","key"]};

@@ -1,1 +1,0 @@
-window.SIDEBAR_ITEMS = {"mod":["mtl4"],"struct":["AxisAlignedBoundingBox","ComponentTransform","PackedF32Quaternion","PackedF32x3","PackedF32x4x3"]};

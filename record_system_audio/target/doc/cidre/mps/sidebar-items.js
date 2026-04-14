@@ -1,1 +1,0 @@
-window.SIDEBAR_ITEMS = {"enum":["DType","ImageEdgeMode","ImageFeatureChannelFormat"],"mod":["graph"],"struct":["AliasingStrategy","DimensionSlice","ImageCoordinate","ImageRegion","KernelOpts","NdArray","NdArrayAllocator","NdArrayDesc","Offset","Origin","Region","ScaleTransform","Size"],"type":["Shape"]};

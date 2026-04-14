@@ -1,1 +1,0 @@
-window.SIDEBAR_ITEMS = {"fn":["algorithm","audio_quality"]};

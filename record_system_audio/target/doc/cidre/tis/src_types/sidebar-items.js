@@ -1,1 +1,0 @@
-window.SIDEBAR_ITEMS = {"fn":["character_palette","ink","kb_input_method_mode_enabled","kb_input_method_without_modes","kb_input_mode","kb_layout","kb_viewer"]};

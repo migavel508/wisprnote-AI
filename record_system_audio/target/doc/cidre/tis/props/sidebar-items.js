@@ -1,1 +1,0 @@
-window.SIDEBAR_ITEMS = {"fn":["bundle_id","icon_image_url","icon_ref","input_mode_id","input_src_category","input_src_id","input_src_is_ascii_capable","input_src_is_enable_capable","input_src_is_enabled","input_src_is_select_capable","input_src_is_selected","input_src_langs","input_src_type","localized_name","unicode_key_layout_data"]};

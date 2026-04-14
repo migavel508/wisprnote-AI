@@ -1,9 +1,0 @@
-(function() {
-    var implementors = Object.fromEntries([["cidre",[["impl <a class=\"trait\" href=\"https://doc.rust-lang.org/1.92.0/core/error/trait.Error.html\" title=\"trait core::error::Error\">Error</a> for <a class=\"struct\" href=\"cidre/cf/error/struct.Error.html\" title=\"struct cidre::cf::error::Error\">Error</a>"],["impl <a class=\"trait\" href=\"https://doc.rust-lang.org/1.92.0/core/error/trait.Error.html\" title=\"trait core::error::Error\">Error</a> for <a class=\"struct\" href=\"cidre/notify/struct.Error.html\" title=\"struct cidre::notify::Error\">Error</a>"],["impl <a class=\"trait\" href=\"https://doc.rust-lang.org/1.92.0/core/error/trait.Error.html\" title=\"trait core::error::Error\">Error</a> for <a class=\"struct\" href=\"cidre/ns/struct.Error.html\" title=\"struct cidre::ns::Error\">Error</a>"],["impl <a class=\"trait\" href=\"https://doc.rust-lang.org/1.92.0/core/error/trait.Error.html\" title=\"trait core::error::Error\">Error</a> for <a class=\"struct\" href=\"cidre/os/struct.Error.html\" title=\"struct cidre::os::Error\">Error</a>"],["impl&lt;T: <a class=\"trait\" href=\"cidre/arc/trait.Release.html\" title=\"trait cidre::arc::Release\">Release</a> + <a class=\"trait\" href=\"https://doc.rust-lang.org/1.92.0/core/error/trait.Error.html\" title=\"trait core::error::Error\">Error</a>&gt; <a class=\"trait\" href=\"https://doc.rust-lang.org/1.92.0/core/error/trait.Error.html\" title=\"trait core::error::Error\">Error</a> for <a class=\"struct\" href=\"cidre/arc/struct.Retained.html\" title=\"struct cidre::arc::Retained\">Retained</a>&lt;T&gt;"]]]]);
-    if (window.register_implementors) {
-        window.register_implementors(implementors);
-    } else {
-        window.pending_implementors = implementors;
-    }
-})()
-//{"start":57,"fragment_lengths":[1538]}

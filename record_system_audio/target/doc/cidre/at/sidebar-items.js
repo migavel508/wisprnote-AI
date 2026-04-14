@@ -1,1 +1,0 @@
-window.SIDEBAR_ITEMS = {"mod":["audio","ext_audio_file_err"],"struct":["ExtAudioFile","ExtAudioFilePropId","ExtAudioFileRef"]};

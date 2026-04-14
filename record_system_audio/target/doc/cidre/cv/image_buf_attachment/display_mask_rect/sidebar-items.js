@@ -1,1 +1,0 @@
-window.SIDEBAR_ITEMS = {"fn":["left_edge_points","rect_left","rect_top","rect_width","reference_raster_height","reference_raster_width","right_edge_points"]};

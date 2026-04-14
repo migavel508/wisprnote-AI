@@ -1,1 +1,0 @@
-window.SIDEBAR_ITEMS = {"enum":["State"],"struct":["ConnectionGroup"],"type":["ConnectionGroupNewConnectionHandler","ConnectionGroupRecvHandler","ConnectionGroupSendCompletion","ConnectionGroupStateChangeHandler"]};

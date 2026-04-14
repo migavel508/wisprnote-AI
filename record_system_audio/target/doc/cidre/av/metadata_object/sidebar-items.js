@@ -1,1 +1,0 @@
-window.SIDEBAR_ITEMS = {"struct":["BodyObj","CatBodyObj","CatHeadObj","DogBodyObj","DogHeadObj","FaceObj","HumanBodyObj","HumanFullBodyObj","MachineReadableCodeObj","Obj","SalientObj","Type"]};

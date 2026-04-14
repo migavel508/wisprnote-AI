@@ -1,1 +1,0 @@
-window.SIDEBAR_ITEMS = {"fn":["copy","supported_props_for_encoder"]};

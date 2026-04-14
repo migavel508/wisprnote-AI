@@ -1,1 +1,0 @@
-window.SIDEBAR_ITEMS = {"constant":["D3_TAG_TO_DICTIONARY","ID3_TAG_SIZE"]};

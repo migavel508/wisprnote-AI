@@ -1,1 +1,0 @@
-window.SIDEBAR_ITEMS = {"fn":["component_range_video_range"]};

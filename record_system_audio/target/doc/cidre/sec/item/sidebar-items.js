@@ -1,1 +1,0 @@
-window.SIDEBAR_ITEMS = {"fn":["class_key","matching"],"mod":["class","match_keys","match_limit","return_data"]};

@@ -1,1 +1,0 @@
-window.SIDEBAR_ITEMS = {"fn":["msg_receive","msg_send"],"mod":["boolean","kern_return","machine","message","policy","port","task","task_info","time","time_value","vm_map","vm_statistics","vm_types"]};

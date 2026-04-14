@@ -1,1 +1,0 @@
-window.SIDEBAR_ITEMS = {"fn":["main10_auto_lvl","main42210_auto_lvl","main_auto_lvl"]};

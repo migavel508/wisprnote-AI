@@ -1,1 +1,0 @@
-window.SIDEBAR_ITEMS = {"fn":["cryptor_subsample_auxiliary_data","depends_on_others","display_immediately","do_not_display","earlier_display_times_allowed","has_redundant_coding","hdr10plus_per_frame_data","is_depended_on_by_others","not_sync","partial_sync"]};

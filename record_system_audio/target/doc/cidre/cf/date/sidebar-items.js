@@ -1,1 +1,0 @@
-window.SIDEBAR_ITEMS = {"constant":["ABS_TIME_INTERVAL_SINCE_1904","ABS_TIME_INTERVAL_SINCE_1970"],"fn":["abs_time_current"],"struct":["Date"],"type":["AbsTime","TimeInterval"]};

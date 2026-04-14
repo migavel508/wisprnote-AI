@@ -1,1 +1,0 @@
-window.SIDEBAR_ITEMS = {"struct":["Array","ArrayMut","ArrayOf","ArrayOfIterator","ArrayOfMut","Cbs"],"type":["CopyDescCb","EqualCb","ReleaseCb","RetainCb"]};

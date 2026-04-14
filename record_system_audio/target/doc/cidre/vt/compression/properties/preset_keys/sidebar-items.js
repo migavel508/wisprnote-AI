@@ -1,1 +1,0 @@
-window.SIDEBAR_ITEMS = {"fn":["balanced","high_speed","hight_quality","video_conferencing"]};

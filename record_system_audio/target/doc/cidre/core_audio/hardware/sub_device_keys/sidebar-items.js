@@ -1,1 +1,0 @@
-window.SIDEBAR_ITEMS = {"fn":["channels_in","channels_out","drift_compensation","drift_quality","latency_in","latency_out","name","uid"]};

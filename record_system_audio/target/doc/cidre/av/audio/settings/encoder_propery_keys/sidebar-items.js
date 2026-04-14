@@ -1,1 +1,0 @@
-window.SIDEBAR_ITEMS = {"fn":["audio_quality","audio_quality_for_vbr","bit_depth_hint","bit_rate","bit_rate_per_channel","bit_rate_strategy"]};

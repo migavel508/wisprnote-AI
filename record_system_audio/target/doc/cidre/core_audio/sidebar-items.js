@@ -1,1 +1,0 @@
-window.SIDEBAR_ITEMS = {"enum":["TapMuteBehavior"],"mod":["hardware","hardware_err","hardware_tapping"],"struct":["Class","DeviceTransportType","Obj","PropAddr","PropElement","PropScope","PropSelector","StreamRangedDesc","StreamTerminalType","TapDesc"]};

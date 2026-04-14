@@ -1,1 +1,0 @@
-window.SIDEBAR_ITEMS = {"enum":["AuthorizationType"],"mod":["notification"],"struct":["Authorization","Workspace","WorkspaceOpenCfg"]};

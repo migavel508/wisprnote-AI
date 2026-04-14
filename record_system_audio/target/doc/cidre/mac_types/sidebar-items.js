@@ -1,1 +1,0 @@
-window.SIDEBAR_ITEMS = {"fn":["four_cc_fmt_debug","four_cc_to_str","four_cc_to_string"],"type":["FourCharCode","ResType","UniChar"]};

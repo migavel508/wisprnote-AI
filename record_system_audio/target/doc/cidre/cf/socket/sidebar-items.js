@@ -1,1 +1,0 @@
-window.SIDEBAR_ITEMS = {"struct":["CbType","Context","Error","Flags","Signature","Socket","Status"],"type":["Cb","NativeHandle"]};

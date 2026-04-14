@@ -1,1 +1,0 @@
-window.SIDEBAR_ITEMS = {"fn":["all_value","any_value","key","wildcard_value"]};

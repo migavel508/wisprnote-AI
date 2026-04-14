@@ -1,1 +1,0 @@
-window.SIDEBAR_ITEMS = {"enum":["WarpInterpolation"],"mod":["conversion","err","utilities"],"struct":["AffineTransformF32","AffineTransformF64","ArgbToYpCbCr","ArgbToYpCbCrMatrix","Buf","Error","Flags","PerpsectiveTransform","Status","YpCbCrArgbMatrix","YpCbCrPixelRange","YpCbCrToArgb"],"type":["CGAffineTransform","PixelCount","Result"]};

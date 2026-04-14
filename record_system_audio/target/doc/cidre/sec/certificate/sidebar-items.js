@@ -1,1 +1,0 @@
-window.SIDEBAR_ITEMS = {"mod":["oids","prop_keys","prop_types"]};
