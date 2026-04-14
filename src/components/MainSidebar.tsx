@@ -52,7 +52,7 @@ export default function MainSidebar({
     return (
       <button 
         onClick={onToggle}
-        className="fixed top-4 left-4 z-50 w-8 h-8 bg-white border border-[#e5e5e5] rounded-lg flex items-center justify-center text-[#595959] hover:text-[#1a1a1a] hover:bg-[#f5f5f5] transition-colors shadow-sm"
+        className="fixed top-12 left-4 z-50 w-8 h-8 bg-white border border-[#e5e5e5] rounded-lg flex items-center justify-center text-[#595959] hover:text-[#1a1a1a] hover:bg-[#f5f5f5] transition-colors shadow-sm"
       >
         <SidebarIcon size={16} strokeWidth={2} />
       </button>
@@ -74,8 +74,11 @@ export default function MainSidebar({
         transition={{ duration: 0.2 }}
         className="fixed md:relative h-screen w-[240px] bg-[#f8f8f7] border-r border-[#e5e5e5] flex flex-col flex-shrink-0 font-[system-ui] z-[70]"
       >
+      {/* Drag Region for Tauri / Window Controls padding */}
+      <div data-tauri-drag-region className="w-full h-8 flex-shrink-0 cursor-grab"></div>
+
       {/* Sidebar Toggle */}
-      <div className="flex items-center justify-start px-4 pt-4 pb-4">
+      <div className="flex items-center justify-start px-4 pt-1 pb-4">
         <button 
           onClick={onToggle}
           className="text-[#595959] hover:text-[#1a1a1a] transition-colors rounded-[8px] p-2 border border-[#e3e3e0] bg-white hover:bg-[#f5f5f5]"
