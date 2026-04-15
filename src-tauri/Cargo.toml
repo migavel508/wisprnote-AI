@@ -19,7 +19,10 @@ tauri = { version = "2", features = ["devtools"] }
 tauri-plugin-shell = "2"
 anyhow = "1"
 base64 = "0.22"
+tokio = { version = "1", features = ["rt-multi-thread", "time", "sync", "macros"] }
+tokio-tungstenite = { version = "0.24", features = ["native-tls"] }
+futures-util = "0.3"
 
 [target.'cfg(target_os = "macos")'.dependencies]
-cidre = { git = "https://github.com/yury/cidre", features = ["ca", "av", "cf", "ns"] }
+cidre = { git = "https://github.com/yury/cidre", features = ["ca", "av", "cf", "ns", "blocks", "async"] }
 ringbuf = "0.4"

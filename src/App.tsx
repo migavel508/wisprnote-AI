@@ -88,10 +88,12 @@ import {
   checkSystemAudioAvailable,
   startSystemAudioRecording,
   stopSystemAudioRecording,
-  checkRealtimeServerAvailable,
-  connectTranscriptStream,
+  startRealtimeRecording,
+  stopRealtimeRecording,
+  listenForTranscripts,
   RecordingMode,
 } from './services/nativeRecorderService';
+import { checkPermissions } from './services/permissionService';
 
 import Auth from './components/Auth';
 import ChatPage from './pages/ChatPage';
@@ -202,8 +204,9 @@ export default function App() {
   const [desktopRecordingMode, setDesktopRecordingMode] = useState<RecordingMode>('batch');
   const [realtimeTranscript, setRealtimeTranscript] = useState<string[]>([]);
   const [interimTranscript, setInterimTranscript] = useState('');
-  const wsRef = useRef<WebSocket | null>(null);
+  const unlistenRef = useRef<(() => void) | null>(null);
   const realtimeTranscriptRef = useRef<string[]>([]);
+  const [permissionsGranted, setPermissionsGranted] = useState(false);
 
   // Notebooks (manual notes) state
   const [activeNote, setActiveNote] = useState<ManualNote | null>(null);
@@ -401,13 +404,12 @@ export default function App() {
   };
 
 
-  // Check if native system audio (Tauri) and realtime server (web_transcribe) are available
+  // Check if native system audio (Tauri) is available + permissions
   useEffect(() => {
     checkSystemAudioAvailable().then(setNativeServerAvailable);
-    checkRealtimeServerAvailable().then(available => {
-      if (!available) {
-        // If realtime server not running, default to batch
-        setDesktopRecordingMode('batch');
+    checkPermissions().then((status) => {
+      if (status.microphone === 'authorized' && status.screen_recording === 'authorized') {
+        setPermissionsGranted(true);
       }
     });
   }, []);
@@ -419,9 +421,9 @@ export default function App() {
       if (mediaRecorderRef.current && mediaRecorderRef.current.state === 'recording') {
         mediaRecorderRef.current.stop();
       }
-      if (wsRef.current) {
-        wsRef.current.close();
-        wsRef.current = null;
+      if (unlistenRef.current) {
+        unlistenRef.current();
+        unlistenRef.current = null;
       }
     };
   }, []);
@@ -453,13 +455,28 @@ export default function App() {
         setError(err.message || 'Failed to start system audio recording.');
       }
     } else if (desktopRecordingMode === 'realtime') {
-      // ── Real-time mode: web_transcribe provides both recording + Deepgram transcription ──
+      // ── Real-time mode: integrated Deepgram transcription via Tauri ──
       try {
-        const realtimeAvailable = await checkRealtimeServerAvailable();
-        if (!realtimeAvailable) {
-          setError('Real-time server not running. Start it with:\ncd record_system_audio && export DEEPGRAM_API_KEY="..." && cargo run --release --bin web_transcribe');
+        const apiKey = import.meta.env.VITE_DEEPGRAM_API_KEY;
+        if (!apiKey) {
+          setError('VITE_DEEPGRAM_API_KEY not set in .env.local');
           return;
         }
+
+        // Start listening for transcript events BEFORE starting recording
+        const unlisten = await listenForTranscripts((text, isFinal) => {
+          if (isFinal) {
+            realtimeTranscriptRef.current = [...realtimeTranscriptRef.current, text];
+            setRealtimeTranscript(prev => [...prev, text]);
+            setInterimTranscript('');
+          } else {
+            setInterimTranscript(text);
+          }
+        });
+        unlistenRef.current = unlisten;
+
+        await startRealtimeRecording(apiKey);
+
         setIsRecording(true);
         setIsPaused(false);
         setRecordingTime(0);
@@ -471,25 +488,10 @@ export default function App() {
         timerRef.current = setInterval(() => {
           setRecordingTime(prev => prev + 1);
         }, 1000);
-
-        // Connect WebSocket for live transcripts from web_transcribe
-        const ws = connectTranscriptStream(
-          (text, isFinal) => {
-            if (isFinal) {
-              realtimeTranscriptRef.current = [...realtimeTranscriptRef.current, text];
-              setRealtimeTranscript(prev => [...prev, text]);
-              setInterimTranscript('');
-            } else {
-              setInterimTranscript(text);
-            }
-          },
-          (err) => console.error('Transcript WebSocket error:', err),
-          () => console.log('Transcript WebSocket closed'),
-        );
-        wsRef.current = ws;
       } catch (err: any) {
         console.error('Realtime recording error:', err);
-        setError(err.message || 'Failed to connect to real-time transcription server.');
+        if (unlistenRef.current) { unlistenRef.current(); unlistenRef.current = null; }
+        setError(err.message || 'Failed to start integrated real-time recording.');
       }
     } else {
       // ── Browser Recording (microphone only via MediaRecorder) ──
@@ -566,20 +568,31 @@ export default function App() {
         setIsPaused(false);
       }
     } else if (desktopRecordingMode === 'realtime' && isRecording) {
-      // ── Stop Real-time mode: collect transcript from WS ──
-      if (wsRef.current) {
-        wsRef.current.close();
-        wsRef.current = null;
-      }
-      setIsRecording(false);
-      setIsPaused(false);
+      // ── Stop Real-time mode: stop integrated Tauri recording ──
+      try {
+        const fullTranscript = await stopRealtimeRecording();
 
-      // Use ref (always up-to-date) instead of state (stale closure)
-      const fullTranscript = realtimeTranscriptRef.current.join(' ');
-      if (fullTranscript.trim()) {
-        await processRealtimeTranscript(fullTranscript);
-      } else {
-        setError('No speech detected during recording. Make sure web_transcribe is running with DEEPGRAM_API_KEY.');
+        if (unlistenRef.current) { unlistenRef.current(); unlistenRef.current = null; }
+        setIsRecording(false);
+        setIsPaused(false);
+
+        if (fullTranscript.trim()) {
+          await processRealtimeTranscript(fullTranscript);
+        } else {
+          // Fallback: use ref-accumulated transcripts
+          const refTranscript = realtimeTranscriptRef.current.join(' ');
+          if (refTranscript.trim()) {
+            await processRealtimeTranscript(refTranscript);
+          } else {
+            setError('No speech detected during recording.');
+          }
+        }
+      } catch (err: any) {
+        console.error('Stop realtime error:', err);
+        if (unlistenRef.current) { unlistenRef.current(); unlistenRef.current = null; }
+        setIsRecording(false);
+        setIsPaused(false);
+        setError(err.message || 'Failed to stop realtime recording.');
       }
     } else if (mediaRecorderRef.current && (mediaRecorderRef.current.state === 'recording' || mediaRecorderRef.current.state === 'paused')) {
       // ── Stop Browser Recording ──
@@ -2015,6 +2028,8 @@ export default function App() {
                   setDesktopRecordingMode={setDesktopRecordingMode}
                   realtimeTranscript={realtimeTranscript}
                   interimTranscript={interimTranscript}
+                  permissionsGranted={permissionsGranted}
+                  onPermissionsGranted={() => setPermissionsGranted(true)}
                 />
               </motion.div>
             )}

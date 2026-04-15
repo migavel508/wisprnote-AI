@@ -304,6 +304,216 @@ pub mod macos {
         Ok(())
     }
 
+    // ─── Realtime Recording with Deepgram Integration ──────────────────────────
+
+    const CHUNK_SIZE: usize = 4800;
+
+    use crate::deepgram_transcriber::DeepgramTranscriber;
+
+    pub struct RealtimeRecorder {
+        is_recording: Arc<AtomicBool>,
+        transcripts: Arc<Mutex<Vec<String>>>,
+        join_handle: Option<std::thread::JoinHandle<()>>,
+    }
+
+    impl RealtimeRecorder {
+        pub fn new() -> Self {
+            Self {
+                is_recording: Arc::new(AtomicBool::new(false)),
+                transcripts: Arc::new(Mutex::new(Vec::new())),
+                join_handle: None,
+            }
+        }
+
+        pub fn is_recording(&self) -> bool {
+            self.is_recording.load(Ordering::Relaxed)
+        }
+
+        pub fn start(&mut self, api_key: String, app_handle: tauri::AppHandle) -> Result<(), String> {
+            if self.is_recording.load(Ordering::Relaxed) {
+                return Err("Already recording in realtime mode".to_string());
+            }
+
+            if let Ok(mut t) = self.transcripts.lock() {
+                t.clear();
+            }
+
+            self.is_recording.store(true, Ordering::Relaxed);
+
+            let is_recording = self.is_recording.clone();
+            let transcripts = self.transcripts.clone();
+
+            let handle = std::thread::spawn(move || {
+                if let Err(e) = record_realtime(is_recording.clone(), transcripts, api_key, app_handle) {
+                    eprintln!("Realtime recording error: {}", e);
+                    is_recording.store(false, Ordering::Relaxed);
+                }
+            });
+
+            self.join_handle = Some(handle);
+            Ok(())
+        }
+
+        pub fn stop(&mut self) -> Result<String, String> {
+            if !self.is_recording.load(Ordering::Relaxed) {
+                return Err("Not recording".to_string());
+            }
+
+            self.is_recording.store(false, Ordering::Relaxed);
+
+            if let Some(handle) = self.join_handle.take() {
+                let _ = handle.join();
+            }
+
+            let transcripts = self.transcripts.lock().map_err(|e| e.to_string())?;
+            let clean: Vec<String> = transcripts
+                .iter()
+                .filter_map(|t| {
+                    if let Some(pos) = t.find("] ") {
+                        Some(t[pos + 2..].to_string())
+                    } else {
+                        None
+                    }
+                })
+                .collect();
+            Ok(clean.join(" "))
+        }
+    }
+
+    fn record_realtime(
+        is_recording: Arc<AtomicBool>,
+        transcripts: Arc<Mutex<Vec<String>>>,
+        api_key: String,
+        app_handle: tauri::AppHandle,
+    ) -> Result<(), anyhow::Error> {
+        use tauri::Emitter;
+
+        // Setup microphone
+        let mic_device = ca::System::default_input_device()?;
+        let mic_asbd = mic_device.input_asbd()?;
+        let mic_format = av::AudioFormat::with_asbd(&mic_asbd).unwrap();
+        let mic_common_format = mic_format.common_format();
+
+        // Setup system audio tap
+        let tap_desc = ca::TapDesc::with_mono_global_tap_excluding_processes(&ns::Array::new());
+        let tap = tap_desc.create_process_tap()?;
+        let tap_asbd = tap.asbd().unwrap();
+        let sample_rate = tap_asbd.sample_rate as u32;
+        let tap_format = av::AudioFormat::with_asbd(&tap_asbd).unwrap();
+        let tap_common_format = tap_format.common_format();
+
+        eprintln!("Realtime: Mic {} Hz {:?}, System {} Hz {:?}",
+            mic_asbd.sample_rate as u32, mic_common_format,
+            sample_rate, tap_common_format);
+
+        // Create ring buffers
+        let mic_rb = HeapRb::<f32>::new(BUFFER_SIZE);
+        let (mic_producer, mut mic_consumer) = mic_rb.split();
+        let mut mic_ctx = Box::new(Ctx { common_format: mic_common_format, producer: mic_producer });
+
+        let system_rb = HeapRb::<f32>::new(BUFFER_SIZE);
+        let (system_producer, mut system_consumer) = system_rb.split();
+        let mut system_ctx = Box::new(Ctx { common_format: tap_common_format, producer: system_producer });
+
+        // Create aggregate device for system audio
+        let sub_tap = cf::DictionaryOf::with_keys_values(
+            &[ca::sub_device_keys::uid()],
+            &[tap.uid().unwrap().as_type_ref()],
+        );
+
+        let agg_desc = cf::DictionaryOf::with_keys_values(
+            &[
+                ca::aggregate_device_keys::is_private(),
+                ca::aggregate_device_keys::tap_auto_start(),
+                ca::aggregate_device_keys::name(),
+                ca::aggregate_device_keys::uid(),
+                ca::aggregate_device_keys::tap_list(),
+            ],
+            &[
+                cf::Boolean::value_true().as_type_ref(),
+                cf::Boolean::value_false(),
+                cf::String::from_str("WisprnoteRealtimeCapture").as_ref(),
+                &cf::Uuid::new().to_cf_string(),
+                &cf::ArrayOf::from_slice(&[sub_tap.as_ref()]),
+            ],
+        );
+
+        // Start devices
+        let mic_proc_id = mic_device.create_io_proc_id(mic_io_proc, Some(&mut *mic_ctx))?;
+        let _mic_started = ca::device_start(mic_device, Some(mic_proc_id))?;
+
+        let agg_device = ca::AggregateDevice::with_desc(&agg_desc)?;
+        let system_proc_id = agg_device.create_io_proc_id(system_io_proc, Some(&mut *system_ctx))?;
+        let _system_started = ca::device_start(agg_device, Some(system_proc_id))?;
+
+        eprintln!("Realtime recording started - streaming to Deepgram");
+
+        // Create a dedicated tokio runtime for Deepgram WebSocket communication
+        let rt = tokio::runtime::Runtime::new()
+            .map_err(|e| anyhow::anyhow!("Failed to create tokio runtime: {}", e))?;
+
+        rt.block_on(async {
+            let mut transcriber = DeepgramTranscriber::new(api_key, sample_rate);
+            let mut chunk_buffer = Vec::with_capacity(CHUNK_SIZE);
+
+            while is_recording.load(Ordering::Relaxed) {
+                use ringbuf::traits::Consumer;
+
+                // Read and mix mic + system audio
+                while chunk_buffer.len() < CHUNK_SIZE {
+                    let mic_sample = mic_consumer.try_pop();
+                    let system_sample = system_consumer.try_pop();
+
+                    match (mic_sample, system_sample) {
+                        (Some(m), Some(s)) => chunk_buffer.push((m + s) * 0.5),
+                        (Some(m), None) => chunk_buffer.push(m),
+                        (None, Some(s)) => chunk_buffer.push(s),
+                        (None, None) => break,
+                    }
+                }
+
+                // Send audio chunk to Deepgram
+                if chunk_buffer.len() >= CHUNK_SIZE {
+                    let _ = transcriber.send_audio(chunk_buffer.clone());
+                    chunk_buffer.clear();
+                }
+
+                // Poll for transcripts and emit to frontend
+                while let Some(transcript) = transcriber.try_recv_transcript() {
+                    let _ = app_handle.emit("realtime-transcript", &transcript);
+
+                    // Accumulate FINAL transcripts
+                    if transcript.contains("[FINAL") {
+                        if let Ok(mut t) = transcripts.lock() {
+                            t.push(transcript.clone());
+                        }
+                    }
+                }
+
+                tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+            }
+
+            // Send remaining audio
+            if !chunk_buffer.is_empty() {
+                let _ = transcriber.send_audio(chunk_buffer);
+            }
+
+            // Drain remaining transcripts
+            tokio::time::sleep(std::time::Duration::from_millis(500)).await;
+            while let Some(transcript) = transcriber.try_recv_transcript() {
+                let _ = app_handle.emit("realtime-transcript", &transcript);
+                if transcript.contains("[FINAL") {
+                    if let Ok(mut t) = transcripts.lock() {
+                        t.push(transcript);
+                    }
+                }
+            }
+        });
+
+        eprintln!("Realtime recording stopped");
+        Ok(())
+    }
+
     /// Create a WAV file from f32 samples
     fn create_wav(samples: &[f32], sample_rate: u32) -> Vec<u8> {
         let channels: u16 = 1;
@@ -379,10 +589,34 @@ pub mod stub {
             0
         }
     }
+
+    pub struct RealtimeRecorder;
+
+    impl RealtimeRecorder {
+        pub fn new() -> Self {
+            Self
+        }
+
+        pub fn is_recording(&self) -> bool {
+            false
+        }
+
+        pub fn start(&mut self, _api_key: String, _app_handle: tauri::AppHandle) -> Result<(), String> {
+            Err("Realtime recording is only supported on macOS".to_string())
+        }
+
+        pub fn stop(&mut self) -> Result<String, String> {
+            Err("Realtime recording is only supported on macOS".to_string())
+        }
+    }
 }
 
 #[cfg(target_os = "macos")]
 pub use macos::SystemAudioRecorder;
+#[cfg(target_os = "macos")]
+pub use macos::RealtimeRecorder;
 
 #[cfg(not(target_os = "macos"))]
 pub use stub::SystemAudioRecorder;
+#[cfg(not(target_os = "macos"))]
+pub use stub::RealtimeRecorder;
