@@ -1,5 +1,3 @@
-const REALTIME_WS_URL = 'ws://localhost:3030/ws';
-
 export type RecordingMode = 'batch' | 'realtime';
 
 // ─── Tauri Detection ─────────────────────────────────────────────────────────
@@ -49,46 +47,40 @@ export async function isSystemAudioRecording(): Promise<boolean> {
   }
 }
 
-// ─── Real-time Transcription — via web_transcribe WS ─────────────────────────
-// User runs separately: cd record_system_audio && export DEEPGRAM_API_KEY="..." && cargo run --release --bin web_transcribe
+// ─── Real-time Transcription — Integrated via Tauri commands + events ────────
+// No separate server needed! Audio capture + Deepgram streaming runs inside the Tauri app.
 
-export async function checkRealtimeServerAvailable(): Promise<boolean> {
-  return new Promise((resolve) => {
-    try {
-      const ws = new WebSocket(REALTIME_WS_URL);
-      const timeout = setTimeout(() => { ws.close(); resolve(false); }, 2000);
-      ws.onopen = () => { clearTimeout(timeout); ws.close(); resolve(true); };
-      ws.onerror = () => { clearTimeout(timeout); resolve(false); };
-    } catch {
-      resolve(false);
-    }
-  });
+export async function startRealtimeRecording(apiKey: string): Promise<void> {
+  await tauriInvoke<void>('start_realtime_audio', { apiKey });
 }
 
-export function connectTranscriptStream(
+export async function stopRealtimeRecording(): Promise<string> {
+  return await tauriInvoke<string>('stop_realtime_audio');
+}
+
+export async function isRealtimeRecording(): Promise<boolean> {
+  if (!isTauri()) return false;
+  try {
+    return await tauriInvoke<boolean>('is_realtime_recording');
+  } catch {
+    return false;
+  }
+}
+
+export async function listenForTranscripts(
   onTranscript: (text: string, isFinal: boolean) => void,
-  onError?: (err: Event) => void,
-  onClose?: () => void,
-): WebSocket {
-  const ws = new WebSocket(REALTIME_WS_URL);
+): Promise<() => void> {
+  const { listen } = await import('@tauri-apps/api/event');
 
-  ws.onopen = () => {
-    console.log('[RealtimeWS] Connected to web_transcribe');
-  };
-
-  ws.onmessage = (event) => {
-    const raw = event.data as string;
-    // Format from web_transcribe: [FINAL:speaker] text  or  [INTERIM:speaker] text
-    // speaker can be: 0, 1, mic:0, mic:1, U, etc.
+  const unlisten = await listen<string>('realtime-transcript', (event) => {
+    const raw = event.payload;
+    // Format: [FINAL:speaker] text  or  [INTERIM:speaker] text
     const match = raw.match(/^\[(FINAL|INTERIM)[:\w]*\]\s*(.*)/);
     if (!match) return;
     const isFinal = match[1] === 'FINAL';
     const clean = match[2].trim();
     if (clean) onTranscript(clean, isFinal);
-  };
+  });
 
-  if (onError) ws.onerror = onError;
-  if (onClose) ws.onclose = () => onClose();
-
-  return ws;
+  return unlisten;
 }

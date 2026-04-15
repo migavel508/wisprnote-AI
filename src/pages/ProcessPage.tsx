@@ -17,15 +17,11 @@ import {
   Settings,
   Copy,
   Minus,
-  Search,
-  RotateCcw,
   Radio,
-  WifiOff,
-  Monitor,
-  Wifi,
   Layers
 } from 'lucide-react';
 import type { RecordingMode } from '../services/nativeRecorderService';
+import PermissionsGate from '../components/PermissionsGate';
 
 interface ProcessPageProps {
   file: File | null;
@@ -50,6 +46,8 @@ interface ProcessPageProps {
   setDesktopRecordingMode: (mode: RecordingMode) => void;
   realtimeTranscript: string[];
   interimTranscript: string;
+  permissionsGranted: boolean;
+  onPermissionsGranted: () => void;
 }
 
 type ViewState = 'collapsed' | 'expanded' | 'processing';
@@ -82,7 +80,9 @@ export default function ProcessPage({
   desktopRecordingMode,
   setDesktopRecordingMode,
   realtimeTranscript,
-  interimTranscript
+  interimTranscript,
+  permissionsGranted,
+  onPermissionsGranted
 }: ProcessPageProps) {
   const fileInputRef = useRef<HTMLInputElement>(null);
   const transcriptEndRef = useRef<HTMLDivElement>(null);
@@ -429,7 +429,7 @@ export default function ProcessPage({
             </div>
 
             {/* Content */}
-            <div className="flex-1 overflow-y-auto p-4 sm:p-6">
+            <div className={`flex-1 p-4 sm:p-6 ${isRecording && desktopRecordingMode === 'realtime' && inputMode === 'record' ? 'overflow-y-auto' : 'overflow-hidden'}`}>
               {inputMode === 'upload' ? (
                 /* Upload Mode */
                 <div 
@@ -486,63 +486,55 @@ export default function ProcessPage({
                 <div className="h-full flex flex-col">
                   {isRecording ? (
                     desktopRecordingMode === 'realtime' ? (
-                    /* ── Real-time Recording: compact controls + full transcript ── */
+                    /* ── Real-time Recording: compact controls + scrollable transcript ── */
                     <div className="flex flex-col h-full">
                       {/* Compact Top Bar */}
-                      <div className="flex items-center justify-between px-5 py-3 border-b border-[#141414]/5 flex-shrink-0">
-                        <div className="flex items-center gap-3">
-                          <span className="w-2 h-2 rounded-full bg-red-500 animate-pulse" />
-                          <span className="text-[13px] font-mono font-semibold text-[#141414]">{formatTime(recordingTime)}</span>
-                          <span className="text-[10px] px-2 py-0.5 rounded-full bg-red-50 text-red-500 font-medium">Real-time · Deepgram</span>
+                      <div className="flex items-center justify-between py-2 flex-shrink-0">
+                        <div className="flex items-center gap-2.5">
+                          <span className="w-1.5 h-1.5 rounded-full bg-red-500 animate-pulse" />
+                          <span className="text-[13px] font-mono font-semibold text-[#141414] tabular-nums">{formatTime(recordingTime)}</span>
+                          <span className="text-[10px] px-2 py-0.5 rounded-full bg-red-50 text-red-500 font-medium">Live</span>
                         </div>
                         <div className="flex items-center gap-2">
-                          <div className="flex items-end gap-0.5 h-4">
-                            {[...Array(8)].map((_, i) => (
+                          <div className="flex items-end gap-[3px] h-3.5">
+                            {[...Array(6)].map((_, i) => (
                               <motion.div
                                 key={i}
                                 animate={{ height: isPaused ? '30%' : ['30%', '100%', '30%'] }}
-                                transition={isPaused ? { duration: 0.3 } : { duration: 0.6, repeat: Infinity, delay: i * 0.06, ease: "easeInOut" }}
-                                className={`w-1 rounded-full ${isPaused ? 'bg-[#141414]/20' : 'bg-red-400'}`}
+                                transition={isPaused ? { duration: 0.3 } : { duration: 0.6, repeat: Infinity, delay: i * 0.07, ease: "easeInOut" }}
+                                className={`w-[3px] rounded-full ${isPaused ? 'bg-[#141414]/15' : 'bg-red-400'}`}
                               />
                             ))}
                           </div>
-                          <button onClick={stopRecording} className="ml-3 px-4 py-2 bg-red-500 text-white text-[12px] font-semibold rounded-full hover:bg-red-600 transition-all flex items-center gap-2">
-                            <StopCircle className="w-4 h-4" />
+                          <button onClick={stopRecording} className="ml-2 px-3.5 py-1.5 bg-red-500 text-white text-[12px] font-medium rounded-full hover:bg-red-600 transition-colors flex items-center gap-1.5">
+                            <StopCircle className="w-3.5 h-3.5" />
                             Stop
                           </button>
                         </div>
                       </div>
 
-                      {/* Full Transcript Panel */}
-                      <div className="flex-1 overflow-y-auto px-5 py-4">
-                        <div className="flex items-center gap-2 mb-4">
-                          <Wifi className="w-3.5 h-3.5 text-green-500" />
-                          <span className="text-[11px] font-semibold text-[#141414]/40 uppercase tracking-wider">Live Transcript</span>
-                          <span className="text-[10px] text-[#141414]/30 ml-auto">{realtimeTranscript.length} sentences</span>
+                      {/* Transcript — this is the only scrollable area */}
+                      <div className="flex-1 overflow-y-auto mt-2 -mx-4 sm:-mx-6 px-4 sm:px-6 border-t border-[#141414]/5 pt-3">
+                        <div className="flex items-center gap-2 mb-3">
+                          <span className="w-1.5 h-1.5 rounded-full bg-green-500"></span>
+                          <span className="text-[10px] font-semibold text-[#141414]/35 uppercase tracking-wider">Live Transcript</span>
+                          <span className="text-[10px] text-[#141414]/25 ml-auto tabular-nums">{realtimeTranscript.length}</span>
                         </div>
 
                         {realtimeTranscript.length === 0 && !interimTranscript ? (
-                          <div className="flex flex-col items-center justify-center py-16 text-[#141414]/30">
-                            <Mic className="w-10 h-10 mb-3 opacity-40" />
-                            <p className="text-[14px] font-medium">Waiting for speech...</p>
-                            <p className="text-[12px] mt-1">Speak into your mic or play system audio</p>
+                          <div className="flex flex-col items-center justify-center py-12 text-[#141414]/25">
+                            <p className="text-[13px]">Waiting for speech...</p>
                           </div>
                         ) : (
-                          <div className="space-y-3">
+                          <div className="space-y-1">
                             {realtimeTranscript.map((line, i) => (
-                              <div key={i} className="flex gap-3 py-2 border-b border-[#141414]/5 last:border-0">
-                                <span className="flex-shrink-0 text-[11px] font-mono text-[#141414]/30 pt-0.5 min-w-[48px]">
-                                  {new Date(Date.now() - (realtimeTranscript.length - i) * 3000).toLocaleTimeString('en-US', { hour: '2-digit', minute: '2-digit', second: '2-digit', hour12: true })}
-                                </span>
-                                <p className="text-[14px] text-[#141414]/85 leading-relaxed">{line}</p>
+                              <div key={i} className="py-1.5">
+                                <p className="text-[13px] text-[#141414]/80 leading-relaxed">{line}</p>
                               </div>
                             ))}
                             {interimTranscript && (
-                              <div className="flex gap-3 py-2">
-                                <span className="flex-shrink-0 text-[11px] font-mono text-[#141414]/20 pt-0.5 min-w-[48px]">
-                                  {new Date().toLocaleTimeString('en-US', { hour: '2-digit', minute: '2-digit', second: '2-digit', hour12: true })}
-                                </span>
-                                <p className="text-[14px] text-[#141414]/35 italic leading-relaxed">{interimTranscript}</p>
+                              <div className="py-1.5">
+                                <p className="text-[13px] text-[#141414]/30 italic leading-relaxed">{interimTranscript}</p>
                               </div>
                             )}
                             <div ref={transcriptEndRef} />
@@ -552,15 +544,13 @@ export default function ProcessPage({
                     </div>
                     ) : (
                     /* ── Batch Recording: centered controls ── */
-                    <div className="flex flex-col items-center justify-center h-full gap-8">
-                      {/* Timer */}
-                      <div className="text-[48px] font-mono font-bold text-[#141414] tracking-wider">
+                    <div className="flex flex-col items-center justify-center h-full gap-6">
+                      <div className="text-[42px] font-mono font-bold text-[#141414] tracking-wider tabular-nums">
                         {formatTime(recordingTime)}
                       </div>
                       
-                      {/* Wave Animation */}
-                      <div className="flex items-end justify-center gap-1 h-12 w-full max-w-[240px]">
-                        {[...Array(24)].map((_, i) => (
+                      <div className="flex items-end justify-center gap-[3px] h-8 w-full max-w-[180px]">
+                        {[...Array(20)].map((_, i) => (
                           <motion.div
                             key={i}
                             animate={{ 
@@ -572,120 +562,114 @@ export default function ProcessPage({
                               delay: i * 0.04,
                               ease: "easeInOut"
                             }}
-                            className={`w-1.5 rounded-full ${isPaused ? 'bg-[#141414]/30' : 'bg-red-500'}`}
+                            className={`w-[3px] rounded-full ${isPaused ? 'bg-[#141414]/20' : 'bg-red-400'}`}
                           />
                         ))}
                       </div>
 
-                      {/* Controls */}
-                      <div className="flex items-center gap-4">
+                      <div className="flex items-center gap-3">
                         {isPaused ? (
                           <button 
                             onClick={resumeRecording}
-                            className="w-14 h-14 bg-[#141414] text-white rounded-full flex items-center justify-center hover:bg-[#333] hover:scale-105 transition-all shadow-lg"
+                            className="w-11 h-11 bg-[#141414] text-white rounded-full flex items-center justify-center hover:bg-[#333] transition-colors"
                           >
-                            <PlayCircle className="w-7 h-7" />
+                            <PlayCircle className="w-5 h-5" />
                           </button>
                         ) : (
                           <button 
                             onClick={pauseRecording}
-                            className="w-14 h-14 bg-[#141414]/10 text-[#141414] rounded-full flex items-center justify-center hover:bg-[#141414]/20 hover:scale-105 transition-all"
+                            className="w-11 h-11 bg-[#141414]/8 text-[#141414]/60 rounded-full flex items-center justify-center hover:bg-[#141414]/15 transition-colors"
                           >
-                            <PauseCircle className="w-7 h-7" />
+                            <PauseCircle className="w-5 h-5" />
                           </button>
                         )}
                         
                         <button 
                           onClick={stopRecording}
-                          className="w-16 h-16 bg-red-500 text-white rounded-full flex items-center justify-center hover:bg-red-600 hover:scale-105 transition-all shadow-lg"
+                          className="w-12 h-12 bg-red-500 text-white rounded-full flex items-center justify-center hover:bg-red-600 transition-colors"
                         >
-                          <StopCircle className="w-8 h-8" />
+                          <StopCircle className="w-5.5 h-5.5" />
                         </button>
                       </div>
                       
-                      <span className={`text-[12px] font-mono uppercase tracking-widest ${
-                        isPaused ? 'text-[#141414]/50' : 'text-red-500 animate-pulse'
+                      <span className={`text-[11px] font-mono uppercase tracking-widest ${
+                        isPaused ? 'text-[#141414]/40' : 'text-red-400'
                       }`}>
-                        {isPaused ? 'Paused' : 'Recording...'}
-                        <span className="ml-2 text-[10px] px-2 py-0.5 rounded-full bg-[#141414]/10 text-[#141414]/60 normal-case">
-                          Batch · Mic+System
-                        </span>
+                        {isPaused ? 'Paused' : 'Recording'}
                       </span>
                     </div>
                     )
                   ) : file ? (
-                    <div className="flex flex-col items-center gap-6">
-                      <div className="w-20 h-20 rounded-2xl bg-green-100 flex items-center justify-center">
-                        <CheckCircle2 className="w-10 h-10 text-green-600" />
+                    <div className="flex flex-col items-center justify-center h-full gap-4">
+                      <div className="w-12 h-12 rounded-xl bg-green-50 flex items-center justify-center">
+                        <CheckCircle2 className="w-6 h-6 text-green-600" />
                       </div>
                       <div className="text-center">
-                        <p className="text-[16px] font-medium text-green-700 mb-1">Recording Saved</p>
-                        <p className="text-[14px] text-[#141414]/50">{formatTime(recordingTime)}</p>
+                        <p className="text-[14px] font-medium text-[#141414] mb-0.5">Recording saved</p>
+                        <p className="text-[12px] text-[#141414]/40 tabular-nums">{formatTime(recordingTime)}</p>
                       </div>
                       <button 
                         onClick={() => { setFile(null); startRecording(); }}
-                        className="text-[13px] text-[#141414]/50 hover:text-[#141414] underline"
+                        className="text-[12px] text-[#141414]/40 hover:text-[#141414] transition-colors"
                       >
                         Record again
                       </button>
                     </div>
                   ) : (
-                    <div className="flex flex-col items-center gap-6">
-                      <div className="w-24 h-24 rounded-full bg-[#141414]/5 flex items-center justify-center">
-                        <Mic className="w-12 h-12 text-[#141414]/30" />
-                      </div>
+                    <div className="flex flex-col items-center justify-center h-full">
+                      {nativeServerAvailable && !permissionsGranted ? (
+                        <PermissionsGate onAllGranted={onPermissionsGranted} />
+                      ) : (
+                        <div className="flex flex-col items-center gap-5">
+                          {/* Mode Selector — inline, compact */}
+                          {nativeServerAvailable && (
+                            <div className="flex flex-col items-center gap-2">
+                              <div className="flex bg-[#141414]/[0.04] rounded-lg p-0.5">
+                                <button
+                                  onClick={() => setDesktopRecordingMode('batch')}
+                                  className={`flex items-center gap-1.5 px-3.5 py-1.5 rounded-md text-[12px] font-medium transition-all ${
+                                    desktopRecordingMode === 'batch'
+                                      ? 'bg-white text-[#141414] shadow-sm'
+                                      : 'text-[#141414]/40 hover:text-[#141414]/60'
+                                  }`}
+                                >
+                                  <Layers className="w-3 h-3" />
+                                  Batch
+                                </button>
+                                <button
+                                  onClick={() => setDesktopRecordingMode('realtime')}
+                                  className={`flex items-center gap-1.5 px-3.5 py-1.5 rounded-md text-[12px] font-medium transition-all ${
+                                    desktopRecordingMode === 'realtime'
+                                      ? 'bg-white text-[#141414] shadow-sm'
+                                      : 'text-[#141414]/40 hover:text-[#141414]/60'
+                                  }`}
+                                >
+                                  <Radio className="w-3 h-3" />
+                                  Real-time
+                                </button>
+                              </div>
+                              <p className="text-[10px] text-[#141414]/30 text-center max-w-[260px]">
+                                {desktopRecordingMode === 'batch'
+                                  ? 'Mic + system audio · transcribed after stop'
+                                  : 'Live transcription via Deepgram'}
+                              </p>
+                            </div>
+                          )}
 
-                      {/* Desktop Recording Mode Selector */}
-                      {nativeServerAvailable && (
-                        <div className="flex flex-col items-center gap-3 w-full max-w-xs">
-                          <div className="flex items-center gap-1.5 text-[11px] font-medium text-[#141414]/40 uppercase tracking-wider">
-                            <Monitor className="w-3 h-3" />
-                            Desktop Audio Mode
-                          </div>
-                          <div className="flex bg-[#141414]/5 rounded-full p-1 w-full">
-                            <button
-                              onClick={() => setDesktopRecordingMode('batch')}
-                              className={`flex-1 flex items-center justify-center gap-2 px-4 py-2 rounded-full text-[13px] font-medium transition-all ${
-                                desktopRecordingMode === 'batch'
-                                  ? 'bg-[#141414] text-white shadow-sm'
-                                  : 'text-[#141414]/50 hover:text-[#141414]/80'
-                              }`}
-                            >
-                              <Layers className="w-3.5 h-3.5" />
-                              Batch
-                            </button>
-                            <button
-                              onClick={() => setDesktopRecordingMode('realtime')}
-                              className={`flex-1 flex items-center justify-center gap-2 px-4 py-2 rounded-full text-[13px] font-medium transition-all ${
-                                desktopRecordingMode === 'realtime'
-                                  ? 'bg-[#141414] text-white shadow-sm'
-                                  : 'text-[#141414]/50 hover:text-[#141414]/80'
-                              }`}
-                            >
-                              <Wifi className="w-3.5 h-3.5" />
-                              Real-time
-                            </button>
-                          </div>
-                          <p className="text-[11px] text-[#141414]/40 text-center leading-relaxed">
-                            {desktopRecordingMode === 'batch'
-                              ? 'Records mic + system audio via Tauri. Transcribed by Gemini after stop.'
-                              : 'Live transcription via Deepgram. Requires web_transcribe running.'}
-                          </p>
+                          <button 
+                            onClick={startRecording}
+                            className="group flex items-center gap-2.5 px-6 py-3 bg-[#141414] text-white text-[13px] font-medium rounded-full hover:bg-[#222] transition-colors"
+                          >
+                            <span className="w-2 h-2 rounded-full bg-red-500 group-hover:animate-pulse"></span>
+                            Start Recording
+                          </button>
+
+                          {!nativeServerAvailable && (
+                            <p className="text-[10px] text-[#141414]/25 text-center">
+                              Browser mic only — run as desktop app for system audio
+                            </p>
+                          )}
                         </div>
-                      )}
-
-                      <button 
-                        onClick={startRecording}
-                        className="px-8 py-4 bg-[#141414] text-white font-semibold text-[14px] rounded-full hover:bg-[#333] hover:scale-105 transition-all shadow-lg flex items-center gap-3"
-                      >
-                        <span className="w-2.5 h-2.5 rounded-full bg-red-500"></span>
-                        Start Recording
-                      </button>
-
-                      {!nativeServerAvailable && (
-                        <p className="text-[11px] text-[#141414]/30 text-center">
-                          Browser mic only. Run as Tauri desktop app for system audio capture.
-                        </p>
                       )}
                     </div>
                   )}
