@@ -1,7 +1,11 @@
-use tauri::Manager;
+use tauri::{Manager, Emitter};
+use tauri::tray::TrayIconEvent;
+use tauri::menu::{MenuBuilder, MenuItemBuilder};
 use std::sync::Mutex;
 
+mod audio_device;
 mod deepgram_transcriber;
+mod device_monitor;
 mod permissions;
 mod system_audio;
 use system_audio::SystemAudioRecorder;
@@ -85,6 +89,23 @@ fn is_realtime_recording(state: tauri::State<AppState>) -> bool {
     }
 }
 
+// ─── Audio Device Commands ───────────────────────────────────────────────────
+
+#[tauri::command]
+fn list_audio_devices() -> Result<Vec<audio_device::AudioDevice>, String> {
+    audio_device::list_all_devices()
+}
+
+#[tauri::command]
+fn get_default_input() -> Result<Option<audio_device::AudioDevice>, String> {
+    audio_device::get_default_input_device()
+}
+
+#[tauri::command]
+fn get_default_output() -> Result<Option<audio_device::AudioDevice>, String> {
+    audio_device::get_default_output_device()
+}
+
 // ─── Permission Commands ─────────────────────────────────────────────────────
 
 #[tauri::command]
@@ -134,6 +155,79 @@ pub fn run() {
             let window = app.get_webview_window("main").unwrap();
             window.set_title("Wisprnote AI").ok();
 
+            // Spawn audio device monitor — emits events when mic/speaker changes
+            let monitor_handle = app.handle().clone();
+            let (dev_tx, dev_rx) = std::sync::mpsc::channel();
+            let _monitor = device_monitor::spawn_monitor(dev_tx);
+            std::thread::spawn(move || {
+                while let Ok(change) = dev_rx.recv() {
+                    let event_name = match &change {
+                        device_monitor::DeviceChange::DefaultInputChanged => "audio-device-change",
+                        device_monitor::DeviceChange::DefaultOutputChanged => "audio-device-change",
+                        device_monitor::DeviceChange::DeviceListChanged => "audio-device-change",
+                    };
+                    let payload = match &change {
+                        device_monitor::DeviceChange::DefaultInputChanged => "input-changed",
+                        device_monitor::DeviceChange::DefaultOutputChanged => "output-changed",
+                        device_monitor::DeviceChange::DeviceListChanged => "device-list-changed",
+                    };
+                    let _ = monitor_handle.emit(event_name, payload);
+                }
+            });
+
+            // Build tray context menu
+            let record_standard = MenuItemBuilder::with_id("record_standard", "Record (Standard)").build(app)?;
+            let record_multilingual = MenuItemBuilder::with_id("record_multilingual", "Record (Multi-lingual)").build(app)?;
+            let stop_record_item = MenuItemBuilder::with_id("stop_record", "Stop Record").build(app)?;
+            let sep1 = tauri::menu::PredefinedMenuItem::separator(app)?;
+            let open_item = MenuItemBuilder::with_id("open", "Open Wisprnote").build(app)?;
+            let sep2 = tauri::menu::PredefinedMenuItem::separator(app)?;
+            let quit_item = MenuItemBuilder::with_id("quit", "Quit").build(app)?;
+
+            let menu = MenuBuilder::new(app)
+                .item(&record_standard)
+                .item(&record_multilingual)
+                .item(&stop_record_item)
+                .item(&sep1)
+                .item(&open_item)
+                .item(&sep2)
+                .item(&quit_item)
+                .build()?;
+
+            if let Some(tray) = app.tray_by_id("main-tray") {
+                tray.set_menu(Some(menu)).ok();
+                tray.set_show_menu_on_left_click(true).ok();
+
+                // Handle menu item clicks
+                let win2 = window.clone();
+                let app_handle = app.handle().clone();
+                tray.on_menu_event(move |_tray, event| {
+                    match event.id().as_ref() {
+                        "open" => {
+                            let _ = win2.show();
+                            let _ = win2.set_focus();
+                        }
+                        "record_standard" => {
+                            let _ = win2.show();
+                            let _ = win2.set_focus();
+                            let _ = win2.emit("tray-record", "start-realtime");
+                        }
+                        "record_multilingual" => {
+                            let _ = win2.show();
+                            let _ = win2.set_focus();
+                            let _ = win2.emit("tray-record", "start-batch");
+                        }
+                        "stop_record" => {
+                            let _ = win2.emit("tray-record", "stop");
+                        }
+                        "quit" => {
+                            app_handle.exit(0);
+                        }
+                        _ => {}
+                    }
+                });
+            }
+
             Ok(())
         })
         .invoke_handler(tauri::generate_handler![
@@ -145,6 +239,9 @@ pub fn run() {
             start_realtime_audio,
             stop_realtime_audio,
             is_realtime_recording,
+            list_audio_devices,
+            get_default_input,
+            get_default_output,
             check_permissions,
             request_microphone_permission,
             open_screen_recording_settings,

@@ -209,6 +209,35 @@ pub mod macos {
         is_recording: Arc<AtomicBool>,
         audio_data: Arc<Mutex<Vec<f32>>>,
     ) -> Result<(), anyhow::Error> {
+        use crate::device_monitor;
+
+        // Spawn device change monitor for this recording session
+        let (dev_tx, dev_rx) = std::sync::mpsc::channel();
+        let _dev_monitor = device_monitor::spawn_monitor(dev_tx);
+
+        // Outer loop: restarts capture when device changes
+        while is_recording.load(Ordering::Relaxed) {
+            if let Err(e) = record_audio_session(&is_recording, &audio_data, &dev_rx) {
+                if is_recording.load(Ordering::Relaxed) {
+                    eprintln!("Recording session error (will retry): {}", e);
+                    std::thread::sleep(std::time::Duration::from_millis(500));
+                    continue;
+                } else {
+                    return Err(e);
+                }
+            }
+            break;
+        }
+
+        eprintln!("System audio recording stopped");
+        Ok(())
+    }
+
+    fn record_audio_session(
+        is_recording: &Arc<AtomicBool>,
+        audio_data: &Arc<Mutex<Vec<f32>>>,
+        dev_rx: &std::sync::mpsc::Receiver<crate::device_monitor::DeviceChange>,
+    ) -> Result<(), anyhow::Error> {
         // Setup microphone
         let mic_device = ca::System::default_input_device()?;
         let mic_asbd = mic_device.input_asbd()?;
@@ -262,11 +291,23 @@ pub mod macos {
         let system_proc_id = agg_device.create_io_proc_id(system_io_proc, Some(&mut *system_ctx))?;
         let _system_started = ca::device_start(agg_device, Some(system_proc_id))?;
 
-        eprintln!("System audio recording started");
+        eprintln!("System audio recording started (device session)");
 
-        // Record loop
+        // Record loop — also checks for device changes
         while is_recording.load(Ordering::Relaxed) {
             use ringbuf::traits::Consumer;
+
+            // Check for device changes — if input changed, break to restart
+            if let Ok(change) = dev_rx.try_recv() {
+                match change {
+                    crate::device_monitor::DeviceChange::DefaultInputChanged
+                    | crate::device_monitor::DeviceChange::DeviceListChanged => {
+                        eprintln!("Batch recording: input device changed, restarting capture...");
+                        return Err(anyhow::anyhow!("device_change"));
+                    }
+                    _ => {}
+                }
+            }
 
             let mut samples_to_add = Vec::new();
 
@@ -300,7 +341,6 @@ pub mod macos {
             std::thread::sleep(std::time::Duration::from_millis(10));
         }
 
-        eprintln!("System audio recording stopped");
         Ok(())
     }
 
@@ -386,6 +426,52 @@ pub mod macos {
         api_key: String,
         app_handle: tauri::AppHandle,
     ) -> Result<(), anyhow::Error> {
+        use crate::device_monitor;
+
+        // Spawn device change monitor for this recording session
+        let (dev_tx, dev_rx) = std::sync::mpsc::channel();
+        let _dev_monitor = device_monitor::spawn_monitor(dev_tx);
+
+        // Outer loop: restarts capture when device changes
+        while is_recording.load(Ordering::Relaxed) {
+            match record_realtime_session(
+                &is_recording,
+                &transcripts,
+                &api_key,
+                &app_handle,
+                &dev_rx,
+            ) {
+                Ok(()) => break,
+                Err(e) => {
+                    let msg = format!("{}", e);
+                    if msg.contains("device_change") && is_recording.load(Ordering::Relaxed) {
+                        eprintln!("Realtime recording: device changed, restarting capture...");
+                        use tauri::Emitter;
+                        let _ = app_handle.emit("audio-device-restart", "restarting");
+                        std::thread::sleep(std::time::Duration::from_millis(500));
+                        continue;
+                    } else if is_recording.load(Ordering::Relaxed) {
+                        eprintln!("Realtime recording error (will retry): {}", e);
+                        std::thread::sleep(std::time::Duration::from_millis(500));
+                        continue;
+                    } else {
+                        return Err(e);
+                    }
+                }
+            }
+        }
+
+        eprintln!("Realtime recording stopped");
+        Ok(())
+    }
+
+    fn record_realtime_session(
+        is_recording: &Arc<AtomicBool>,
+        transcripts: &Arc<Mutex<Vec<String>>>,
+        api_key: &str,
+        app_handle: &tauri::AppHandle,
+        dev_rx: &std::sync::mpsc::Receiver<crate::device_monitor::DeviceChange>,
+    ) -> Result<(), anyhow::Error> {
         use tauri::Emitter;
 
         // Setup microphone
@@ -452,12 +538,28 @@ pub mod macos {
         let rt = tokio::runtime::Runtime::new()
             .map_err(|e| anyhow::anyhow!("Failed to create tokio runtime: {}", e))?;
 
+        let device_changed = std::sync::Arc::new(AtomicBool::new(false));
+        let device_changed_clone = device_changed.clone();
+
         rt.block_on(async {
-            let mut transcriber = DeepgramTranscriber::new(api_key, sample_rate);
+            let mut transcriber = DeepgramTranscriber::new(api_key.to_string(), sample_rate);
             let mut chunk_buffer = Vec::with_capacity(CHUNK_SIZE);
 
             while is_recording.load(Ordering::Relaxed) {
                 use ringbuf::traits::Consumer;
+
+                // Check for device changes
+                if let Ok(change) = dev_rx.try_recv() {
+                    match change {
+                        crate::device_monitor::DeviceChange::DefaultInputChanged
+                        | crate::device_monitor::DeviceChange::DeviceListChanged => {
+                            eprintln!("Realtime: input device changed, signaling restart...");
+                            device_changed_clone.store(true, Ordering::Relaxed);
+                            break;
+                        }
+                        _ => {}
+                    }
+                }
 
                 // Read and mix mic + system audio
                 while chunk_buffer.len() < CHUNK_SIZE {
@@ -510,7 +612,10 @@ pub mod macos {
             }
         });
 
-        eprintln!("Realtime recording stopped");
+        if device_changed.load(Ordering::Relaxed) {
+            return Err(anyhow::anyhow!("device_change"));
+        }
+
         Ok(())
     }
 

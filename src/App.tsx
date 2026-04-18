@@ -36,7 +36,6 @@ import {
   StopCircle,
   PauseCircle,
   PlayCircle,
-  Sidebar as SidebarIcon
 } from 'lucide-react';
 import { motion, AnimatePresence } from 'motion/react';
 import Markdown from 'react-markdown';
@@ -94,6 +93,12 @@ import {
   RecordingMode,
 } from './services/nativeRecorderService';
 import { checkPermissions } from './services/permissionService';
+import {
+  listenForDeviceChanges,
+  listenForDeviceRestart,
+  getDefaultInput,
+  type DeviceChangeType,
+} from './services/audioDeviceService';
 
 import Auth from './components/Auth';
 import ChatPage from './pages/ChatPage';
@@ -101,6 +106,7 @@ import NotesPage from './pages/NotesPage';
 import HistoryPage from './pages/HistoryPage';
 import KnowledgePage from './pages/KnowledgePage';
 import ProcessPage from './pages/ProcessPage';
+import AudioDevicesPage from './pages/AudioDevicesPage';
 import MainSidebar from './components/MainSidebar';
 import { ManualNotesList } from './components/ManualNotes/ManualNotesList';
 import { ManualNoteEditor } from './components/ManualNotes/ManualNoteEditor';
@@ -114,7 +120,7 @@ declare global {
   }
 }
 
-type View = 'process' | 'history' | 'notes' | 'chat' | 'knowledge' | 'notebooks';
+type View = 'process' | 'history' | 'notes' | 'chat' | 'knowledge' | 'notebooks' | 'audio-devices';
 type Status = 'idle' | 'splitting' | 'processing' | 'completed' | 'error';
 type NoteTab = 'transcription' | 'summary' | 'notes';
 
@@ -143,6 +149,7 @@ export default function App() {
     if (path.startsWith('/chat')) return 'chat';
     if (path === '/knowledge') return 'knowledge';
     if (path === '/notebooks') return 'notebooks';
+    if (path === '/audio-devices') return 'audio-devices';
     return 'process';
   };
   
@@ -168,6 +175,9 @@ export default function App() {
         break;
       case 'notebooks':
         navigate('/notebooks');
+        break;
+      case 'audio-devices':
+        navigate('/audio-devices');
         break;
     }
   };
@@ -207,6 +217,8 @@ export default function App() {
   const unlistenRef = useRef<(() => void) | null>(null);
   const realtimeTranscriptRef = useRef<string[]>([]);
   const [permissionsGranted, setPermissionsGranted] = useState(false);
+  const [currentInputDevice, setCurrentInputDevice] = useState<string | null>(null);
+  const [deviceRestartNotice, setDeviceRestartNotice] = useState(false);
 
   // Notebooks (manual notes) state
   const [activeNote, setActiveNote] = useState<ManualNote | null>(null);
@@ -428,6 +440,77 @@ export default function App() {
     };
   }, []);
 
+  // Refs to keep latest recording callbacks accessible from tray listener
+  const startRecordingRef = useRef<() => Promise<void>>(undefined);
+  const stopRecordingRef = useRef<() => Promise<void>>(undefined);
+
+  // Listen for tray menu actions (Record Standard / Multi-lingual / Stop)
+  useEffect(() => {
+    let unlistenTray: (() => void) | null = null;
+    const isTauri = !!(window as any).__TAURI_INTERNALS__;
+    if (!isTauri) return;
+
+    (async () => {
+      const { listen } = await import('@tauri-apps/api/event');
+      unlistenTray = await listen<string>('tray-record', (event) => {
+        const payload = event.payload;
+        if (payload === 'start-realtime') {
+          setInputMode('record');
+          setDesktopRecordingMode('realtime');
+          // Small delay so state updates propagate before startRecording reads them
+          setTimeout(() => startRecordingRef.current?.(), 100);
+        } else if (payload === 'start-batch') {
+          setInputMode('record');
+          setDesktopRecordingMode('batch');
+          setTimeout(() => startRecordingRef.current?.(), 100);
+        } else if (payload === 'stop') {
+          stopRecordingRef.current?.();
+        }
+      });
+    })();
+
+    return () => { unlistenTray?.(); };
+  }, []);
+
+  // Listen for audio device changes (Bluetooth/headphone connect/disconnect)
+  useEffect(() => {
+    const isTauri = !!(window as any).__TAURI_INTERNALS__;
+    if (!isTauri) return;
+
+    let unlistenChange: (() => void) | null = null;
+    let unlistenRestart: (() => void) | null = null;
+
+    (async () => {
+      // Fetch initial default input device
+      const device = await getDefaultInput();
+      if (device) setCurrentInputDevice(device.name);
+
+      // Listen for device changes — refresh current device info
+      unlistenChange = await listenForDeviceChanges(async (changeType) => {
+        console.log('[audio-device] change detected:', changeType);
+        const newDevice = await getDefaultInput();
+        if (newDevice) {
+          setCurrentInputDevice(newDevice.name);
+          console.log('[audio-device] new default input:', newDevice.name,
+            '| transport:', newDevice.transport_type,
+            '| headphone:', newDevice.is_headphone);
+        }
+      });
+
+      // Listen for device restart events (emitted when recording auto-restarts)
+      unlistenRestart = await listenForDeviceRestart(() => {
+        console.log('[audio-device] recording restarting due to device change');
+        setDeviceRestartNotice(true);
+        setTimeout(() => setDeviceRestartNotice(false), 3000);
+      });
+    })();
+
+    return () => {
+      unlistenChange?.();
+      unlistenRestart?.();
+    };
+  }, []);
+
   const formatTime = (seconds: number) => {
     const m = Math.floor(seconds / 60);
     const s = seconds % 60;
@@ -601,6 +684,10 @@ export default function App() {
       setIsPaused(false);
     }
   };
+
+  // Keep refs in sync so the tray listener always calls the latest functions
+  startRecordingRef.current = startRecording;
+  stopRecordingRef.current = stopRecording;
 
   // Process real-time transcript: skip Gemini transcription, use Gemini only for intelligence
   const processRealtimeTranscript = async (transcript: string) => {
@@ -1861,7 +1948,7 @@ export default function App() {
   }
 
   return (
-    <div className="h-screen bg-[#faf9f7] text-[#1a1a1a] font-[system-ui] selection:bg-[#1a1a1a] selection:text-white flex overflow-hidden">
+    <div className="h-screen bg-[#f5f0eb] text-[#1a1a1a] font-[system-ui] selection:bg-[#1a1a1a] selection:text-white flex overflow-hidden">
       {/* Network Status Banner */}
       <AnimatePresence>
         {!isOnline && (
@@ -1960,42 +2047,28 @@ export default function App() {
         )}
       </AnimatePresence>
 
-      {/* Main Sidebar Navigation */}
-      <AnimatePresence initial={false}>
-        {isSidebarOpen && (
-          <MainSidebar
-            currentView={currentView}
-            onViewChange={(view) => {
-              if (view === 'notes' && selectedTask) {
-                setCurrentView('notes', selectedTask.id);
-              } else if (view === 'chat' && selectedTask) {
-                setCurrentView('chat', selectedTask.id);
-              } else {
-                setCurrentView(view);
-              }
-            }}
-            isOpen={isSidebarOpen}
-            onToggle={() => setIsSidebarOpen(!isSidebarOpen)}
-            session={session}
-            onSignOut={() => supabase.auth.signOut()}
-            status={status}
-          />
-        )}
-      </AnimatePresence>
+      {/* Sidebar — always visible (collapsed icon-rail or expanded) */}
+      <MainSidebar
+        currentView={currentView}
+        onViewChange={(view) => {
+          if (view === 'notes' && selectedTask) {
+            setCurrentView('notes', selectedTask.id);
+          } else if (view === 'chat' && selectedTask) {
+            setCurrentView('chat', selectedTask.id);
+          } else {
+            setCurrentView(view);
+          }
+        }}
+        isOpen={isSidebarOpen}
+        onToggle={() => setIsSidebarOpen(!isSidebarOpen)}
+        session={session}
+        onSignOut={() => supabase.auth.signOut()}
+        status={status}
+      />
 
-      {/* Sidebar Toggle when closed - floating button */}
-      {!isSidebarOpen && (
-        <button 
-          onClick={() => setIsSidebarOpen(true)}
-          className="fixed top-4 left-4 z-50 text-[#595959] hover:text-[#1a1a1a] transition-colors rounded-[8px] p-2 border border-[#e3e3e0] bg-white hover:bg-[#f5f5f5] shadow-sm"
-        >
-          <SidebarIcon className="w-4 h-4" strokeWidth={2} />
-        </button>
-      )}
-
-      {/* Main Content Area */}
-      <div className="flex-1 flex overflow-hidden relative">
-        <main className="flex-1 bg-[#faf9f7] w-full relative overflow-y-auto">
+      {/* Main Content Area — white rounded container */}
+      <div className="flex-1 flex overflow-hidden relative p-2 pl-0">
+        <main className="flex-1 bg-white w-full relative overflow-y-auto rounded-2xl shadow-sm border border-[#e8e0d8]/50">
           <AnimatePresence mode="wait">
             {currentView === 'process' && (
               <motion.div 
@@ -2030,6 +2103,8 @@ export default function App() {
                   interimTranscript={interimTranscript}
                   permissionsGranted={permissionsGranted}
                   onPermissionsGranted={() => setPermissionsGranted(true)}
+                  currentInputDevice={currentInputDevice}
+                  deviceRestartNotice={deviceRestartNotice}
                 />
               </motion.div>
             )}
@@ -2136,10 +2211,25 @@ export default function App() {
                 historyLength={history.length}
               />
             )}
+
+            {currentView === 'audio-devices' && (
+              <motion.div
+                key="audio-devices"
+                initial={{ opacity: 0 }}
+                animate={{ opacity: 1 }}
+                exit={{ opacity: 0 }}
+                className="h-full"
+              >
+                <AudioDevicesPage
+                  isRecording={isRecording}
+                  currentInputDevice={currentInputDevice}
+                  deviceRestartNotice={deviceRestartNotice}
+                />
+              </motion.div>
+            )}
           </AnimatePresence>
         </main>
       </div>
-
     </div>
   );
 }

@@ -29,6 +29,12 @@
     ],
     "security": {
       "csp": null
+    },
+    "trayIcon": {
+      "id": "main-tray",
+      "iconPath": "icons/tray-icon.png",
+      "iconAsTemplate": false,
+      "tooltip": "Wisprnote AI"
     }
   },
   "bundle": {
