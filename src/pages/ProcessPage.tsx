@@ -48,6 +48,8 @@ interface ProcessPageProps {
   interimTranscript: string;
   permissionsGranted: boolean;
   onPermissionsGranted: () => void;
+  currentInputDevice?: string | null;
+  deviceRestartNotice?: boolean;
 }
 
 type ViewState = 'collapsed' | 'expanded' | 'processing';
@@ -82,7 +84,9 @@ export default function ProcessPage({
   realtimeTranscript,
   interimTranscript,
   permissionsGranted,
-  onPermissionsGranted
+  onPermissionsGranted,
+  currentInputDevice,
+  deviceRestartNotice
 }: ProcessPageProps) {
   const fileInputRef = useRef<HTMLInputElement>(null);
   const transcriptEndRef = useRef<HTMLDivElement>(null);
@@ -494,6 +498,16 @@ export default function ProcessPage({
                           <span className="w-1.5 h-1.5 rounded-full bg-red-500 animate-pulse" />
                           <span className="text-[13px] font-mono font-semibold text-[#141414] tabular-nums">{formatTime(recordingTime)}</span>
                           <span className="text-[10px] px-2 py-0.5 rounded-full bg-red-50 text-red-500 font-medium">Live</span>
+                          {currentInputDevice && (
+                            <span className="text-[10px] px-2 py-0.5 rounded-full bg-[#141414]/5 text-[#141414]/60 font-medium truncate max-w-[140px]" title={currentInputDevice}>
+                              🎤 {currentInputDevice}
+                            </span>
+                          )}
+                          {deviceRestartNotice && (
+                            <span className="text-[10px] px-2 py-0.5 rounded-full bg-amber-50 text-amber-600 font-medium animate-pulse">
+                              Switching device…
+                            </span>
+                          )}
                         </div>
                         <div className="flex items-center gap-2">
                           <div className="flex items-end gap-[3px] h-3.5">
@@ -597,6 +611,20 @@ export default function ProcessPage({
                       }`}>
                         {isPaused ? 'Paused' : 'Recording'}
                       </span>
+
+                      {/* Device info badge in batch mode */}
+                      {currentInputDevice && (
+                        <div className="flex items-center gap-2 mt-1">
+                          <span className="text-[10px] px-2.5 py-1 rounded-full bg-[#141414]/5 text-[#141414]/50 font-medium">
+                            🎤 {currentInputDevice}
+                          </span>
+                          {deviceRestartNotice && (
+                            <span className="text-[10px] px-2.5 py-1 rounded-full bg-amber-50 text-amber-600 font-medium animate-pulse">
+                              Switching device…
+                            </span>
+                          )}
+                        </div>
+                      )}
                     </div>
                     )
                   ) : file ? (
