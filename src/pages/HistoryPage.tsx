@@ -1,6 +1,6 @@
 import { useState, useMemo, useEffect, useRef, useCallback } from 'react';
-import { motion } from 'framer-motion';
-import { FileAudio, Search, ChevronRight, X, Loader2, Sparkles } from 'lucide-react';
+import { motion, AnimatePresence } from 'framer-motion';
+import { FileText, Search, ChevronRight, X, Loader2, Sparkles, Calendar, Clock } from 'lucide-react';
 import { TaskHistory, TaskMetadata, getTasksLightweight, getTaskById, updateTaskTitle } from '../services/supabaseService';
 import { generateMeetingTitle } from '../services/geminiService';
 import { MeetingGridSkeleton } from '../components/Skeleton';
@@ -184,104 +184,131 @@ export default function HistoryPage({ history, onSelectTask, isLoading = false, 
   }, [onSelectTask]);
   
   return (
-    <div className="absolute inset-0 flex flex-col bg-[#E4E3E0] overflow-hidden">
+    <div className="absolute inset-0 flex flex-col bg-white overflow-hidden font-[system-ui]">
       {/* Fixed Header */}
-      <div className="flex-none bg-[#E4E3E0] border-b border-[#141414]/10 px-4 sm:px-8 py-4">
-        <div className="max-w-5xl mx-auto flex flex-col sm:flex-row items-start sm:items-center justify-between gap-4">
-          <h2 className="text-2xl font-serif italic font-bold">All Meetings</h2>
-          <div className="flex items-center gap-2 border border-[#141414] bg-white px-3 py-1.5 w-full sm:w-auto rounded-lg">
-            <Search className="w-4 h-4 opacity-50 flex-shrink-0" />
-            <input 
-              type="text" 
-              placeholder="Search by title, topic, or content..." 
-              value={searchQuery}
-              onChange={(e) => setSearchQuery(e.target.value)}
-              className="bg-transparent border-none outline-none text-xs font-mono w-full sm:w-56" 
-            />
-            {hasSearchQuery && (
-              <button 
-                onClick={() => setSearchQuery('')}
-                className="p-0.5 hover:bg-gray-100 rounded flex-shrink-0"
-              >
-                <X className="w-3 h-3 opacity-50" />
-              </button>
-            )}
+      <div className="flex-none px-6 sm:px-10 pt-8 pb-5">
+        <div className="max-w-5xl mx-auto">
+          <div className="flex flex-col sm:flex-row items-start sm:items-end justify-between gap-4 mb-6">
+            <div>
+              <h2 className="text-[28px] sm:text-[32px] font-serif italic text-[#1a1a1a]/70 leading-tight">
+                All Meetings
+              </h2>
+              {!isLoading && history.length > 0 && (
+                <p className="text-[12px] text-[#1a1a1a]/45 mt-1">
+                  {filteredHistory.length} meeting{filteredHistory.length !== 1 ? 's' : ''}
+                  {hasSearchQuery && ` matching "${searchQuery}"`}
+                </p>
+              )}
+            </div>
+
+            {/* Search */}
+            <div className={`relative flex items-center gap-2 bg-[#1a1a1a]/[0.05] rounded-full px-4 py-2.5 w-full sm:w-auto transition-all duration-200 border border-[#1a1a1a]/[0.06] ${
+              searchQuery ? 'ring-1 ring-[#1a1a1a]/10' : 'hover:bg-[#1a1a1a]/[0.05]'
+            }`}>
+              <Search className="w-[15px] h-[15px] text-[#1a1a1a]/20 flex-shrink-0" />
+              <input 
+                type="text" 
+                placeholder="Search by title, topic, or content..." 
+                value={searchQuery}
+                onChange={(e) => setSearchQuery(e.target.value)}
+                className="bg-transparent border-none outline-none text-[13px] text-[#1a1a1a] placeholder:text-[#1a1a1a]/35 w-full sm:w-56" 
+              />
+              <AnimatePresence>
+                {hasSearchQuery && (
+                  <motion.button 
+                    initial={{ opacity: 0, scale: 0.8 }}
+                    animate={{ opacity: 1, scale: 1 }}
+                    exit={{ opacity: 0, scale: 0.8 }}
+                    onClick={() => setSearchQuery('')}
+                    className="p-0.5 hover:bg-[#1a1a1a]/[0.06] rounded-full flex-shrink-0 transition-colors"
+                  >
+                    <X className="w-3.5 h-3.5 text-[#1a1a1a]/30" />
+                  </motion.button>
+                )}
+              </AnimatePresence>
+            </div>
           </div>
         </div>
       </div>
 
       {/* Scrollable Content */}
       <div ref={scrollContainerRef} className="flex-1 overflow-y-auto min-h-0">
-        <div className="max-w-5xl mx-auto px-4 sm:px-8 py-6">
+        <div className="max-w-5xl mx-auto px-6 sm:px-10 pb-8">
           {isLoading ? (
             <MeetingGridSkeleton count={6} />
           ) : history.length === 0 ? (
-            <div className="text-center py-16">
-              <FileAudio className="w-12 h-12 mx-auto mb-4 opacity-20" />
-              <p className="text-sm opacity-50">No meetings yet</p>
-              <p className="text-xs opacity-40 mt-2">Process your first audio to get started</p>
+            <div className="text-center py-20">
+              <div className="w-14 h-14 rounded-2xl bg-[#1a1a1a]/[0.03] flex items-center justify-center mx-auto mb-5">
+                <FileText className="w-6 h-6 text-[#1a1a1a]/15" />
+              </div>
+              <p className="text-[14px] font-medium text-[#1a1a1a]/50 mb-1">No meetings yet</p>
+              <p className="text-[12px] text-[#1a1a1a]/35">Process your first audio to get started</p>
             </div>
           ) : filteredHistory.length === 0 ? (
-            <div className="text-center py-16">
-              <Search className="w-12 h-12 mx-auto mb-4 opacity-20" />
-              <p className="text-sm opacity-50">No meetings found</p>
-              <p className="text-xs opacity-40 mt-2">Try different search terms or clear the search</p>
+            <div className="text-center py-20">
+              <div className="w-14 h-14 rounded-2xl bg-[#1a1a1a]/[0.03] flex items-center justify-center mx-auto mb-5">
+                <Search className="w-6 h-6 text-[#1a1a1a]/15" />
+              </div>
+              <p className="text-[14px] font-medium text-[#1a1a1a]/50 mb-1">No results found</p>
+              <p className="text-[12px] text-[#1a1a1a]/35 mb-4">Try different search terms</p>
               <button 
                 onClick={() => setSearchQuery('')}
-                className="mt-4 px-4 py-2 text-xs font-mono bg-[#141414] text-white rounded-lg hover:bg-[#333] transition-colors"
+                className="px-4 py-2 text-[12px] font-medium text-[#1a1a1a]/50 bg-[#1a1a1a]/[0.04] hover:bg-[#1a1a1a]/[0.08] rounded-full transition-colors"
               >
                 Clear Search
               </button>
             </div>
           ) : (
             <>
-              {hasSearchQuery && (
-                <p className="text-xs font-mono opacity-50 mb-4">
-                  Found {filteredHistory.length} meeting{filteredHistory.length !== 1 ? 's' : ''} matching "{searchQuery}"
-                </p>
-              )}
-              <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-6">
-                {visibleHistory.map((task) => (
+              <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-4">
+                {visibleHistory.map((task, index) => (
                 <motion.div 
                   key={task.id}
-                  whileHover={{ y: -4 }}
+                  initial={{ opacity: 0, y: 12 }}
+                  animate={{ opacity: 1, y: 0 }}
+                  transition={{ duration: 0.3, delay: Math.min(index * 0.04, 0.3), ease: [0.22, 1, 0.36, 1] }}
+                  whileHover={{ y: -2 }}
                   onClick={() => handleSelectTask(task)}
-                  className="border border-[#141414] bg-white p-6 shadow-[4px_4px_0px_0px_rgba(20,20,20,1)] cursor-pointer group relative"
+                  className="bg-[#f5f2ef] hover:bg-[#eeebe7] rounded-2xl p-5 cursor-pointer group relative transition-colors duration-200 border border-[#1a1a1a]/[0.04]"
                 >
                   {/* Loading overlay */}
                   {loadingTaskId === task.id && (
-                    <div className="absolute inset-0 bg-white/80 flex items-center justify-center z-10">
-                      <Loader2 className="w-6 h-6 animate-spin text-[#141414]" />
+                    <div className="absolute inset-0 bg-white/80 backdrop-blur-sm rounded-2xl flex items-center justify-center z-10">
+                      <Loader2 className="w-5 h-5 animate-spin text-[#1a1a1a]/40" />
                     </div>
                   )}
+
                   <div className="flex justify-between items-start mb-4">
-                    <div className="p-2 bg-[#141414]/5 rounded">
-                      <FileAudio className="w-6 h-6" />
+                    <div className="w-9 h-9 rounded-xl bg-white shadow-[0_1px_4px_rgba(0,0,0,0.06)] flex items-center justify-center">
+                      <FileText className="w-4 h-4 text-[#1a1a1a]/50" />
                     </div>
-                    <span className="text-[10px] font-mono opacity-40 uppercase">
-                      {new Date(task.created_at!).toLocaleDateString()}
+                    <span className="text-[11px] text-[#1a1a1a]/40 font-medium">
+                      {new Date(task.created_at!).toLocaleDateString('en-US', { month: 'numeric', day: 'numeric', year: 'numeric' })}
                     </span>
                   </div>
+
                   <div className="flex items-center gap-2 mb-2">
-                    <h3 className="font-bold text-sm group-hover:underline truncate flex-1">{task.filename}</h3>
+                    <h3 className="text-[14px] font-semibold text-[#1a1a1a] truncate flex-1 leading-snug">{task.filename}</h3>
                     <button
                       onClick={(e) => handleGenerateTitle(e, task)}
                       disabled={generatingTitleId === task.id}
-                      className="flex-shrink-0 p-1 opacity-0 group-hover:opacity-60 hover:!opacity-100 hover:bg-gray-100 rounded transition-all disabled:opacity-40"
+                      className="flex-shrink-0 p-1.5 opacity-0 group-hover:opacity-50 hover:!opacity-100 hover:bg-white/80 rounded-lg transition-all disabled:opacity-30"
                       title="Generate AI title"
                     >
                       {generatingTitleId === task.id ? (
-                        <Loader2 className="w-3.5 h-3.5 animate-spin" />
+                        <Loader2 className="w-3.5 h-3.5 animate-spin text-[#1a1a1a]/50" />
                       ) : (
-                        <Sparkles className="w-3.5 h-3.5" />
+                        <Sparkles className="w-3.5 h-3.5 text-[#1a1a1a]/40" />
                       )}
                     </button>
                   </div>
-                  <p className="text-[10px] opacity-50 line-clamp-3 font-mono mb-4">
-                    {task.summary || (task.transcription ? task.transcription.substring(0, 100) + '...' : 'No summary available')}
+
+                  <p className="text-[12px] text-[#1a1a1a]/50 line-clamp-3 leading-relaxed mb-4">
+                    {task.summary || (task.transcription ? task.transcription.substring(0, 120) + '...' : 'No summary available')}
                   </p>
-                  <div className="flex items-center gap-2 text-[10px] font-mono uppercase tracking-widest opacity-0 group-hover:opacity-100 transition-opacity">
-                    View Details <ChevronRight className="w-3 h-3" />
+
+                  <div className="flex items-center gap-1.5 text-[11px] font-medium text-[#1a1a1a]/30 group-hover:text-[#1a1a1a]/60 transition-colors">
+                    View <ChevronRight className="w-3 h-3" />
                   </div>
                 </motion.div>
               ))}
@@ -291,20 +318,20 @@ export default function HistoryPage({ history, onSelectTask, isLoading = false, 
               {hasMore && (
                 <div ref={loadMoreRef} className="flex justify-center py-8">
                   {isLoadingMore ? (
-                    <div className="flex items-center gap-2 text-xs font-mono opacity-50">
-                      <Loader2 className="w-4 h-4 animate-spin" />
-                      Loading more...
+                    <div className="flex items-center gap-2 text-[12px] text-[#1a1a1a]/30">
+                      <Loader2 className="w-3.5 h-3.5 animate-spin" />
+                      Loading more…
                     </div>
                   ) : (
-                    <p className="text-xs font-mono opacity-30">Scroll for more</p>
+                    <p className="text-[12px] text-[#1a1a1a]/15">Scroll for more</p>
                   )}
                 </div>
               )}
               
               {/* Show count */}
               {!hasSearchQuery && filteredHistory.length > PAGE_SIZE && (
-                <p className="text-center text-xs font-mono opacity-40 py-4">
-                  Showing {visibleHistory.length} of {filteredHistory.length} meetings
+                <p className="text-center text-[11px] text-[#1a1a1a]/15 py-4">
+                  {visibleHistory.length} of {filteredHistory.length}
                 </p>
               )}
             </>

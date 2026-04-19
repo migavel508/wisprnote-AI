@@ -57,7 +57,7 @@ export default function MainSidebar({
     return (
       <div className="h-screen w-[52px] bg-[#f5f0eb] flex flex-col items-center flex-shrink-0 font-[system-ui]">
         {/* Drag region for Tauri */}
-        <div data-tauri-drag-region className="w-full h-8 flex-shrink-0 cursor-grab" />
+        <div data-tauri-drag-region className="w-full h-12 flex-shrink-0 cursor-grab" />
 
         {/* Toggle */}
         <div className="pt-1 pb-4">
@@ -146,7 +146,7 @@ export default function MainSidebar({
       
       <div className="fixed md:relative h-screen w-[200px] bg-[#f5f0eb] flex flex-col flex-shrink-0 font-[system-ui] z-[70]">
         {/* Drag region for Tauri */}
-        <div data-tauri-drag-region className="w-full h-8 flex-shrink-0 cursor-grab" />
+        <div data-tauri-drag-region className="w-full h-12 flex-shrink-0 cursor-grab" />
 
         {/* Top: Brand + Toggle */}
         <div className="flex items-center gap-2 px-4 pt-1 pb-5">

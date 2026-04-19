@@ -1,4 +1,4 @@
-import React, { useState, useRef, useEffect } from 'react';
+import React, { useState, useRef, useEffect, useCallback } from 'react';
 import { Routes, Route, useNavigate, useLocation, useParams } from 'react-router-dom';
 import { 
   Upload, 
@@ -301,19 +301,48 @@ export default function App() {
     }
   }, [chatMessages]);
 
+  const prevUserIdRef = useRef<string | null>(null);
+
+  // Wipe all user-scoped state so no data leaks between accounts
+  const clearUserState = useCallback(() => {
+    setHistory([]);
+    setSelectedTask(null);
+    setKgData([]);
+    setKgBuilt(false);
+    setIsLoadingKG(false);
+    setIsExtractingNewKG(false);
+    setChatMessages([]);
+    setChatInput('');
+    setAgentAssetHistory([]);
+    setSelectedAgentAsset(null);
+    setFile(null);
+    setStatus('idle');
+    setError(null);
+  }, []);
+
   useEffect(() => {
     supabase.auth.getSession().then(({ data: { session } }) => {
       setSession(session);
+      prevUserIdRef.current = session?.user?.id ?? null;
     });
 
     const {
       data: { subscription },
     } = supabase.auth.onAuthStateChange((_event, session) => {
+      const newUserId = session?.user?.id ?? null;
+      const prevUserId = prevUserIdRef.current;
+
+      // Clear state on sign-out OR user switch
+      if (!newUserId || (prevUserId && newUserId !== prevUserId)) {
+        clearUserState();
+      }
+
+      prevUserIdRef.current = newUserId;
       setSession(session);
     });
 
     return () => subscription.unsubscribe();
-  }, []);
+  }, [clearUserState]);
 
   // Network status monitoring
   useEffect(() => {
@@ -1651,7 +1680,7 @@ export default function App() {
         throw new Error('No audio file available');
       }
 
-      let fullTranscription: string;
+      let fullTranscription: string = '';
       
       // ─── Large File Path: Use Gemini File API ───────────────────────────────
       if (shouldUseFileAPI(currentFile) && !resumeFromProgress) {
@@ -1949,28 +1978,34 @@ export default function App() {
 
   return (
     <div className="h-screen bg-[#f5f0eb] text-[#1a1a1a] font-[system-ui] selection:bg-[#1a1a1a] selection:text-white flex overflow-hidden">
-      {/* Network Status Banner */}
+      {/* Network Status — floating pill toast (Apple-style) */}
       <AnimatePresence>
         {!isOnline && (
           <motion.div
-            initial={{ y: -100 }}
-            animate={{ y: 0 }}
-            exit={{ y: -100 }}
-            className="fixed top-0 left-0 right-0 z-[10000] bg-orange-500 text-white px-4 py-3 flex items-center justify-center gap-2 shadow-lg"
+            initial={{ y: -20, opacity: 0, scale: 0.95 }}
+            animate={{ y: 0, opacity: 1, scale: 1 }}
+            exit={{ y: -20, opacity: 0, scale: 0.95 }}
+            transition={{ type: 'spring', stiffness: 400, damping: 30 }}
+            className="fixed top-3 left-1/2 -translate-x-1/2 z-[10000] bg-[#1a1a1a]/90 backdrop-blur-xl text-white/90 pl-3 pr-4 py-2 flex items-center gap-2.5 rounded-full shadow-lg shadow-black/10"
           >
-            <AlertCircle className="w-5 h-5" />
-            <span className="font-medium">No internet connection - Processing paused</span>
+            <div className="w-5 h-5 rounded-full bg-orange-400/20 flex items-center justify-center flex-shrink-0">
+              <AlertCircle className="w-3 h-3 text-orange-400" />
+            </div>
+            <span className="text-[12px] font-medium tracking-[-0.01em]">Offline — processing paused</span>
           </motion.div>
         )}
         {showReconnectingMessage && (
           <motion.div
-            initial={{ y: -100 }}
-            animate={{ y: 0 }}
-            exit={{ y: -100 }}
-            className="fixed top-0 left-0 right-0 z-[10000] bg-green-500 text-white px-4 py-3 flex items-center justify-center gap-2 shadow-lg"
+            initial={{ y: -20, opacity: 0, scale: 0.95 }}
+            animate={{ y: 0, opacity: 1, scale: 1 }}
+            exit={{ y: -20, opacity: 0, scale: 0.95 }}
+            transition={{ type: 'spring', stiffness: 400, damping: 30 }}
+            className="fixed top-3 left-1/2 -translate-x-1/2 z-[10000] bg-[#1a1a1a]/90 backdrop-blur-xl text-white/90 pl-3 pr-4 py-2 flex items-center gap-2.5 rounded-full shadow-lg shadow-black/10"
           >
-            <Loader2 className="w-5 h-5 animate-spin" />
-            <span className="font-medium">Reconnected - Resuming processing...</span>
+            <div className="w-5 h-5 rounded-full bg-green-400/20 flex items-center justify-center flex-shrink-0">
+              <Loader2 className="w-3 h-3 text-green-400 animate-spin" />
+            </div>
+            <span className="text-[12px] font-medium tracking-[-0.01em]">Reconnected — resuming</span>
           </motion.div>
         )}
       </AnimatePresence>
@@ -2062,13 +2097,16 @@ export default function App() {
         isOpen={isSidebarOpen}
         onToggle={() => setIsSidebarOpen(!isSidebarOpen)}
         session={session}
-        onSignOut={() => supabase.auth.signOut()}
+        onSignOut={() => { clearUserState(); supabase.auth.signOut(); }}
         status={status}
       />
 
       {/* Main Content Area — white rounded container */}
-      <div className="flex-1 flex overflow-hidden relative p-2 pl-0">
-        <main className="flex-1 bg-white w-full relative overflow-y-auto rounded-2xl shadow-sm border border-[#e8e0d8]/50">
+      <div className="flex-1 flex flex-col overflow-hidden relative">
+        {/* Top drag region — enables double-click to zoom (macOS native behavior) */}
+        <div data-tauri-drag-region className="w-full h-10 flex-shrink-0 cursor-default" style={{ WebkitUserSelect: 'none', userSelect: 'none' }} />
+        <div className="flex-1 flex overflow-hidden pr-2.5 pl-1.5 pb-2.5 pt-0">
+        <main className="flex-1 bg-white w-full relative overflow-y-auto rounded-tl-2xl rounded-tr-2xl rounded-bl-2xl rounded-br-2xl shadow-sm border border-[#e8e0d8]/50">
           <AnimatePresence mode="wait">
             {currentView === 'process' && (
               <motion.div 
@@ -2229,6 +2267,7 @@ export default function App() {
             )}
           </AnimatePresence>
         </main>
+        </div>
       </div>
     </div>
   );

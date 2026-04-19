@@ -11,12 +11,7 @@ import {
   PlayCircle,
   ChevronUp,
   ChevronDown,
-  Play,
-  X,
   Sparkles,
-  Settings,
-  Copy,
-  Minus,
   Radio,
   Layers
 } from 'lucide-react';
@@ -52,7 +47,7 @@ interface ProcessPageProps {
   deviceRestartNotice?: boolean;
 }
 
-type ViewState = 'collapsed' | 'expanded' | 'processing';
+type ViewState = 'collapsed' | 'expanded';
 
 const formatTime = (seconds: number) => {
   const mins = Math.floor(seconds / 60);
@@ -115,10 +110,10 @@ export default function ProcessPage({
     return () => clearInterval(interval);
   }, [isRecording, isPaused]);
 
-  // Update view state based on processing status
+  // Auto-collapse panel when processing starts
   useEffect(() => {
     if (status === 'processing' || status === 'splitting') {
-      setViewState('processing');
+      setViewState('collapsed');
     }
   }, [status]);
 
@@ -151,175 +146,188 @@ export default function ProcessPage({
   const isProcessing = status === 'processing' || status === 'splitting';
 
   return (
-    <div className="flex flex-col h-full bg-[#faf9f7] font-[system-ui] overflow-hidden relative">
+    <div className="flex flex-col h-full bg-white font-[system-ui] overflow-hidden relative">
       {/* Main Content Area */}
-      <main className="flex-1 overflow-y-auto w-full flex justify-center pt-8 sm:pt-12 pb-32 sm:pb-48">
-        <div className="w-full max-w-[760px] px-4 sm:px-8">
-          {/* Title */}
-          <h1 className="text-[24px] sm:text-[32px] font-serif text-[#141414]/30 mb-4 sm:mb-6">
+      <main className="flex-1 overflow-y-auto w-full flex flex-col pt-10 sm:pt-14 pb-40 sm:pb-48 px-6 sm:px-10 lg:px-16">
+        {/* Hero Section */}
+        <motion.div 
+          initial={{ opacity: 0, y: 12 }}
+          animate={{ opacity: 1, y: 0 }}
+          transition={{ duration: 0.5, ease: [0.22, 1, 0.36, 1] }}
+          className="mb-8 max-w-3xl"
+        >
+          <h1 className="text-[28px] sm:text-[36px] font-serif italic text-[#141414]/25 mb-3 leading-tight">
             {file ? file.name.replace(/\.[^/.]+$/, '') : 'New Recording'}
           </h1>
-          
-          {/* Tags/Status */}
-          <div className="flex flex-wrap items-center gap-2 mb-6 sm:mb-10">
-            <button className="flex items-center gap-1.5 px-3 py-1.5 text-[13px] font-medium text-[#141414] bg-white border border-[#141414]/10 hover:bg-[#F5F5F5] rounded-lg transition-colors shadow-sm">
-              <Mic className="w-3.5 h-3.5 text-[#141414]/50" />
-              <span>{inputMode === 'upload' ? 'Upload' : 'Record'}</span>
-            </button>
-            {file && (
-              <button className="flex items-center gap-1.5 px-3 py-1.5 text-[13px] font-medium text-[#141414] bg-white border border-[#141414]/10 hover:bg-[#F5F5F5] rounded-lg transition-colors shadow-sm">
-                <FileAudio className="w-3.5 h-3.5 text-[#141414]/50" />
-                <span>{(file.size / (1024 * 1024)).toFixed(2)} MB</span>
-              </button>
-            )}
-            {isRecording && (
-              <span className="flex items-center gap-1.5 px-3 py-1.5 text-[13px] font-medium text-red-600 bg-red-50 border border-red-200 rounded-lg">
-                <span className="w-2 h-2 rounded-full bg-red-500 animate-pulse"></span>
-                Recording
-              </span>
-            )}
-          </div>
+          <p className="text-[13px] sm:text-[14px] text-[#141414]/25 leading-relaxed">
+            {file 
+              ? `${(file.size / (1024 * 1024)).toFixed(1)} MB · Ready to process`
+              : isRecording 
+                ? 'Recording in progress…'
+                : 'Record a meeting or upload an audio file'
+            }
+          </p>
+        </motion.div>
 
-          {/* Content Area */}
-          <div className="min-h-[50vh]">
-            {/* Instructions textarea - always visible */}
-            <div className="mb-8">
-              <label className="text-[11px] font-mono uppercase text-[#141414]/40 mb-2 block tracking-wider">
-                Instructions (optional)
-              </label>
-              <textarea 
-                value={prompt}
-                onChange={(e) => setPrompt(e.target.value)}
-                className="w-full bg-white border border-[#141414]/10 rounded-xl p-4 text-[15px] text-[#141414] placeholder:text-[#141414]/30 focus:outline-none focus:border-[#141414]/30 resize-none shadow-sm transition-colors"
-                placeholder="Optional: Add context about the meeting (e.g., topic, participants)..."
-                rows={3}
-              />
-            </div>
+        {/* Status Pills */}
+        <AnimatePresence>
+          {(file || isRecording) && (
+            <motion.div 
+              initial={{ opacity: 0, scale: 0.95 }}
+              animate={{ opacity: 1, scale: 1 }}
+              exit={{ opacity: 0, scale: 0.95 }}
+              className="flex items-center gap-2 mb-8"
+            >
+              {file && !isRecording && (
+                <span className="flex items-center gap-1.5 px-3 py-1.5 text-[12px] font-medium text-green-700/80 bg-green-50 border border-green-200/50 rounded-full">
+                  <FileAudio className="w-3 h-3" />
+                  {file.name}
+                </span>
+              )}
+              {isRecording && (
+                <span className="flex items-center gap-2 px-3 py-1.5 text-[12px] font-medium text-red-600/80 bg-red-50 border border-red-200/50 rounded-full">
+                  <span className="w-1.5 h-1.5 rounded-full bg-red-500 animate-pulse" />
+                  Recording · {formatTime(recordingTime)}
+                </span>
+              )}
+            </motion.div>
+          )}
+        </AnimatePresence>
 
-            {/* Processing Progress */}
-            {batches.length > 0 && (
-              <div className="bg-white rounded-2xl border border-[#141414]/10 shadow-sm overflow-hidden mb-8">
-                <div className="px-5 py-4 border-b border-[#141414]/5 flex items-center justify-between">
+        {/* Processing Progress — only shows during/after processing */}
+        <AnimatePresence>
+          {isProcessing && (
+            <motion.div 
+              initial={{ opacity: 0, y: 16 }}
+              animate={{ opacity: 1, y: 0 }}
+              className="w-full max-w-[560px]"
+            >
+              <div className="bg-[#faf8f6] rounded-2xl border border-[#1a1a1a]/[0.05] overflow-hidden">
+                <div className="px-5 py-4 flex items-center justify-between">
                   <div className="flex items-center gap-3">
-                    {isProcessing ? (
-                      <Loader2 className="w-4 h-4 text-[#141414] animate-spin" />
-                    ) : (
-                      <CheckCircle2 className="w-4 h-4 text-green-600" />
-                    )}
-                    <span className="text-[14px] font-medium text-[#141414]">
-                      {isProcessing ? 'Processing audio...' : 'Processing complete'}
+                    <div className="w-7 h-7 rounded-full bg-[#1a1a1a]/[0.06] flex items-center justify-center">
+                      <Loader2 className="w-3.5 h-3.5 text-[#1a1a1a]/60 animate-spin" />
+                    </div>
+                    <span className="text-[13px] font-medium text-[#1a1a1a]/70">
+                      Processing audio…
                     </span>
                   </div>
-                  <span className="text-[13px] font-mono text-[#141414]/50">
+                  <span className="text-[12px] font-medium text-[#1a1a1a]/35 tabular-nums">
                     {Math.round(totalProgress)}%
                   </span>
                 </div>
                 
-                {/* Progress bar */}
-                <div className="h-1 bg-[#141414]/5">
+                <div className="h-[3px] bg-[#1a1a1a]/[0.04] mx-5 rounded-full overflow-hidden mb-4">
                   <motion.div 
-                    className="h-full bg-[#141414]"
+                    className="h-full bg-[#1a1a1a]/60 rounded-full"
                     initial={{ width: 0 }}
                     animate={{ width: `${totalProgress}%` }}
-                    transition={{ duration: 0.3 }}
+                    transition={{ duration: 0.4, ease: 'easeOut' }}
                   />
                 </div>
                 
-                {/* Batch list */}
-                <div className="max-h-[200px] overflow-y-auto">
-                  {batches.map((batch, idx) => (
-                    <div key={idx} className="px-5 py-3 border-b border-[#141414]/5 last:border-0 flex items-center justify-between">
-                      <div className="flex items-center gap-3">
-                        <div className={`w-6 h-6 rounded-full flex items-center justify-center text-[10px] font-mono ${
-                          batch.status === 'completed' 
-                            ? 'bg-[#141414] text-white' 
-                            : batch.status === 'processing'
-                            ? 'bg-[#141414]/10 text-[#141414]'
-                            : 'bg-[#141414]/5 text-[#141414]/50'
-                        }`}>
-                          {idx + 1}
+                {/* Batch list — only for batch mode */}
+                {desktopRecordingMode === 'batch' && batches.length > 0 && (
+                  <div className="max-h-[180px] overflow-y-auto">
+                    {batches.map((batch, idx) => (
+                      <div key={idx} className="px-5 py-2.5 flex items-center justify-between">
+                        <div className="flex items-center gap-2.5">
+                          <div className={`w-5 h-5 rounded-full flex items-center justify-center text-[9px] font-semibold ${
+                            batch.status === 'completed' 
+                              ? 'bg-[#1a1a1a] text-white' 
+                              : batch.status === 'processing'
+                              ? 'bg-[#1a1a1a]/10 text-[#1a1a1a]/60'
+                              : 'bg-[#1a1a1a]/[0.04] text-[#1a1a1a]/30'
+                          }`}>
+                            {idx + 1}
+                          </div>
+                          <span className="text-[12px] text-[#1a1a1a]/50">Batch {idx + 1}</span>
                         </div>
-                        <span className="text-[13px] text-[#141414]/70">Batch {idx + 1}</span>
+                        {batch.status === 'processing' && <Loader2 className="w-3 h-3 animate-spin text-[#1a1a1a]/30" />}
+                        {batch.status === 'completed' && <CheckCircle2 className="w-3 h-3 text-green-500" />}
                       </div>
-                      {batch.status === 'processing' && <Loader2 className="w-3.5 h-3.5 animate-spin text-[#141414]/50" />}
-                      {batch.status === 'completed' && <CheckCircle2 className="w-3.5 h-3.5 text-green-600" />}
-                    </div>
-                  ))}
-                </div>
+                    ))}
+                  </div>
+                )}
               </div>
-            )}
-          </div>
-        </div>
+            </motion.div>
+          )}
+        </AnimatePresence>
       </main>
 
-      {/* Start Processing Button - Shows above collapsed bar when file is ready */}
-      {file && !isRecording && !isProcessing && viewState === 'collapsed' && (
-        <div className="absolute bottom-[90px] sm:bottom-[100px] left-1/2 transform -translate-x-1/2 z-40 px-4 w-full sm:w-auto flex justify-center">
-          <motion.button 
-            initial={{ opacity: 0, y: 20 }}
-            animate={{ opacity: 1, y: 0 }}
-            onClick={startProcessing}
-            className="flex items-center gap-2.5 px-5 sm:px-6 py-3 sm:py-3.5 bg-[#141414] hover:bg-[#333] text-white rounded-full shadow-lg transition-all hover:scale-105"
+      {/* Start Processing — floating above bottom bar */}
+      <AnimatePresence>
+        {file && !isRecording && !isProcessing && !batches.length && viewState === 'collapsed' && (
+          <motion.div
+            initial={{ opacity: 0, y: 16, scale: 0.96 }}
+            animate={{ opacity: 1, y: 0, scale: 1 }}
+            exit={{ opacity: 0, y: 16, scale: 0.96 }}
+            transition={{ type: 'spring', stiffness: 400, damping: 30 }}
+            className="absolute bottom-[88px] sm:bottom-[96px] left-1/2 -translate-x-1/2 z-40"
           >
-            <Play className="w-4 h-4 fill-current" />
-            <span className="text-[13px] sm:text-[14px] font-semibold tracking-wide">Start Processing</span>
-          </motion.button>
-        </div>
-      )}
+            <button 
+              onClick={startProcessing}
+              className="flex items-center gap-2.5 px-6 py-3 bg-[#1a1a1a] hover:bg-[#333] text-white rounded-full shadow-lg shadow-black/10 transition-all hover:scale-[1.03] active:scale-[0.98]"
+            >
+              <Sparkles className="w-4 h-4" />
+              <span className="text-[13px] font-semibold">Start Processing</span>
+            </button>
+          </motion.div>
+        )}
+      </AnimatePresence>
 
-      {/* Processing Progress Bar - Shows during processing */}
-      {isProcessing && (
-        <div className="absolute bottom-[90px] sm:bottom-[100px] left-1/2 transform -translate-x-1/2 z-40 w-[calc(100%-32px)] sm:w-[600px] max-w-[600px]">
-          <motion.div 
-            initial={{ opacity: 0, y: 20 }}
-            animate={{ opacity: 1, y: 0 }}
-            className="bg-white rounded-full shadow-[0_4px_20px_rgba(0,0,0,0.12)] border border-[#141414]/10 px-4 sm:px-5 py-3 flex items-center justify-between"
+      {/* Processing pill — floating */}
+      <AnimatePresence>
+        {isProcessing && (
+          <motion.div
+            initial={{ opacity: 0, y: 16, scale: 0.96 }}
+            animate={{ opacity: 1, y: 0, scale: 1 }}
+            exit={{ opacity: 0, y: 16, scale: 0.96 }}
+            transition={{ type: 'spring', stiffness: 400, damping: 30 }}
+            className="absolute bottom-[88px] sm:bottom-[96px] left-1/2 -translate-x-1/2 z-40"
           >
-            <div className="flex items-center gap-3">
-              <Loader2 className="w-4 h-4 text-[#141414] animate-spin" />
-              <span className="text-[14px] font-medium text-[#141414]">
-                Processing • {Math.round(totalProgress)}%
-              </span>
-            </div>
-            <div className="flex items-center gap-2">
-              <div className="w-32 h-1.5 bg-[#141414]/10 rounded-full overflow-hidden">
-                <motion.div 
-                  className="h-full bg-[#141414] rounded-full"
-                  animate={{ width: `${totalProgress}%` }}
-                />
+            <div className="bg-[#1a1a1a]/90 backdrop-blur-xl text-white/90 pl-4 pr-5 py-2.5 flex items-center gap-3 rounded-full shadow-lg shadow-black/10">
+              <Loader2 className="w-3.5 h-3.5 animate-spin" />
+              <span className="text-[12px] font-medium">Processing · {Math.round(totalProgress)}%</span>
+              <div className="w-20 h-1.5 bg-white/15 rounded-full overflow-hidden">
+                <motion.div className="h-full bg-white/60 rounded-full" animate={{ width: `${totalProgress}%` }} />
               </div>
             </div>
           </motion.div>
-        </div>
-      )}
+        )}
+      </AnimatePresence>
 
-      {/* Bottom Bar - Collapsed State */}
-      {viewState === 'collapsed' && (
-        <div className="absolute bottom-4 sm:bottom-6 left-1/2 transform -translate-x-1/2 z-40 w-[calc(100%-32px)] sm:w-auto max-w-[600px]">
-          <div className="flex items-center gap-2 w-full sm:w-auto">
-            {/* Wave Animation Button */}
-            <div 
-              className="relative flex items-center bg-white rounded-full shadow-[0_2px_16px_rgba(0,0,0,0.1)] border border-[#141414]/10"
-              onMouseEnter={() => setShowTooltip(true)}
-              onMouseLeave={() => setShowTooltip(false)}
-            >
-              {/* Tooltip */}
-              <AnimatePresence>
-                {showTooltip && (
-                  <motion.div 
-                    initial={{ opacity: 0, y: 5 }}
-                    animate={{ opacity: 1, y: 0 }}
-                    exit={{ opacity: 0, y: 5 }}
-                    className="absolute -top-10 left-1/2 transform -translate-x-1/2 px-3 py-1.5 bg-[#141414] text-white text-[12px] rounded-lg whitespace-nowrap shadow-lg"
-                  >
-                    {isRecording ? 'Recording controls' : 'Upload or record'}
-                  </motion.div>
-                )}
-              </AnimatePresence>
-              
+      {/* ── Backdrop (only when expanded) ── */}
+      <AnimatePresence>
+        {viewState === 'expanded' && (
+          <motion.div
+            key="panel-backdrop"
+            initial={{ opacity: 0 }}
+            animate={{ opacity: 1 }}
+            exit={{ opacity: 0 }}
+            transition={{ duration: 0.2 }}
+            onClick={() => setViewState('collapsed')}
+            className="absolute inset-0 bg-black/[0.04] z-30"
+          />
+        )}
+      </AnimatePresence>
+
+      {/* ── Collapsed bottom bar ── */}
+      <AnimatePresence>
+        {!isProcessing && viewState === 'collapsed' && (
+          <motion.div
+            key="collapsed-bar"
+            initial={{ opacity: 0, y: 16 }}
+            animate={{ opacity: 1, y: 0 }}
+            exit={{ opacity: 0, y: 8 }}
+            transition={{ type: 'spring', damping: 28, stiffness: 380 }}
+            className="absolute bottom-5 sm:bottom-6 left-1/2 -translate-x-1/2 z-40 w-[calc(100%-40px)] sm:w-auto max-w-[560px]"
+          >
+            <div className="flex items-center gap-3">
+              {/* Left pill — waveform + chevron */}
               <button 
                 onClick={() => setViewState('expanded')}
-                className="flex items-center gap-2 hover:bg-[#F5F5F5] pl-4 pr-3 py-3 rounded-full transition-colors"
+                className="flex items-center gap-2.5 bg-white hover:bg-[#faf8f6] rounded-full shadow-[0_2px_20px_rgba(0,0,0,0.08)] border border-[#1a1a1a]/[0.05] pl-5 pr-4 py-3 transition-all group"
               >
                 {isRecording ? (
                   <>
@@ -327,412 +335,346 @@ export default function ProcessPage({
                       {[0, 1, 2].map((i) => (
                         <motion.div
                           key={i}
-                          className={`w-[3px] rounded-full transition-all duration-100 ${isPaused ? 'bg-[#141414]/40' : 'bg-red-500'}`}
+                          className={`w-[3.5px] rounded-full ${isPaused ? 'bg-[#1a1a1a]/20' : 'bg-red-400'}`}
                           style={{ height: `${barHeights[i]}px` }}
                         />
                       ))}
                     </div>
-                    <span className="text-[14px] font-medium text-red-500 ml-1">
+                    <span className="text-[13px] font-semibold text-red-500 tabular-nums">
                       {formatTime(recordingTime)}
                     </span>
                   </>
                 ) : (
                   <>
-                    <div className="flex items-center gap-[3px] h-[18px]">
+                    <div className="flex items-center gap-[4px] h-[18px]">
                       {[0, 1, 2].map((i) => (
-                        <div
-                          key={i}
-                          className="w-[3px] rounded-full bg-[#141414]/30"
-                          style={{ height: `${6 + i * 3}px` }}
-                        />
+                        <div key={i} className="w-[3.5px] rounded-full bg-[#1a1a1a]/15 group-hover:bg-[#1a1a1a]/30 transition-colors" style={{ height: `${7 + i * 4}px` }} />
                       ))}
                     </div>
-                    <ChevronUp className="w-3.5 h-3.5 text-[#141414]/50" />
+                    <ChevronUp className="w-4 h-4 text-[#1a1a1a]/25 group-hover:text-[#1a1a1a]/45 transition-colors" />
                   </>
                 )}
               </button>
-            </div>
 
-            {/* Main Action Bar */}
-            <div className="flex-1 sm:flex-none flex items-center bg-white rounded-full shadow-[0_2px_16px_rgba(0,0,0,0.1)] border border-[#141414]/10">
-              <div 
-                onClick={() => setViewState('expanded')}
-                className="flex-1 flex items-center px-4 sm:px-5 py-3 cursor-pointer sm:min-w-[280px] overflow-hidden"
-              >
-                <span className="text-[13px] sm:text-[14px] text-[#141414]/40 truncate">
-                  {file ? file.name : 'Drop audio or record...'}
-                </span>
+              {/* Right pill — text + record/upload button */}
+              <div className="flex-1 sm:flex-none flex items-center bg-white rounded-full shadow-[0_2px_20px_rgba(0,0,0,0.08)] border border-[#1a1a1a]/[0.05] pl-5 pr-1.5 py-1.5">
+                <div 
+                  onClick={() => setViewState('expanded')}
+                  className="flex-1 flex items-center py-1.5 cursor-pointer sm:min-w-[260px] overflow-hidden"
+                >
+                  <span className="text-[14px] text-[#1a1a1a]/25 truncate">
+                    {file ? file.name : 'Drop audio or record...'}
+                  </span>
+                </div>
+
+                <button 
+                  onClick={() => setInputMode(inputMode === 'upload' ? 'record' : 'upload')}
+                  className="flex-shrink-0 flex items-center gap-2 px-4 py-2.5 text-[13px] font-medium text-[#1a1a1a]/60 bg-[#1a1a1a]/[0.04] hover:bg-[#1a1a1a]/[0.07] rounded-full transition-all"
+                >
+                  {inputMode === 'upload' ? (
+                    <><Mic className="w-4 h-4 text-[#1a1a1a]/35" /><span>Record</span></>
+                  ) : (
+                    <><Upload className="w-4 h-4 text-[#1a1a1a]/35" /><span>Upload</span></>
+                  )}
+                </button>
               </div>
-
-              {/* Mode toggle button */}
-              <button 
-                onClick={() => setInputMode(inputMode === 'upload' ? 'record' : 'upload')}
-                className="flex-shrink-0 flex items-center gap-1.5 sm:gap-2 px-3 sm:px-4 py-2 mr-2 text-[12px] sm:text-[13px] font-medium text-[#141414] bg-white border border-[#141414]/10 hover:bg-[#F5F5F5] rounded-full transition-colors whitespace-nowrap shadow-sm"
-              >
-                {inputMode === 'upload' ? (
-                  <>
-                    <Mic className="w-3.5 sm:w-4 h-3.5 sm:h-4 text-[#141414]/50" />
-                    <span className="hidden sm:inline">Record</span>
-                  </>
-                ) : (
-                  <>
-                    <Upload className="w-3.5 sm:w-4 h-3.5 sm:h-4 text-[#141414]/50" />
-                    <span className="hidden sm:inline">Upload</span>
-                  </>
-                )}
-              </button>
             </div>
-          </div>
-        </div>
-      )}
+          </motion.div>
+        )}
+      </AnimatePresence>
 
-      {/* Expanded Panel */}
+      {/* ── Expanded panel ── */}
       <AnimatePresence>
-        {viewState === 'expanded' && (
-          <motion.div 
-            initial={{ y: '100%', opacity: 0 }}
-            animate={{ y: 0, opacity: 1 }}
-            exit={{ y: '100%', opacity: 0 }}
-            transition={{ type: 'spring', damping: 25, stiffness: 300 }}
-            className="absolute bottom-0 left-0 right-0 sm:left-1/2 sm:right-auto sm:transform sm:-translate-x-1/2 w-full sm:w-[720px] bg-white rounded-t-[20px] sm:rounded-t-[24px] shadow-[0_-4px_40px_rgba(0,0,0,0.12)] border border-[#141414]/10 border-b-0 flex flex-col z-40 overflow-hidden"
-            style={{ height: '70vh', maxHeight: '420px' }}
+        {!isProcessing && viewState === 'expanded' && (
+          <motion.div
+            key="expanded-panel"
+            initial={{ opacity: 0, scale: 0.92, y: 12 }}
+            animate={{ opacity: 1, scale: 1, y: 0 }}
+            exit={{ opacity: 0, scale: 0.95, y: 8 }}
+            transition={{ type: 'spring', damping: 28, stiffness: 350 }}
+            style={{ transformOrigin: 'bottom center' }}
+            className="absolute bottom-5 sm:bottom-6 left-1/2 -translate-x-1/2 w-[calc(100%-32px)] sm:w-[600px] h-[420px] max-h-[60vh] bg-white rounded-[24px] shadow-[0_4px_40px_rgba(0,0,0,0.12)] border border-[#1a1a1a]/[0.06] flex flex-col z-40 overflow-hidden"
+            onClick={(e) => e.stopPropagation()}
           >
-            {/* Header */}
-            <div className="flex items-center justify-between px-5 py-3 border-b border-[#141414]/5">
-              <div className="flex items-center gap-3">
-                {/* Mode Toggle */}
-                <div className="flex bg-[#F5F5F5] rounded-lg p-1">
+            {/* Drag handle */}
+            <div className="flex justify-center pt-3 pb-1">
+              <div className="w-8 h-1 rounded-full bg-[#1a1a1a]/10" />
+            </div>
+
+              {/* Header */}
+              <div className="flex items-center justify-between px-5 py-2.5">
+                <div className="flex gap-0.5 bg-[#1a1a1a]/[0.04] rounded-lg p-0.5">
                   <button
                     onClick={() => setInputMode('upload')}
-                    className={`flex items-center gap-2 px-3 py-1.5 text-[12px] font-medium rounded-md transition-all ${
+                    className={`flex items-center gap-1.5 px-3 py-[6px] text-[12px] font-medium rounded-md transition-all ${
                       inputMode === 'upload' 
-                        ? 'bg-white shadow-sm text-[#141414]' 
-                        : 'text-[#141414]/50 hover:text-[#141414]'
+                        ? 'bg-white shadow-sm shadow-black/[0.04] text-[#1a1a1a]' 
+                        : 'text-[#1a1a1a]/35 hover:text-[#1a1a1a]/55'
                     }`}
                   >
                     <Upload className="w-3.5 h-3.5" /> Upload
                   </button>
                   <button
                     onClick={() => setInputMode('record')}
-                    className={`flex items-center gap-2 px-3 py-1.5 text-[12px] font-medium rounded-md transition-all ${
+                    className={`flex items-center gap-1.5 px-3 py-[6px] text-[12px] font-medium rounded-md transition-all ${
                       inputMode === 'record' 
-                        ? 'bg-white shadow-sm text-[#141414]' 
-                        : 'text-[#141414]/50 hover:text-[#141414]'
+                        ? 'bg-white shadow-sm shadow-black/[0.04] text-[#1a1a1a]' 
+                        : 'text-[#1a1a1a]/35 hover:text-[#1a1a1a]/55'
                     }`}
                   >
                     <Mic className="w-3.5 h-3.5" /> Record
                   </button>
                 </div>
-              </div>
-              <button 
-                onClick={() => setViewState('collapsed')}
-                className="text-[#141414]/50 hover:text-[#141414] p-1.5 hover:bg-[#F5F5F5] rounded-lg transition-colors"
-              >
-                <Minus className="w-5 h-5" />
-              </button>
-            </div>
-
-            {/* Content */}
-            <div className={`flex-1 p-4 sm:p-6 ${isRecording && desktopRecordingMode === 'realtime' && inputMode === 'record' ? 'overflow-y-auto' : 'overflow-hidden'}`}>
-              {inputMode === 'upload' ? (
-                /* Upload Mode */
-                <div 
-                  onClick={() => fileInputRef.current?.click()}
-                  onDrop={handleDrop}
-                  onDragOver={handleDragOver}
-                  onDragLeave={handleDragLeave}
-                  className={`h-full border-2 border-dashed rounded-2xl flex flex-col items-center justify-center cursor-pointer transition-all ${
-                    isDragOver 
-                      ? 'border-[#141414] bg-[#141414]/5' 
-                      : file 
-                        ? 'border-green-300 bg-green-50/50' 
-                        : 'border-[#141414]/20 hover:border-[#141414]/40 hover:bg-[#F5F5F5]'
-                  }`}
+                <button 
+                  onClick={() => setViewState('collapsed')}
+                  className="text-[#1a1a1a]/30 hover:text-[#1a1a1a]/60 p-1.5 hover:bg-[#1a1a1a]/[0.04] rounded-lg transition-colors"
                 >
-                  <input 
-                    type="file" 
-                    ref={fileInputRef} 
-                    onChange={handleFileChange} 
-                    className="hidden" 
-                    accept="audio/*" 
-                  />
-                  
-                  {file ? (
-                    <div className="flex flex-col items-center gap-4">
-                      <div className="w-16 h-16 rounded-2xl bg-green-100 flex items-center justify-center">
-                        <FileAudio className="w-8 h-8 text-green-600" />
-                      </div>
-                      <div className="text-center">
-                        <p className="text-[15px] font-medium text-[#141414] mb-1">{file.name}</p>
-                        <p className="text-[13px] text-[#141414]/50">{(file.size / (1024 * 1024)).toFixed(2)} MB</p>
-                      </div>
-                      <button 
-                        onClick={(e) => { e.stopPropagation(); setFile(null); }}
-                        className="text-[13px] text-[#141414]/50 hover:text-[#141414] underline"
-                      >
-                        Remove file
-                      </button>
-                    </div>
-                  ) : (
-                    <div className="flex flex-col items-center gap-4">
-                      <div className="w-16 h-16 rounded-2xl bg-[#141414]/5 flex items-center justify-center">
-                        <Upload className="w-8 h-8 text-[#141414]/30" />
-                      </div>
-                      <div className="text-center">
-                        <p className="text-[15px] font-medium text-[#141414] mb-1">Drop audio file here</p>
-                        <p className="text-[13px] text-[#141414]/50">or click to browse</p>
-                      </div>
-                    </div>
-                  )}
-                </div>
-              ) : (
-                /* Record Mode */
-                <div className="h-full flex flex-col">
-                  {isRecording ? (
-                    desktopRecordingMode === 'realtime' ? (
-                    /* ── Real-time Recording: compact controls + scrollable transcript ── */
-                    <div className="flex flex-col h-full">
-                      {/* Compact Top Bar */}
-                      <div className="flex items-center justify-between py-2 flex-shrink-0">
-                        <div className="flex items-center gap-2.5">
-                          <span className="w-1.5 h-1.5 rounded-full bg-red-500 animate-pulse" />
-                          <span className="text-[13px] font-mono font-semibold text-[#141414] tabular-nums">{formatTime(recordingTime)}</span>
-                          <span className="text-[10px] px-2 py-0.5 rounded-full bg-red-50 text-red-500 font-medium">Live</span>
-                          {currentInputDevice && (
-                            <span className="text-[10px] px-2 py-0.5 rounded-full bg-[#141414]/5 text-[#141414]/60 font-medium truncate max-w-[140px]" title={currentInputDevice}>
-                              🎤 {currentInputDevice}
-                            </span>
-                          )}
-                          {deviceRestartNotice && (
-                            <span className="text-[10px] px-2 py-0.5 rounded-full bg-amber-50 text-amber-600 font-medium animate-pulse">
-                              Switching device…
-                            </span>
-                          )}
-                        </div>
-                        <div className="flex items-center gap-2">
-                          <div className="flex items-end gap-[3px] h-3.5">
-                            {[...Array(6)].map((_, i) => (
-                              <motion.div
-                                key={i}
-                                animate={{ height: isPaused ? '30%' : ['30%', '100%', '30%'] }}
-                                transition={isPaused ? { duration: 0.3 } : { duration: 0.6, repeat: Infinity, delay: i * 0.07, ease: "easeInOut" }}
-                                className={`w-[3px] rounded-full ${isPaused ? 'bg-[#141414]/15' : 'bg-red-400'}`}
-                              />
-                            ))}
-                          </div>
-                          <button onClick={stopRecording} className="ml-2 px-3.5 py-1.5 bg-red-500 text-white text-[12px] font-medium rounded-full hover:bg-red-600 transition-colors flex items-center gap-1.5">
-                            <StopCircle className="w-3.5 h-3.5" />
-                            Stop
-                          </button>
-                        </div>
-                      </div>
+                  <ChevronDown className="w-5 h-5" />
+                </button>
+              </div>
 
-                      {/* Transcript — this is the only scrollable area */}
-                      <div className="flex-1 overflow-y-auto mt-2 -mx-4 sm:-mx-6 px-4 sm:px-6 border-t border-[#141414]/5 pt-3">
-                        <div className="flex items-center gap-2 mb-3">
-                          <span className="w-1.5 h-1.5 rounded-full bg-green-500"></span>
-                          <span className="text-[10px] font-semibold text-[#141414]/35 uppercase tracking-wider">Live Transcript</span>
-                          <span className="text-[10px] text-[#141414]/25 ml-auto tabular-nums">{realtimeTranscript.length}</span>
+              {/* Content */}
+              <div className={`flex-1 px-5 pb-5 ${isRecording && desktopRecordingMode === 'realtime' && inputMode === 'record' ? 'overflow-y-auto' : 'overflow-hidden'}`}>
+                {inputMode === 'upload' ? (
+                  /* Upload Mode */
+                  <motion.div 
+                    initial={{ opacity: 0, scale: 0.98 }}
+                    animate={{ opacity: 1, scale: 1 }}
+                    transition={{ delay: 0.1 }}
+                    onClick={() => fileInputRef.current?.click()}
+                    onDrop={handleDrop}
+                    onDragOver={handleDragOver}
+                    onDragLeave={handleDragLeave}
+                    className={`h-full rounded-2xl flex flex-col items-center justify-center cursor-pointer transition-all ${
+                      isDragOver 
+                        ? 'bg-[#1a1a1a]/[0.06] border-2 border-[#1a1a1a]/20' 
+                        : file 
+                          ? 'bg-green-50/60 border-2 border-green-200/40' 
+                          : 'bg-[#faf8f6] border-2 border-dashed border-[#1a1a1a]/[0.08] hover:border-[#1a1a1a]/15 hover:bg-[#f5f0eb]/50'
+                    }`}
+                  >
+                    <input type="file" ref={fileInputRef} onChange={handleFileChange} className="hidden" accept="audio/*" />
+                    
+                    {file ? (
+                      <motion.div initial={{ opacity: 0, y: 8 }} animate={{ opacity: 1, y: 0 }} className="flex flex-col items-center gap-3">
+                        <div className="w-14 h-14 rounded-2xl bg-green-100/80 flex items-center justify-center">
+                          <FileAudio className="w-7 h-7 text-green-600/70" />
                         </div>
-
-                        {realtimeTranscript.length === 0 && !interimTranscript ? (
-                          <div className="flex flex-col items-center justify-center py-12 text-[#141414]/25">
-                            <p className="text-[13px]">Waiting for speech...</p>
-                          </div>
-                        ) : (
-                          <div className="space-y-1">
-                            {realtimeTranscript.map((line, i) => (
-                              <div key={i} className="py-1.5">
-                                <p className="text-[13px] text-[#141414]/80 leading-relaxed">{line}</p>
-                              </div>
-                            ))}
-                            {interimTranscript && (
-                              <div className="py-1.5">
-                                <p className="text-[13px] text-[#141414]/30 italic leading-relaxed">{interimTranscript}</p>
-                              </div>
-                            )}
-                            <div ref={transcriptEndRef} />
-                          </div>
-                        )}
-                      </div>
-                    </div>
-                    ) : (
-                    /* ── Batch Recording: centered controls ── */
-                    <div className="flex flex-col items-center justify-center h-full gap-6">
-                      <div className="text-[42px] font-mono font-bold text-[#141414] tracking-wider tabular-nums">
-                        {formatTime(recordingTime)}
-                      </div>
-                      
-                      <div className="flex items-end justify-center gap-[3px] h-8 w-full max-w-[180px]">
-                        {[...Array(20)].map((_, i) => (
-                          <motion.div
-                            key={i}
-                            animate={{ 
-                              height: isPaused ? '20%' : ['20%', '100%', '20%'] 
-                            }}
-                            transition={isPaused ? { duration: 0.3 } : {
-                              duration: 0.8,
-                              repeat: Infinity,
-                              delay: i * 0.04,
-                              ease: "easeInOut"
-                            }}
-                            className={`w-[3px] rounded-full ${isPaused ? 'bg-[#141414]/20' : 'bg-red-400'}`}
-                          />
-                        ))}
-                      </div>
-
-                      <div className="flex items-center gap-3">
-                        {isPaused ? (
-                          <button 
-                            onClick={resumeRecording}
-                            className="w-11 h-11 bg-[#141414] text-white rounded-full flex items-center justify-center hover:bg-[#333] transition-colors"
-                          >
-                            <PlayCircle className="w-5 h-5" />
-                          </button>
-                        ) : (
-                          <button 
-                            onClick={pauseRecording}
-                            className="w-11 h-11 bg-[#141414]/8 text-[#141414]/60 rounded-full flex items-center justify-center hover:bg-[#141414]/15 transition-colors"
-                          >
-                            <PauseCircle className="w-5 h-5" />
-                          </button>
-                        )}
-                        
+                        <div className="text-center">
+                          <p className="text-[14px] font-medium text-[#1a1a1a]/80 mb-0.5">{file.name}</p>
+                          <p className="text-[12px] text-[#1a1a1a]/35">{(file.size / (1024 * 1024)).toFixed(2)} MB</p>
+                        </div>
                         <button 
-                          onClick={stopRecording}
-                          className="w-12 h-12 bg-red-500 text-white rounded-full flex items-center justify-center hover:bg-red-600 transition-colors"
+                          onClick={(e) => { e.stopPropagation(); setFile(null); }}
+                          className="text-[11px] font-medium text-[#1a1a1a]/30 hover:text-[#1a1a1a]/60 transition-colors"
                         >
-                          <StopCircle className="w-5.5 h-5.5" />
+                          Remove
                         </button>
-                      </div>
-                      
-                      <span className={`text-[11px] font-mono uppercase tracking-widest ${
-                        isPaused ? 'text-[#141414]/40' : 'text-red-400'
-                      }`}>
-                        {isPaused ? 'Paused' : 'Recording'}
-                      </span>
-
-                      {/* Device info badge in batch mode */}
-                      {currentInputDevice && (
-                        <div className="flex items-center gap-2 mt-1">
-                          <span className="text-[10px] px-2.5 py-1 rounded-full bg-[#141414]/5 text-[#141414]/50 font-medium">
-                            🎤 {currentInputDevice}
-                          </span>
-                          {deviceRestartNotice && (
-                            <span className="text-[10px] px-2.5 py-1 rounded-full bg-amber-50 text-amber-600 font-medium animate-pulse">
-                              Switching device…
-                            </span>
-                          )}
+                      </motion.div>
+                    ) : (
+                      <motion.div initial={{ opacity: 0, y: 8 }} animate={{ opacity: 1, y: 0 }} className="flex flex-col items-center gap-3">
+                        <div className="w-14 h-14 rounded-2xl bg-[#1a1a1a]/[0.04] flex items-center justify-center">
+                          <Upload className="w-7 h-7 text-[#1a1a1a]/20" />
                         </div>
-                      )}
-                    </div>
-                    )
-                  ) : file ? (
-                    <div className="flex flex-col items-center justify-center h-full gap-4">
-                      <div className="w-12 h-12 rounded-xl bg-green-50 flex items-center justify-center">
-                        <CheckCircle2 className="w-6 h-6 text-green-600" />
-                      </div>
-                      <div className="text-center">
-                        <p className="text-[14px] font-medium text-[#141414] mb-0.5">Recording saved</p>
-                        <p className="text-[12px] text-[#141414]/40 tabular-nums">{formatTime(recordingTime)}</p>
-                      </div>
-                      <button 
-                        onClick={() => { setFile(null); startRecording(); }}
-                        className="text-[12px] text-[#141414]/40 hover:text-[#141414] transition-colors"
-                      >
-                        Record again
-                      </button>
-                    </div>
-                  ) : (
-                    <div className="flex flex-col items-center justify-center h-full">
-                      {nativeServerAvailable && !permissionsGranted ? (
-                        <PermissionsGate onAllGranted={onPermissionsGranted} />
-                      ) : (
-                        <div className="flex flex-col items-center gap-5">
-                          {/* Mode Selector — inline, compact */}
-                          {nativeServerAvailable && (
-                            <div className="flex flex-col items-center gap-2">
-                              <div className="flex bg-[#141414]/[0.04] rounded-lg p-0.5">
-                                <button
-                                  onClick={() => setDesktopRecordingMode('batch')}
-                                  className={`flex items-center gap-1.5 px-3.5 py-1.5 rounded-md text-[12px] font-medium transition-all ${
-                                    desktopRecordingMode === 'batch'
-                                      ? 'bg-white text-[#141414] shadow-sm'
-                                      : 'text-[#141414]/40 hover:text-[#141414]/60'
-                                  }`}
-                                >
-                                  <Layers className="w-3 h-3" />
-                                  Batch
-                                </button>
-                                <button
-                                  onClick={() => setDesktopRecordingMode('realtime')}
-                                  className={`flex items-center gap-1.5 px-3.5 py-1.5 rounded-md text-[12px] font-medium transition-all ${
-                                    desktopRecordingMode === 'realtime'
-                                      ? 'bg-white text-[#141414] shadow-sm'
-                                      : 'text-[#141414]/40 hover:text-[#141414]/60'
-                                  }`}
-                                >
-                                  <Radio className="w-3 h-3" />
-                                  Real-time
-                                </button>
-                              </div>
-                              <p className="text-[10px] text-[#141414]/30 text-center max-w-[260px]">
-                                {desktopRecordingMode === 'batch'
-                                  ? 'Mic + system audio · transcribed after stop'
-                                  : 'Live transcription via Deepgram'}
-                              </p>
+                        <div className="text-center">
+                          <p className="text-[14px] font-medium text-[#1a1a1a]/60">Drop audio file here</p>
+                          <p className="text-[12px] text-[#1a1a1a]/25 mt-0.5">or click to browse</p>
+                        </div>
+                      </motion.div>
+                    )}
+                  </motion.div>
+                ) : (
+                  /* Record Mode */
+                  <div className="h-full flex flex-col">
+                    {isRecording ? (
+                      desktopRecordingMode === 'realtime' ? (
+                      /* Real-time Recording */
+                      <div className="flex flex-col h-full">
+                        <div className="flex items-center justify-between py-2 flex-shrink-0">
+                          <div className="flex items-center gap-2">
+                            <span className="w-1.5 h-1.5 rounded-full bg-red-500 animate-pulse" />
+                            <span className="text-[13px] font-mono font-semibold text-[#1a1a1a] tabular-nums">{formatTime(recordingTime)}</span>
+                            <span className="text-[10px] px-2 py-0.5 rounded-full bg-red-50 text-red-500/80 font-medium">Live</span>
+                            {currentInputDevice && (
+                              <span className="text-[10px] px-2 py-0.5 rounded-full bg-[#1a1a1a]/[0.04] text-[#1a1a1a]/40 font-medium truncate max-w-[120px]" title={currentInputDevice}>
+                                {currentInputDevice}
+                              </span>
+                            )}
+                          </div>
+                          <div className="flex items-center gap-2">
+                            <div className="flex items-end gap-[3px] h-3.5">
+                              {[...Array(6)].map((_, i) => (
+                                <motion.div
+                                  key={i}
+                                  animate={{ height: isPaused ? '30%' : ['30%', '100%', '30%'] }}
+                                  transition={isPaused ? { duration: 0.3 } : { duration: 0.6, repeat: Infinity, delay: i * 0.07, ease: "easeInOut" }}
+                                  className={`w-[3px] rounded-full ${isPaused ? 'bg-[#1a1a1a]/10' : 'bg-red-400/70'}`}
+                                />
+                              ))}
+                            </div>
+                            <button onClick={stopRecording} className="ml-1 px-3 py-1.5 bg-red-500 text-white text-[11px] font-medium rounded-full hover:bg-red-600 transition-colors flex items-center gap-1.5">
+                              <StopCircle className="w-3 h-3" /> Stop
+                            </button>
+                          </div>
+                        </div>
+
+                        <div className="flex-1 overflow-y-auto mt-2 -mx-5 px-5 border-t border-[#1a1a1a]/[0.04] pt-3">
+                          <div className="flex items-center gap-2 mb-3">
+                            <span className="w-1.5 h-1.5 rounded-full bg-green-500" />
+                            <span className="text-[10px] font-semibold text-[#1a1a1a]/25 uppercase tracking-wider">Live Transcript</span>
+                          </div>
+                          {realtimeTranscript.length === 0 && !interimTranscript ? (
+                            <div className="flex flex-col items-center justify-center py-12">
+                              <p className="text-[13px] text-[#1a1a1a]/20">Waiting for speech…</p>
+                            </div>
+                          ) : (
+                            <div className="space-y-1">
+                              {realtimeTranscript.map((line, i) => (
+                                <p key={i} className="text-[13px] text-[#1a1a1a]/65 leading-relaxed py-1">{line}</p>
+                              ))}
+                              {interimTranscript && <p className="text-[13px] text-[#1a1a1a]/25 italic leading-relaxed py-1">{interimTranscript}</p>}
+                              <div ref={transcriptEndRef} />
                             </div>
                           )}
-
-                          <button 
-                            onClick={startRecording}
-                            className="group flex items-center gap-2.5 px-6 py-3 bg-[#141414] text-white text-[13px] font-medium rounded-full hover:bg-[#222] transition-colors"
-                          >
-                            <span className="w-2 h-2 rounded-full bg-red-500 group-hover:animate-pulse"></span>
-                            Start Recording
-                          </button>
-
-                          {!nativeServerAvailable && (
-                            <p className="text-[10px] text-[#141414]/25 text-center">
-                              Browser mic only — run as desktop app for system audio
-                            </p>
-                          )}
                         </div>
-                      )}
-                    </div>
-                  )}
-                </div>
-              )}
-            </div>
+                      </div>
+                      ) : (
+                      /* Batch Recording */
+                      <motion.div initial={{ opacity: 0 }} animate={{ opacity: 1 }} className="flex flex-col items-center justify-center h-full gap-5">
+                        <div className="text-[40px] font-mono font-bold text-[#1a1a1a] tracking-wider tabular-nums">
+                          {formatTime(recordingTime)}
+                        </div>
+                        
+                        <div className="flex items-end justify-center gap-[3px] h-7 w-full max-w-[160px]">
+                          {[...Array(18)].map((_, i) => (
+                            <motion.div
+                              key={i}
+                              animate={{ height: isPaused ? '20%' : ['20%', '100%', '20%'] }}
+                              transition={isPaused ? { duration: 0.3 } : { duration: 0.8, repeat: Infinity, delay: i * 0.04, ease: "easeInOut" }}
+                              className={`w-[3px] rounded-full ${isPaused ? 'bg-[#1a1a1a]/15' : 'bg-red-400/70'}`}
+                            />
+                          ))}
+                        </div>
 
-            {/* Bottom Bar */}
-            <div className="px-5 py-3 bg-[#FAFAFA] border-t border-[#141414]/5 flex items-center justify-between">
-              <button 
-                onClick={() => setViewState('collapsed')}
-                className="flex items-center gap-1.5 text-[#141414]/50 hover:text-[#141414] transition-colors"
-              >
-                <div className="flex items-center gap-[2px] h-[14px]">
-                  {[0, 1, 2].map((i) => (
-                    <div
-                      key={i}
-                      className={`w-[2px] rounded-sm ${isRecording && !isPaused ? 'bg-red-500' : 'bg-[#141414]/30'}`}
-                      style={{ height: `${isRecording && !isPaused ? barHeights[i] * 0.6 : 4 + i * 2}px` }}
-                    />
-                  ))}
-                </div>
-                <ChevronDown className="w-3.5 h-3.5" />
-              </button>
-              
-              {file && !isRecording && (
+                        <div className="flex items-center gap-3">
+                          {isPaused ? (
+                            <button onClick={resumeRecording} className="w-10 h-10 bg-[#1a1a1a] text-white rounded-full flex items-center justify-center hover:bg-[#333] transition-colors">
+                              <PlayCircle className="w-5 h-5" />
+                            </button>
+                          ) : (
+                            <button onClick={pauseRecording} className="w-10 h-10 bg-[#1a1a1a]/[0.06] text-[#1a1a1a]/50 rounded-full flex items-center justify-center hover:bg-[#1a1a1a]/10 transition-colors">
+                              <PauseCircle className="w-5 h-5" />
+                            </button>
+                          )}
+                          <button onClick={stopRecording} className="w-11 h-11 bg-red-500 text-white rounded-full flex items-center justify-center hover:bg-red-600 transition-colors shadow-sm shadow-red-500/20">
+                            <StopCircle className="w-5 h-5" />
+                          </button>
+                        </div>
+                        
+                        <span className={`text-[10px] font-medium uppercase tracking-widest ${isPaused ? 'text-[#1a1a1a]/30' : 'text-red-400/80'}`}>
+                          {isPaused ? 'Paused' : 'Recording'}
+                        </span>
+
+                        {currentInputDevice && (
+                          <div className="flex items-center gap-2 mt-1">
+                            <span className="text-[10px] px-2.5 py-1 rounded-full bg-[#1a1a1a]/[0.04] text-[#1a1a1a]/35 font-medium">
+                              {currentInputDevice}
+                            </span>
+                            {deviceRestartNotice && (
+                              <span className="text-[10px] px-2.5 py-1 rounded-full bg-amber-50 text-amber-600/70 font-medium animate-pulse">
+                                Switching…
+                              </span>
+                            )}
+                          </div>
+                        )}
+                      </motion.div>
+                      )
+                    ) : file ? (
+                      <motion.div initial={{ opacity: 0, y: 8 }} animate={{ opacity: 1, y: 0 }} className="flex flex-col items-center justify-center h-full gap-3">
+                        <div className="w-12 h-12 rounded-2xl bg-green-50 flex items-center justify-center">
+                          <CheckCircle2 className="w-6 h-6 text-green-500" />
+                        </div>
+                        <p className="text-[14px] font-medium text-[#1a1a1a]/70">Recording saved</p>
+                        <p className="text-[11px] text-[#1a1a1a]/30 tabular-nums">{formatTime(recordingTime)}</p>
+                        <button onClick={() => { setFile(null); startRecording(); }} className="text-[11px] font-medium text-[#1a1a1a]/30 hover:text-[#1a1a1a]/60 transition-colors mt-1">
+                          Record again
+                        </button>
+                      </motion.div>
+                    ) : (
+                      <div className="flex flex-col items-center justify-center h-full">
+                        {nativeServerAvailable && !permissionsGranted ? (
+                          <PermissionsGate onAllGranted={onPermissionsGranted} />
+                        ) : (
+                          <motion.div initial={{ opacity: 0, y: 8 }} animate={{ opacity: 1, y: 0 }} className="flex flex-col items-center gap-5">
+                            {nativeServerAvailable && (
+                              <div className="flex flex-col items-center gap-2">
+                                <div className="flex gap-0.5 bg-[#1a1a1a]/[0.04] rounded-lg p-0.5">
+                                  <button
+                                    onClick={() => setDesktopRecordingMode('batch')}
+                                    className={`flex items-center gap-1.5 px-3.5 py-[6px] rounded-md text-[12px] font-medium transition-all ${
+                                      desktopRecordingMode === 'batch' ? 'bg-white text-[#1a1a1a] shadow-sm shadow-black/[0.04]' : 'text-[#1a1a1a]/35 hover:text-[#1a1a1a]/55'
+                                    }`}
+                                  >
+                                    <Layers className="w-3 h-3" /> Batch
+                                  </button>
+                                  <button
+                                    onClick={() => setDesktopRecordingMode('realtime')}
+                                    className={`flex items-center gap-1.5 px-3.5 py-[6px] rounded-md text-[12px] font-medium transition-all ${
+                                      desktopRecordingMode === 'realtime' ? 'bg-white text-[#1a1a1a] shadow-sm shadow-black/[0.04]' : 'text-[#1a1a1a]/35 hover:text-[#1a1a1a]/55'
+                                    }`}
+                                  >
+                                    <Radio className="w-3 h-3" /> Real-time
+                                  </button>
+                                </div>
+                                <p className="text-[10px] text-[#1a1a1a]/25 text-center max-w-[240px]">
+                                  {desktopRecordingMode === 'batch' ? 'Mic + system audio · transcribed after stop' : 'Live transcription via Deepgram'}
+                                </p>
+                              </div>
+                            )}
+
+                            <button 
+                              onClick={startRecording}
+                              className="group flex items-center gap-2.5 px-6 py-3 bg-[#1a1a1a] text-white text-[13px] font-medium rounded-full hover:bg-[#333] transition-all hover:scale-[1.02] active:scale-[0.98]"
+                            >
+                              <span className="w-2 h-2 rounded-full bg-red-500 group-hover:animate-pulse" />
+                              Start Recording
+                            </button>
+
+                            {!nativeServerAvailable && (
+                              <p className="text-[10px] text-[#1a1a1a]/20 text-center">Browser mic only — run as desktop app for system audio</p>
+                            )}
+                          </motion.div>
+                        )}
+                      </div>
+                    )}
+                  </div>
+                )}
+              </div>
+
+              {/* Panel bottom bar */}
+              <div className="px-5 py-3 bg-[#faf8f6] border-t border-[#1a1a1a]/[0.04] flex items-center justify-between">
                 <button 
-                  onClick={() => { setViewState('collapsed'); startProcessing(); }}
-                  className="flex items-center gap-2 px-4 py-2 bg-[#141414] text-white text-[13px] font-medium rounded-full hover:bg-[#333] transition-colors"
+                  onClick={() => setViewState('collapsed')}
+                  className="flex items-center gap-1.5 text-[#1a1a1a]/30 hover:text-[#1a1a1a]/60 transition-colors"
                 >
-                  <Play className="w-3.5 h-3.5 fill-current" />
-                  Process Audio
+                  <div className="flex items-center gap-[2px] h-[14px]">
+                    {[0, 1, 2].map((i) => (
+                      <div key={i} className={`w-[2px] rounded-sm ${isRecording && !isPaused ? 'bg-red-400' : 'bg-[#1a1a1a]/20'}`} style={{ height: `${isRecording && !isPaused ? barHeights[i] * 0.6 : 4 + i * 2}px` }} />
+                    ))}
+                  </div>
+                  <ChevronDown className="w-3.5 h-3.5" />
                 </button>
-              )}
-            </div>
+                
+                {file && !isRecording && (
+                  <button 
+                    onClick={() => { setViewState('collapsed'); startProcessing(); }}
+                    className="flex items-center gap-2 px-4 py-2 bg-[#1a1a1a] text-white text-[12px] font-medium rounded-full hover:bg-[#333] transition-all"
+                  >
+                    <Sparkles className="w-3.5 h-3.5" />
+                    Process Audio
+                  </button>
+                )}
+              </div>
           </motion.div>
         )}
       </AnimatePresence>

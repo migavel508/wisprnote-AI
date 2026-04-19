@@ -45,7 +45,7 @@ export interface GeneratedAsset {
   created_at?: string;
   user_id?: string;
   task_id: string;
-  type: 'ppt' | 'report' | 'email' | 'wiki';
+  type: 'email' | 'wiki';
   filename: string;
   content: any; // JSON structure for slides or report sections
 }
