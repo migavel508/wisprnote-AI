@@ -151,46 +151,53 @@ export default function NotesPage({ selectedTask, onNavigateToAssets, isLoading 
   };
 
   return (
-    <div className="absolute inset-0 flex flex-col bg-[#faf9f7] overflow-hidden">
-      {/* Compact Fixed Header */}
-      <div className="flex-none bg-[#faf9f7] border-b border-[#141414]/10">
-        <div className="max-w-4xl mx-auto w-full px-4 sm:px-6 py-3">
-          {/* Top row: Breadcrumb */}
-          <div className="flex items-center gap-2 mb-2 opacity-50 text-xs overflow-hidden">
-            <BookOpen className="w-3 h-3 flex-shrink-0" />
+    <div className="absolute inset-0 flex flex-col bg-white overflow-hidden">
+      {/* Header */}
+      <div className="flex-none bg-white/80 backdrop-blur-lg border-b border-[#141414]/[0.06] sticky top-0 z-10">
+        <div className="max-w-3xl lg:max-w-4xl mx-auto w-full px-6 sm:px-8 pt-6 pb-4">
+          {/* Breadcrumb */}
+          <div className="flex items-center gap-1.5 mb-3 text-[11px] text-[#141414]/35 font-medium">
+            <BookOpen className="w-3 h-3" />
             <span className="truncate">{selectedTask.filename}</span>
+            <span>·</span>
+            <span className="flex-shrink-0">
+              {new Date(selectedTask.created_at!).toLocaleDateString('en-US', { month: 'short', day: 'numeric', year: 'numeric' })}
+            </span>
           </div>
           
-          {/* Title + Meta inline */}
-          <div className="flex items-center gap-4 mb-3">
-            <h1 className="text-lg sm:text-xl font-bold tracking-tight truncate flex-1">{selectedTask.filename}</h1>
+          {/* Title row */}
+          <div className="flex items-center gap-3 mb-5">
+            <h1 className="text-[22px] sm:text-[26px] font-semibold tracking-[-0.02em] text-[#1a1a1a] truncate flex-1 leading-tight">
+              {selectedTask.filename}
+            </h1>
             <button
               onClick={handleGenerateTitle}
               disabled={isGeneratingTitle}
-              className="flex-shrink-0 flex items-center gap-1.5 px-2 py-1 text-[10px] font-mono opacity-60 hover:opacity-100 hover:bg-gray-100 rounded transition-all disabled:opacity-40"
+              className="flex-shrink-0 flex items-center gap-1.5 px-2.5 py-1.5 text-[11px] font-medium text-[#141414]/40 hover:text-[#141414]/70 hover:bg-[#141414]/[0.04] rounded-lg transition-all disabled:opacity-30"
               title="Generate AI title based on content"
             >
               {isGeneratingTitle ? (
-                <Loader2 className="w-3 h-3 animate-spin" />
+                <Loader2 className="w-3.5 h-3.5 animate-spin" />
               ) : titleGenerated ? (
-                <Check className="w-3 h-3 text-green-600" />
+                <Check className="w-3.5 h-3.5 text-green-600" />
               ) : (
-                <Sparkles className="w-3 h-3" />
+                <Sparkles className="w-3.5 h-3.5" />
               )}
-              <span className="hidden sm:inline">{titleGenerated ? 'Done!' : 'Generate Title'}</span>
+              <span className="hidden sm:inline">{titleGenerated ? 'Done!' : 'AI Title'}</span>
             </button>
-            <span className="text-[10px] font-mono opacity-40 flex-shrink-0 hidden sm:block">
-              {new Date(selectedTask.created_at!).toLocaleDateString()}
-            </span>
           </div>
 
-          {/* Tab Switcher - Compact */}
-          <div className="flex gap-1">
+          {/* Tab Switcher — pill style */}
+          <div className="flex gap-0.5 bg-[#141414]/[0.04] rounded-lg p-0.5 w-fit">
             {(['transcription', 'summary', 'notes', 'note'] as NoteTab[]).map((tab) => (
               <button
                 key={tab}
                 onClick={() => setNoteTab(tab)}
-                className={`px-3 py-1.5 rounded-md text-xs font-medium transition-all capitalize ${noteTab === tab ? 'bg-[#141414] text-white' : 'text-[#141414]/60 hover:text-[#141414] hover:bg-[#141414]/5'}`}
+                className={`px-3.5 py-[6px] rounded-md text-[12px] font-medium transition-all ${
+                  noteTab === tab
+                    ? 'bg-white text-[#1a1a1a] shadow-sm shadow-black/[0.04]'
+                    : 'text-[#141414]/40 hover:text-[#141414]/60'
+                }`}
               >
                 {tab === 'note' ? 'My Note' : tab.charAt(0).toUpperCase() + tab.slice(1)}
               </button>
@@ -201,131 +208,134 @@ export default function NotesPage({ selectedTask, onNavigateToAssets, isLoading 
 
       {/* Scrollable Content Area */}
       <div className="flex-1 overflow-y-auto min-h-0">
-        <div className="max-w-4xl mx-auto w-full px-4 sm:px-8 py-8">
-          <div className="prose prose-lg max-w-none">
-            <AnimatePresence mode="wait">
-              <motion.div
-                key={noteTab}
-                initial={{ opacity: 0, x: 10 }}
-                animate={{ opacity: 1, x: 0 }}
-                exit={{ opacity: 0, x: -10 }}
-                transition={{ duration: 0.2 }}
-                className="markdown-body"
-              >
-                {noteTab === 'transcription' && (
-                  <div className="space-y-4 transcription-content">
-                    <Markdown remarkPlugins={[remarkGfm]}>{formatTranscriptionWithBoldSpeakers(selectedTask.transcription)}</Markdown>
+        <div className="max-w-3xl lg:max-w-4xl mx-auto w-full px-6 sm:px-8 py-8">
+          <AnimatePresence mode="wait">
+            <motion.div
+              key={noteTab}
+              initial={{ opacity: 0, y: 6 }}
+              animate={{ opacity: 1, y: 0 }}
+              exit={{ opacity: 0, y: -6 }}
+              transition={{ duration: 0.2 }}
+            >
+              {noteTab === 'transcription' && (
+                <div className="prose prose-sm max-w-none prose-p:text-[14.5px] prose-p:leading-[1.75] prose-p:text-[#1a1a1a]/75 prose-strong:text-[#1a1a1a] prose-headings:tracking-tight transcription-content markdown-body">
+                  <Markdown remarkPlugins={[remarkGfm]}>{formatTranscriptionWithBoldSpeakers(selectedTask.transcription)}</Markdown>
+                </div>
+              )}
+
+              {noteTab === 'summary' && (
+                <div className="bg-[#faf8f6] p-6 sm:p-8 rounded-2xl border border-[#141414]/[0.05]">
+                  <div className="flex items-center justify-between mb-5">
+                    <h3 className="text-[17px] font-semibold tracking-[-0.01em] text-[#1a1a1a]">Key Summary</h3>
+                    <button
+                      onClick={handleRegenerateSummary}
+                      disabled={isRegeneratingSummary}
+                      className="flex items-center gap-1.5 px-2.5 py-1.5 text-[11px] font-medium text-[#141414]/40 hover:text-[#141414]/70 hover:bg-white rounded-lg transition-all disabled:opacity-30"
+                    >
+                      {isRegeneratingSummary ? (
+                        <Loader2 className="w-3.5 h-3.5 animate-spin" />
+                      ) : summaryRegenerated ? (
+                        <Check className="w-3.5 h-3.5 text-green-600" />
+                      ) : (
+                        <RefreshCw className="w-3.5 h-3.5" />
+                      )}
+                      <span>{summaryRegenerated ? 'Updated!' : 'Regenerate'}</span>
+                    </button>
                   </div>
-                )}
-                {noteTab === 'summary' && (
-                  <div className="bg-[#F5F5F5] p-4 sm:p-8 rounded-2xl border border-[#141414]/5">
-                    <div className="flex items-center justify-between mb-4">
-                      <h3 className="text-xl font-serif italic">Key Summary</h3>
+                  {isRegeneratingSummary ? (
+                    <div className="flex items-center justify-center py-16">
+                      <Loader2 className="w-5 h-5 animate-spin text-[#141414]/20" />
+                    </div>
+                  ) : (
+                    <div className="prose prose-sm max-w-none prose-p:text-[14px] prose-p:leading-[1.75] prose-p:text-[#1a1a1a]/70 prose-strong:text-[#1a1a1a] prose-headings:tracking-tight markdown-body">
+                      <Markdown remarkPlugins={[remarkGfm]}>{selectedTask.summary || 'No summary generated.'}</Markdown>
+                    </div>
+                  )}
+                </div>
+              )}
+
+              {noteTab === 'notes' && (
+                <div className="space-y-6">
+                  {/* Notes toolbar */}
+                  <div className="flex items-center justify-between">
+                    <h3 className="text-[17px] font-semibold tracking-[-0.01em] text-[#1a1a1a]">Structured Notes</h3>
+                    <div className="flex items-center gap-1">
                       <button
-                        onClick={handleRegenerateSummary}
-                        disabled={isRegeneratingSummary}
-                        className="flex items-center gap-2 px-3 py-1.5 text-xs font-medium text-[#141414]/60 hover:text-[#141414] hover:bg-white rounded-lg transition-all disabled:opacity-40"
-                        title="Regenerate summary with improved multilingual support"
+                        onClick={handleVisualizeNotes}
+                        disabled={isVisualizing || (!selectedTask.notes && !selectedTask.summary)}
+                        className="flex items-center gap-1.5 px-2.5 py-1.5 text-[11px] font-medium text-[#141414]/40 hover:text-[#141414]/70 hover:bg-[#141414]/[0.04] rounded-lg transition-all disabled:opacity-30"
                       >
-                        {isRegeneratingSummary ? (
-                          <Loader2 className="w-4 h-4 animate-spin" />
-                        ) : summaryRegenerated ? (
-                          <Check className="w-4 h-4 text-green-600" />
+                        {isVisualizing ? (
+                          <Loader2 className="w-3.5 h-3.5 animate-spin" />
                         ) : (
-                          <RefreshCw className="w-4 h-4" />
+                          <ImageIcon className="w-3.5 h-3.5" />
                         )}
-                        <span>{summaryRegenerated ? 'Updated!' : 'Regenerate'}</span>
+                        <span>Visualize</span>
+                      </button>
+                      <button
+                        onClick={handleRegenerateNotes}
+                        disabled={isRegeneratingNotes}
+                        className="flex items-center gap-1.5 px-2.5 py-1.5 text-[11px] font-medium text-[#141414]/40 hover:text-[#141414]/70 hover:bg-[#141414]/[0.04] rounded-lg transition-all disabled:opacity-30"
+                      >
+                        {isRegeneratingNotes ? (
+                          <Loader2 className="w-3.5 h-3.5 animate-spin" />
+                        ) : notesRegenerated ? (
+                          <Check className="w-3.5 h-3.5 text-green-600" />
+                        ) : (
+                          <RefreshCw className="w-3.5 h-3.5" />
+                        )}
+                        <span>{notesRegenerated ? 'Updated!' : 'Regenerate'}</span>
                       </button>
                     </div>
-                    {isRegeneratingSummary ? (
-                      <div className="flex items-center justify-center py-12">
-                        <Loader2 className="w-6 h-6 animate-spin text-[#141414]/40" />
-                      </div>
-                    ) : (
-                      <Markdown remarkPlugins={[remarkGfm]}>{selectedTask.summary || 'No summary generated.'}</Markdown>
-                    )}
                   </div>
-                )}
-                {noteTab === 'notes' && (
-                  <div className="space-y-6">
-                    <div className="flex items-center justify-between mb-4 pb-4 border-b border-[#141414]/10">
-                      <h3 className="text-xl font-bold">Structured Notes</h3>
-                      <div className="flex items-center gap-2">
-                        <button
-                          onClick={handleVisualizeNotes}
-                          disabled={isVisualizing || (!selectedTask.notes && !selectedTask.summary)}
-                          className="flex items-center gap-2 px-3 py-1.5 text-xs font-medium text-[#141414]/60 hover:text-[#141414] hover:bg-[#F5F5F5] rounded-lg transition-all disabled:opacity-40"
-                          title="Generate a hand-drawn style visualization of these notes"
+                  
+                  {/* Visualization Result */}
+                  {visualizationImage && (
+                    <div className="rounded-2xl overflow-hidden border border-[#141414]/[0.05] bg-[#faf8f6]">
+                      <div className="px-4 py-3 border-b border-[#141414]/[0.05] flex items-center justify-between">
+                        <span className="text-[12px] font-medium text-[#1a1a1a]/60 flex items-center gap-1.5">
+                          <Sparkles className="w-3.5 h-3.5 text-amber-500" />
+                          AI Visualization
+                        </span>
+                        <button 
+                          onClick={() => setVisualizationImage(null)}
+                          className="text-[11px] font-medium text-[#141414]/30 hover:text-[#141414]/60 transition-colors"
                         >
-                          {isVisualizing ? (
-                            <Loader2 className="w-4 h-4 animate-spin" />
-                          ) : (
-                            <ImageIcon className="w-4 h-4" />
-                          )}
-                          <span>Visualize</span>
+                          Dismiss
                         </button>
-                        <button
-                          onClick={handleRegenerateNotes}
-                          disabled={isRegeneratingNotes}
-                          className="flex items-center gap-2 px-3 py-1.5 text-xs font-medium text-[#141414]/60 hover:text-[#141414] hover:bg-[#F5F5F5] rounded-lg transition-all disabled:opacity-40"
-                          title="Regenerate notes with improved multilingual support"
-                        >
-                          {isRegeneratingNotes ? (
-                            <Loader2 className="w-4 h-4 animate-spin" />
-                          ) : notesRegenerated ? (
-                            <Check className="w-4 h-4 text-green-600" />
-                          ) : (
-                            <RefreshCw className="w-4 h-4" />
-                          )}
-                          <span>{notesRegenerated ? 'Updated!' : 'Regenerate'}</span>
-                        </button>
+                      </div>
+                      <div className="p-4 flex justify-center">
+                        <img 
+                          src={visualizationImage} 
+                          alt="Notes Visualization" 
+                          className="max-w-full h-auto rounded-xl"
+                          style={{ maxHeight: '500px' }}
+                        />
                       </div>
                     </div>
-                    
-                    {/* Visualization Result */}
-                    {visualizationImage && (
-                      <div className="mb-6 border border-[#141414]/10 rounded-xl overflow-hidden bg-[#F5F5F5]">
-                        <div className="p-3 border-b border-[#141414]/10 bg-white flex items-center justify-between">
-                          <span className="text-sm font-medium flex items-center gap-2">
-                            <Sparkles className="w-4 h-4 text-amber-500" />
-                            AI Visualization
-                          </span>
-                          <button 
-                            onClick={() => setVisualizationImage(null)}
-                            className="text-xs opacity-60 hover:opacity-100"
-                          >
-                            Close
-                          </button>
-                        </div>
-                        <div className="p-4 flex justify-center">
-                          <img 
-                            src={visualizationImage} 
-                            alt="Notes Visualization" 
-                            className="max-w-full h-auto rounded-lg shadow-sm"
-                            style={{ maxHeight: '600px' }}
-                          />
-                        </div>
-                      </div>
-                    )}
-                    
-                    {isRegeneratingNotes ? (
-                      <div className="flex items-center justify-center py-12">
-                        <Loader2 className="w-6 h-6 animate-spin text-[#141414]/40" />
-                      </div>
-                    ) : (
+                  )}
+                  
+                  {/* Notes content */}
+                  {isRegeneratingNotes ? (
+                    <div className="flex items-center justify-center py-16">
+                      <Loader2 className="w-5 h-5 animate-spin text-[#141414]/20" />
+                    </div>
+                  ) : (
+                    <div className="prose prose-sm max-w-none prose-p:text-[14px] prose-p:leading-[1.75] prose-p:text-[#1a1a1a]/70 prose-strong:text-[#1a1a1a] prose-headings:tracking-tight prose-h2:text-[16px] prose-h2:font-semibold prose-h3:text-[14px] prose-h3:font-semibold prose-li:text-[14px] prose-li:text-[#1a1a1a]/70 markdown-body">
                       <Markdown remarkPlugins={[remarkGfm]}>{selectedTask.notes || 'No structured notes generated.'}</Markdown>
-                    )}
-                  </div>
-                )}
-                {noteTab === 'note' && selectedTask.id && (
-                  <MeetingNoteTab
-                    taskId={selectedTask.id}
-                    initialContent={selectedTask.personal_note || ''}
-                  />
-                )}
-              </motion.div>
-            </AnimatePresence>
-          </div>
+                    </div>
+                  )}
+                </div>
+              )}
+
+              {noteTab === 'note' && selectedTask.id && (
+                <MeetingNoteTab
+                  taskId={selectedTask.id}
+                  initialContent={selectedTask.personal_note || ''}
+                />
+              )}
+            </motion.div>
+          </AnimatePresence>
         </div>
       </div>
     </div>

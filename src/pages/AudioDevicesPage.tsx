@@ -139,7 +139,7 @@ export default function AudioDevicesPage({ isRecording, currentInputDevice, devi
   }, [refreshDevices]);
 
   return (
-    <div className="flex flex-col h-full bg-[#faf9f7] font-[system-ui] overflow-y-auto">
+    <div className="flex flex-col h-full bg-white font-[system-ui] overflow-y-auto">
       <div className="w-full max-w-[760px] mx-auto px-4 sm:px-8 pt-8 sm:pt-12 pb-12">
         {/* Page Title */}
         <h1 className="text-[24px] sm:text-[32px] font-serif text-[#141414]/30 mb-2">
