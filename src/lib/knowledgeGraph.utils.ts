@@ -75,7 +75,8 @@ const EDGE_MIN_SCORE = 0.5;
 const TOP_K_EDGES = 5;
 const TEMPORAL_SPLIT_DAYS = 90;
 
-const EMBED_MODEL = 'text-embedding-004';
+const EMBED_MODEL = 'gemini-embedding-001';
+const EMBED_FALLBACKS = ['gemini-embedding-001', 'text-embedding-004'];
 const EXTRACT_MODEL = 'gemini-3-flash-preview';
 
 function getApiKey(): string {
@@ -209,36 +210,26 @@ export async function batchEmbed(
   for (let start = 0; start < uncached.length; start += EMBED_BATCH_SIZE) {
     const batch = uncached.slice(start, start + EMBED_BATCH_SIZE);
 
-    let modelPath = `models/${currentEmbedModel}`;
-    let requestBody = {
-      requests: batch.map(item => ({
-        model: modelPath,
-        content: { parts: [{ text: item.text }] },
-        taskType: 'SEMANTIC_SIMILARITY',
-      })),
-    };
+    // Try the currently-known-good model first, then any other known fallbacks
+    // on 404. Race-safe: parallel callers each independently find a working model
+    // and converge on the shared `currentEmbedModel`.
+    const candidates = [
+      currentEmbedModel,
+      ...EMBED_FALLBACKS.filter(m => m !== currentEmbedModel),
+    ];
 
-    let response = await fetchWithRetry(
-      `https://generativelanguage.googleapis.com/v1beta/${modelPath}:batchEmbedContents?key=${apiKey}`,
-      {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify(requestBody),
-      }
-    );
-
-    // Fallback to gemini-embedding-001 if text-embedding-004 is not found
-    if (response.status === 404 && currentEmbedModel === 'text-embedding-004') {
-      console.warn('text-embedding-004 not found, falling back to gemini-embedding-001');
-      currentEmbedModel = 'gemini-embedding-001';
-      modelPath = `models/${currentEmbedModel}`;
-      requestBody = {
+    let response: Response | null = null;
+    let lastErrorBody = '';
+    for (const model of candidates) {
+      const modelPath = `models/${model}`;
+      const requestBody = {
         requests: batch.map(item => ({
           model: modelPath,
           content: { parts: [{ text: item.text }] },
           taskType: 'SEMANTIC_SIMILARITY',
         })),
       };
+
       response = await fetchWithRetry(
         `https://generativelanguage.googleapis.com/v1beta/${modelPath}:batchEmbedContents?key=${apiKey}`,
         {
@@ -247,11 +238,24 @@ export async function batchEmbed(
           body: JSON.stringify(requestBody),
         }
       );
+
+      if (response.ok) {
+        if (currentEmbedModel !== model) {
+          console.warn(`Embedding model switched: ${currentEmbedModel} → ${model}`);
+          currentEmbedModel = model;
+        }
+        break;
+      }
+
+      // Only fall through to next candidate on 404 (model not available).
+      // Other errors (auth, quota, server) should bubble up immediately.
+      if (response.status !== 404) break;
+      lastErrorBody = await response.clone().text();
     }
 
-    if (!response.ok) {
-      const body = await response.text();
-      throw new Error(`Embedding API error ${response.status}: ${body}`);
+    if (!response || !response.ok) {
+      const body = response ? await response.text() : lastErrorBody;
+      throw new Error(`Embedding API error ${response?.status ?? 'unknown'}: ${body}`);
     }
 
     const data = await response.json();

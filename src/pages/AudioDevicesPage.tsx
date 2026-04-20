@@ -273,9 +273,12 @@ export default function AudioDevicesPage({ isRecording, currentInputDevice, devi
 
         {/* Input Devices */}
         <div className="mb-6">
-          <button
+          <div
+            role="button"
+            tabIndex={0}
             onClick={() => setShowInputs(!showInputs)}
-            className="flex items-center justify-between w-full mb-3 group"
+            onKeyDown={(e) => { if (e.key === 'Enter' || e.key === ' ') { e.preventDefault(); setShowInputs(!showInputs); } }}
+            className="flex items-center justify-between w-full mb-3 group cursor-pointer select-none"
           >
             <div className="flex items-center gap-2.5">
               <Mic className="w-4 h-4 text-[#141414]/40" />
@@ -297,7 +300,7 @@ export default function AudioDevicesPage({ isRecording, currentInputDevice, devi
               </button>
               {showInputs ? <ChevronUp className="w-4 h-4 text-[#141414]/25" /> : <ChevronDown className="w-4 h-4 text-[#141414]/25" />}
             </div>
-          </button>
+          </div>
 
           <AnimatePresence>
             {showInputs && (
