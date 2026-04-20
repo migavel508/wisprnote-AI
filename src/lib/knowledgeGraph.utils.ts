@@ -154,16 +154,58 @@ export function buildMeetingEmbedText(meeting: MeetingRecord): string {
 
 let currentEmbedModel = EMBED_MODEL;
 
+// ── Persistent cache helpers (localStorage) ─────────────────────────────────
+// Two-tier: in-memory Map (hot) + localStorage (cold, survives reloads).
+const LS_EMBED_KEY = 'kg_embed_cache';
+const LS_REL_KEY = 'kg_rel_cache';
+
+function loadEmbedCacheFromStorage(): Map<string, number[]> {
+  try {
+    const raw = localStorage.getItem(LS_EMBED_KEY);
+    if (!raw) return new Map();
+    const entries: [string, number[]][] = JSON.parse(raw);
+    return new Map(entries);
+  } catch {
+    return new Map();
+  }
+}
+
+function saveEmbedCacheToStorage(cache: Map<string, number[]>) {
+  try {
+    // Keep max 2000 entries (~4 MB) to avoid localStorage quota issues
+    const entries = [...cache.entries()].slice(-2000);
+    localStorage.setItem(LS_EMBED_KEY, JSON.stringify(entries));
+  } catch {
+    // Quota exceeded — silently fail, in-memory cache still works
+  }
+}
+
+function loadRelCacheFromStorage(): { key: string; value: ExtractedRelationship[] } {
+  try {
+    const raw = localStorage.getItem(LS_REL_KEY);
+    if (!raw) return { key: '', value: [] };
+    return JSON.parse(raw);
+  } catch {
+    return { key: '', value: [] };
+  }
+}
+
+function saveRelCacheToStorage(key: string, value: ExtractedRelationship[]) {
+  try {
+    localStorage.setItem(LS_REL_KEY, JSON.stringify({ key, value }));
+  } catch { /* quota exceeded */ }
+}
+
 // ── Module-level embedding cache ─────────────────────────────────────────────
 // Key: the exact text being embedded → Value: embedding vector.
-// Survives component re-renders and KG page navigation within the same session.
-// Two identical topics from different meetings reuse the same vector automatically.
-const _embedCache = new Map<string, number[]>();
+// Hydrated from localStorage on module load; persisted after each batch.
+const _embedCache = loadEmbedCacheFromStorage();
 
 // ── Module-level relationship cache ──────────────────────────────────────────
 // Key: sorted meetingId fingerprint. Invalidated only when the meeting set changes.
-let _relCacheKey = '';
-let _relCacheValue: ExtractedRelationship[] = [];
+const _storedRel = loadRelCacheFromStorage();
+let _relCacheKey = _storedRel.key;
+let _relCacheValue: ExtractedRelationship[] = _storedRel.value;
 
 // Retry helper with exponential backoff for 503 / 429 errors
 async function fetchWithRetry(
@@ -272,6 +314,9 @@ export async function batchEmbed(
     }
   }
 
+  // Persist to localStorage so embeddings survive reloads
+  saveEmbedCacheToStorage(_embedCache);
+
   return result;
 }
 
@@ -378,6 +423,28 @@ export function findCanonicalTopicIdByEmbedding(
 // Piece 7 — Contextual relationship extraction
 // ============================================================
 
+function buildMeetingSummary(m: MeetingRecord): string {
+  const lines: string[] = [
+    `ID: ${m.meetingId}`,
+    `Title: ${m.meetingTitle}`,
+  ];
+  if (m.meetingDate) lines.push(`Date: ${m.meetingDate}`);
+  if (m.topics?.length) {
+    lines.push(
+      `Topics: ${m.topics.map(t => `${t.name} [${t.status}]: ${t.summary}`).join(' | ')}`
+    );
+  }
+  if (m.decisions?.length) {
+    lines.push(`Decisions: ${m.decisions.map(d => d.decision).join(' | ')}`);
+  }
+  if (m.actionItems?.length) {
+    lines.push(
+      `Open actions: ${m.actionItems.map(a => `${a.owner}: ${a.task}`).join(' | ')}`
+    );
+  }
+  return lines.join('\n');
+}
+
 export async function extractContextualRelationships(
   kgData: MeetingRecord[]
 ): Promise<ExtractedRelationship[]> {
@@ -385,32 +452,65 @@ export async function extractContextualRelationships(
 
   const apiKey = getApiKey();
 
-  // Build compact meeting descriptions
-  const meetingSummaries = kgData
-    .map(m => {
-      const lines: string[] = [
-        `ID: ${m.meetingId}`,
-        `Title: ${m.meetingTitle}`,
-      ];
-      if (m.meetingDate) lines.push(`Date: ${m.meetingDate}`);
-      if (m.topics?.length) {
-        lines.push(
-          `Topics: ${m.topics.map(t => `${t.name} [${t.status}]: ${t.summary}`).join(' | ')}`
-        );
-      }
-      if (m.decisions?.length) {
-        lines.push(`Decisions: ${m.decisions.map(d => d.decision).join(' | ')}`);
-      }
-      if (m.actionItems?.length) {
-        lines.push(
-          `Open actions: ${m.actionItems.map(a => `${a.owner}: ${a.task}`).join(' | ')}`
-        );
-      }
-      return lines.join('\n');
-    })
-    .join('\n---\n');
+  // Return cached relationships if the meeting set is unchanged
+  const fingerprint = kgData.map(m => m.meetingId).sort().join('|');
+  if (_relCacheKey === fingerprint) {
+    console.log('[extractContextualRelationships] cache hit, skipping API call');
+    return _relCacheValue;
+  }
 
-  const prompt = `You are analyzing a set of meeting records to find contextual relationships between meetings that would NOT be obvious from simple topic name matching.
+  // Determine if we can do an incremental extraction (much cheaper)
+  const cachedIds = new Set(_relCacheKey ? _relCacheKey.split('|') : []);
+  const currentIds = new Set(kgData.map(m => m.meetingId));
+  const newMeetings = kgData.filter(m => !cachedIds.has(m.meetingId));
+  const removedIds = [...cachedIds].filter(id => !currentIds.has(id));
+  const canIncremental = _relCacheValue.length > 0
+    && removedIds.length === 0
+    && newMeetings.length > 0
+    && newMeetings.length <= Math.max(3, kgData.length * 0.3);
+
+  let prompt: string;
+
+  if (canIncremental) {
+    // Incremental: send only new meetings + condensed existing relationships
+    const newSummaries = newMeetings.map(buildMeetingSummary).join('\n---\n');
+    const existingRelSummary = _relCacheValue
+      .map(r => `${r.fromMeetingId} → ${r.toMeetingId}: ${r.relationshipType} (${r.confidence}) — ${r.sharedThread}`)
+      .join('\n');
+    const existingMeetingIds = kgData
+      .filter(m => cachedIds.has(m.meetingId))
+      .map(m => `${m.meetingId}: ${m.meetingTitle} — topics: ${(m.topics || []).map(t => t.name).join(', ')}`)
+      .join('\n');
+
+    prompt = `You are analyzing NEW meeting records to find contextual relationships with existing meetings.
+
+EXISTING MEETINGS (condensed):
+${existingMeetingIds}
+
+EXISTING RELATIONSHIPS (already found):
+${existingRelSummary || 'None yet.'}
+
+NEW MEETINGS (full detail):
+${newSummaries}
+
+Find relationships between the NEW meetings and ANY other meeting (existing or new). Do NOT re-generate relationships that are already listed above.
+
+Return a JSON array of NEW relationship objects only. Each object must have exactly these fields:
+- "fromMeetingId": string (the earlier/source meeting ID)
+- "toMeetingId": string (the later/target meeting ID)
+- "relationshipType": one of "continuation", "resolution", "escalation", "recurring", "reference"
+- "sharedThread": string (one sentence describing what connects them)
+- "confidence": one of "high", "medium", "low"
+
+Return ONLY the JSON array, no markdown fences, no explanation.
+If no new relationships are found, return an empty array [].`;
+
+    console.log(`[extractContextualRelationships] incremental: ${newMeetings.length} new meetings, ${_relCacheValue.length} cached relationships`);
+  } else {
+    // Full extraction
+    const meetingSummaries = kgData.map(buildMeetingSummary).join('\n---\n');
+
+    prompt = `You are analyzing a set of meeting records to find contextual relationships between meetings that would NOT be obvious from simple topic name matching.
 
 Look for:
 - A decision in one meeting being revisited, overturned, or confirmed in another
@@ -431,12 +531,6 @@ Return a JSON array of relationship objects. Each object must have exactly these
 
 Return ONLY the JSON array, no markdown fences, no explanation.
 If no relationships are found, return an empty array [].`;
-
-  // Return cached relationships if the meeting set is unchanged
-  const fingerprint = kgData.map(m => m.meetingId).sort().join('|');
-  if (_relCacheKey === fingerprint) {
-    console.log('[extractContextualRelationships] cache hit, skipping API call');
-    return _relCacheValue;
   }
 
   try {
@@ -484,10 +578,25 @@ If no relationships are found, return an empty array [].`;
         typeof r.sharedThread === 'string'
     );
 
+    // Merge: incremental → append new to cached; full → replace entirely
+    let merged: ExtractedRelationship[];
+    if (canIncremental) {
+      const existingPairs = new Set(
+        _relCacheValue.map(r => `${r.fromMeetingId}::${r.toMeetingId}`)
+      );
+      const dedupedNew = validated.filter(
+        r => !existingPairs.has(`${r.fromMeetingId}::${r.toMeetingId}`)
+      );
+      merged = [..._relCacheValue, ...dedupedNew];
+    } else {
+      merged = validated;
+    }
+
     // Populate cache so subsequent renders skip this API call
     _relCacheKey = fingerprint;
-    _relCacheValue = validated;
-    return validated;
+    _relCacheValue = merged;
+    saveRelCacheToStorage(fingerprint, merged);
+    return merged;
   } catch (err) {
     console.warn('Relationship extraction failed, continuing with embeddings only:', err);
     return [];
@@ -949,6 +1058,9 @@ export function searchNodes(query: string, nodes: any[]): any[] {
   return results;
 }
 
+const CHAT_CONTEXT_MAX_CHARS = 4000;
+const NOTABLE_STATUSES = new Set(['off-track', 'revisited', 'ongoing']);
+
 export function buildChatContext(
   kgData: MeetingRecord[],
   meetingEdgeMatrix: Map<string, MeetingEdge[]>,
@@ -956,73 +1068,62 @@ export function buildChatContext(
 ): string {
   const sections: string[] = [];
 
-  // Recurring topic clusters
-  const topicMeetingCount: Record<string, { name: string; meetings: string[] }> = {};
+  // Recurring topic clusters (compact: just names + count)
+  const topicMeetingCount: Record<string, { name: string; count: number }> = {};
   kgData.forEach(m => {
     (m.topics || []).forEach(t => {
       const key = t.name.toLowerCase();
-      if (!topicMeetingCount[key]) topicMeetingCount[key] = { name: t.name, meetings: [] };
-      topicMeetingCount[key].meetings.push(m.meetingTitle);
+      if (!topicMeetingCount[key]) topicMeetingCount[key] = { name: t.name, count: 0 };
+      topicMeetingCount[key].count++;
     });
   });
-  const recurring = Object.values(topicMeetingCount).filter(t => t.meetings.length > 1);
+  const recurring = Object.values(topicMeetingCount).filter(t => t.count > 1);
   if (recurring.length) {
     sections.push(
-      `RECURRING TOPICS (appear in multiple meetings):\n${recurring.map(t => `- "${t.name}" appears in: ${[...new Set(t.meetings)].join(', ')}`).join('\n')}`
+      `RECURRING: ${recurring.map(t => `${t.name} (×${t.count})`).join(', ')}`
     );
   }
 
-  // Extracted relationships grouped by type
-  if (relationships.length) {
-    const byType: Record<string, ExtractedRelationship[]> = {};
-    relationships.forEach(r => {
-      if (!byType[r.relationshipType]) byType[r.relationshipType] = [];
-      byType[r.relationshipType].push(r);
-    });
-    const relSection = Object.entries(byType)
-      .map(
-        ([type, rels]) =>
-          `${type.toUpperCase()}:\n${rels.map(r => `  - ${r.sharedThread} (${r.fromMeetingId} → ${r.toMeetingId}, ${r.confidence})`).join('\n')}`
-      )
-      .join('\n');
-    sections.push(`CROSS-MEETING RELATIONSHIPS:\n${relSection}`);
+  // Relationships (compact: one line each, skip low-confidence)
+  const notableRels = relationships.filter(r => r.confidence !== 'low');
+  if (notableRels.length) {
+    sections.push(
+      `RELATIONSHIPS:\n${notableRels.map(r => `- ${r.relationshipType}: ${r.sharedThread}`).join('\n')}`
+    );
   }
 
-  // Open action items
+  // Open action items (compact)
   const openActions: string[] = [];
   kgData.forEach(m => {
     (m.actionItems || []).forEach(a => {
-      openActions.push(`- [${m.meetingTitle}] ${a.owner}: ${a.task}`);
+      openActions.push(`${a.owner}: ${a.task}`);
     });
   });
   if (openActions.length) {
-    sections.push(`OPEN ACTION ITEMS:\n${openActions.join('\n')}`);
+    sections.push(`ACTIONS: ${openActions.join('; ')}`);
   }
 
-  // Per-meeting summaries with relationships
+  // Per-meeting summaries — compact: full summaries only for notable topics
   const meetingSummaries = kgData.map(m => {
-    const related = meetingEdgeMatrix.get(m.meetingId) || [];
-    const relatedNames = related
-      .slice(0, 3)
-      .map(e => e.meeting.meetingTitle)
-      .join(', ');
-    const lines: string[] = [
-      `Meeting: ${m.meetingTitle}`,
-      `Topics: ${(m.topics || []).map(t => `${t.name} (${t.status}): ${t.summary}`).join('; ')}`,
-      `Decisions: ${(m.decisions || []).map(d => d.decision).join('; ') || 'None'}`,
-      `People: ${(m.people || []).join(', ') || 'None'}`,
-      `Actions: ${(m.actionItems || []).map(a => `${a.owner}: ${a.task}`).join('; ') || 'None'}`,
-    ];
-    if (relatedNames) lines.push(`Related meetings: ${relatedNames}`);
-    return lines.join('\n');
+    const topicLine = (m.topics || []).map(t => {
+      const isNotable = NOTABLE_STATUSES.has(t.status) ||
+        (topicMeetingCount[t.name.toLowerCase()]?.count || 0) > 1;
+      return isNotable ? `${t.name} [${t.status}]: ${t.summary}` : `${t.name} [${t.status}]`;
+    }).join('; ');
+    const parts = [`${m.meetingTitle}: ${topicLine}`];
+    if (m.decisions?.length) parts.push(`Decisions: ${m.decisions.map(d => d.decision).join('; ')}`);
+    if (m.people?.length) parts.push(`People: ${m.people.join(', ')}`);
+    return parts.join(' | ');
   });
-  sections.push(`MEETING DETAILS:\n${meetingSummaries.join('\n---\n')}`);
+  sections.push(`MEETINGS:\n${meetingSummaries.join('\n')}`);
 
-  return `You are a helpful assistant that answers questions about the user's meeting knowledge graph.
-You have access to structured meeting data with cross-meeting relationships and recurring themes.
-Use this context to answer questions about how ideas evolved, which problems recurred, which decisions were overturned, and who was involved.
+  // Assemble and cap total size
+  let context = sections.join('\n\n');
+  if (context.length > CHAT_CONTEXT_MAX_CHARS) {
+    context = context.substring(0, CHAT_CONTEXT_MAX_CHARS) + '\n[...truncated]';
+  }
 
-${sections.join('\n\n')}
+  return `You are a helpful assistant answering questions about the user's meeting knowledge graph. Use the structured data below. Be concise.
 
-Answer the user's question based on this data. Be concise and helpful. If you can't find relevant information, say so.`;
+${context}`;
 }

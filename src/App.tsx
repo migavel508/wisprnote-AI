@@ -302,6 +302,7 @@ export default function App() {
   }, [chatMessages]);
 
   const prevUserIdRef = useRef<string | null>(null);
+  const autoSyncRanRef = useRef(false);
 
   // Wipe all user-scoped state so no data leaks between accounts
   const clearUserState = useCallback(() => {
@@ -318,6 +319,7 @@ export default function App() {
     setFile(null);
     setStatus('idle');
     setError(null);
+    autoSyncRanRef.current = false;
   }, []);
 
   useEffect(() => {
@@ -809,22 +811,26 @@ export default function App() {
     }
   }, [session]);
 
-  // Auto-sync Knowledge Graph: check if any meetings in history are missing from KG
+  // Auto-sync Knowledge Graph: check if any meetings in history are missing from KG.
+  // Uses a ref snapshot of kgData (not a dependency) to avoid re-triggering when
+  // setKgData is called inside, and a session-level guard so it runs at most once.
+  const kgDataRef = useRef(kgData);
+  kgDataRef.current = kgData;
+
   useEffect(() => {
-    // Only run if both history and kgData are loaded, and we're not already extracting
-    if (history.length > 0 && kgBuilt && !isExtractingNewKG) {
+    if (history.length > 0 && kgBuilt && !isExtractingNewKG && !autoSyncRanRef.current) {
       const syncMissingMeetingsToKG = async () => {
-        // Find tasks in history that don't have a corresponding entry in kgData
-        const kgTaskIds = new Set(kgData.map(kg => kg.meetingId));
+        const currentKgData = kgDataRef.current;
+        const kgTaskIds = new Set(currentKgData.map(kg => kg.meetingId));
         const missingTasks = history.filter(task => task.id && !kgTaskIds.has(task.id) && task.status === 'completed' && task.transcription && task.transcription.trim().length > 0);
         
         if (missingTasks.length === 0) return;
         
+        autoSyncRanRef.current = true;
         console.log(`Found ${missingTasks.length} meetings missing from Knowledge Graph. Starting auto-sync...`);
         setIsExtractingNewKG(true);
         
         try {
-          // Process missing tasks one by one
           for (let i = 0; i < missingTasks.length; i++) {
             const task = missingTasks[i];
             console.log(`Auto-extracting KG for: ${task.filename}`);
@@ -842,13 +848,9 @@ export default function App() {
                 refs: result.references || []
               };
               
-              // Save to Supabase
               await saveKnowledgeGraphBatch([entryToSave]);
-              
-              // Update local state
               setKgData(prevData => [...prevData, result]);
               
-              // Respect API rate limits
               if (i < missingTasks.length - 1) {
                 await new Promise(resolve => setTimeout(resolve, 5000));
               }
@@ -863,7 +865,7 @@ export default function App() {
       
       syncMissingMeetingsToKG();
     }
-  }, [history, kgData, kgBuilt, isExtractingNewKG]);
+  }, [history, kgBuilt, isExtractingNewKG]);
 
   const buildKnowledgeGraph = async () => {
     if (history.length === 0 || isLoadingKG) return;
