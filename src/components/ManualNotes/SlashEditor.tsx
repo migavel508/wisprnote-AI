@@ -1,13 +1,20 @@
-import React, { useState, useRef, useEffect } from 'react';
+import React, { useState, useRef, useEffect, useCallback } from 'react';
 import { useEditor, EditorContent, Extension } from '@tiptap/react';
 import StarterKit from '@tiptap/starter-kit';
 import { ResizableImage } from './ResizableImage';
 import Placeholder from '@tiptap/extension-placeholder';
 import Suggestion from '@tiptap/suggestion';
+import Link from '@tiptap/extension-link';
+import TaskList from '@tiptap/extension-task-list';
+import TaskItem from '@tiptap/extension-task-item';
+import Underline from '@tiptap/extension-underline';
+import Highlight from '@tiptap/extension-highlight';
+import TextAlign from '@tiptap/extension-text-align';
 import {
   Type, Heading1, Heading2, Heading3,
   List, ListOrdered, Quote, Code2, Minus, Image as ImageIcon,
-  Loader2,
+  Loader2, CheckSquare, Bold, Italic, UnderlineIcon, Highlighter,
+  Link as LinkIcon, Strikethrough, AlignLeft, AlignCenter, AlignRight,
 } from 'lucide-react';
 import { uploadNoteImage } from '../../services/supabaseService';
 
@@ -51,6 +58,13 @@ const ALL_COMMANDS: SlashCommandItem[] = [
     command: (editor, range) => editor.chain().focus().deleteRange(range).setHeading({ level: 3 }).run(),
   },
   {
+    title: 'Task List',
+    description: 'Checklist with checkboxes',
+    icon: <CheckSquare className="w-[15px] h-[15px]" />,
+    keywords: ['task', 'todo', 'checkbox', 'checklist'],
+    command: (editor, range) => editor.chain().focus().deleteRange(range).toggleTaskList().run(),
+  },
+  {
     title: 'Bullet List',
     description: 'Unordered list of items',
     icon: <List className="w-[15px] h-[15px]" />,
@@ -84,6 +98,41 @@ const ALL_COMMANDS: SlashCommandItem[] = [
     icon: <Minus className="w-[15px] h-[15px]" />,
     keywords: ['divider', 'hr', 'rule', 'separator', 'line'],
     command: (editor, range) => editor.chain().focus().deleteRange(range).setHorizontalRule().run(),
+  },
+  {
+    title: 'Bold',
+    description: 'Make text bold',
+    icon: <Bold className="w-[15px] h-[15px]" />,
+    keywords: ['bold', 'strong', 'b'],
+    command: (editor, range) => editor.chain().focus().deleteRange(range).toggleBold().run(),
+  },
+  {
+    title: 'Italic',
+    description: 'Make text italic',
+    icon: <Italic className="w-[15px] h-[15px]" />,
+    keywords: ['italic', 'emphasis', 'em', 'i'],
+    command: (editor, range) => editor.chain().focus().deleteRange(range).toggleItalic().run(),
+  },
+  {
+    title: 'Underline',
+    description: 'Underline text',
+    icon: <UnderlineIcon className="w-[15px] h-[15px]" />,
+    keywords: ['underline', 'u'],
+    command: (editor, range) => editor.chain().focus().deleteRange(range).toggleUnderline().run(),
+  },
+  {
+    title: 'Strikethrough',
+    description: 'Strikethrough text',
+    icon: <Strikethrough className="w-[15px] h-[15px]" />,
+    keywords: ['strikethrough', 'strike', 'del', 's'],
+    command: (editor, range) => editor.chain().focus().deleteRange(range).toggleStrike().run(),
+  },
+  {
+    title: 'Highlight',
+    description: 'Highlight text with color',
+    icon: <Highlighter className="w-[15px] h-[15px]" />,
+    keywords: ['highlight', 'mark', 'color', 'bg'],
+    command: (editor, range) => editor.chain().focus().deleteRange(range).toggleHighlight().run(),
   },
   {
     title: 'Image',
@@ -310,10 +359,18 @@ export function SlashEditor({
     extensions: [
       StarterKit.configure({
         heading: { levels: [1, 2, 3] },
-        // Link is bundled in StarterKit v3 — configure here to avoid duplicate
-        // @ts-ignore - link config is valid in StarterKit v3
-        link: { openOnClick: false },
       }),
+      Link.configure({
+        openOnClick: false,
+        autolink: true,
+        linkOnPaste: true,
+        HTMLAttributes: { class: 'editor-link' },
+      }),
+      TaskList,
+      TaskItem.configure({ nested: true }),
+      Underline,
+      Highlight.configure({ multicolor: false }),
+      TextAlign.configure({ types: ['heading', 'paragraph'] }),
       ResizableImage.configure({ inline: false, allowBase64: true }),
       Placeholder.configure({ placeholder, emptyEditorClass: 'is-editor-empty' }),
       slashExt,
@@ -323,20 +380,48 @@ export function SlashEditor({
     onUpdate: ({ editor: e }) => onUpdate?.(e.getHTML()),
     editorProps: {
       attributes: { class: 'focus:outline-none' },
+      handleKeyDown: (_view, event) => {
+        // Ensure Enter works correctly after links/inline marks
+        if (event.key === 'Enter' && !event.shiftKey) {
+          return false; // let TipTap handle it normally
+        }
+        return false;
+      },
     },
   });
 
-  const handleImageFile = async (e: React.ChangeEvent<HTMLInputElement>) => {
+  const handleImageFile = useCallback(async (e: React.ChangeEvent<HTMLInputElement>) => {
     const file = e.target.files?.[0];
     if (!file || !editor) return;
     e.target.value = '';
+
+    // Insert a temporary blob URL so the user sees the image immediately
     const objUrl = URL.createObjectURL(file);
     editor.chain().focus().setImage({ src: objUrl }).run();
+
     try {
-      const url = await uploadNoteImage(file);
-      editor.chain().focus().setImage({ src: url }).run();
-    } catch { /* keep the object URL on failure */ }
-  };
+      const permanentUrl = await uploadNoteImage(file);
+      // Walk the document to find the node with the blob URL and replace it
+      const { doc } = editor.state;
+      let replaced = false;
+      doc.descendants((node, pos) => {
+        if (replaced) return false;
+        if (node.type.name === 'resizableImage' && node.attrs.src === objUrl) {
+          editor.chain().focus()
+            .command(({ tr }) => {
+              tr.setNodeMarkup(pos, undefined, { ...node.attrs, src: permanentUrl });
+              return true;
+            })
+            .run();
+          replaced = true;
+          return false;
+        }
+      });
+      URL.revokeObjectURL(objUrl);
+    } catch (err) {
+      console.error('Image upload failed, keeping local preview:', err);
+    }
+  }, [editor]);
 
   if (!editor) {
     return (
@@ -346,6 +431,18 @@ export function SlashEditor({
     );
   }
 
+  const setLink = useCallback(() => {
+    if (!editor) return;
+    const previousUrl = editor.getAttributes('link').href;
+    const url = window.prompt('URL', previousUrl);
+    if (url === null) return;
+    if (url === '') {
+      editor.chain().focus().extendMarkRange('link').unsetLink().run();
+      return;
+    }
+    editor.chain().focus().extendMarkRange('link').setLink({ href: url }).run();
+  }, [editor]);
+
   return (
     <div className={`notion-editor relative ${className}`}>
       <style dangerouslySetInnerHTML={{ __html: EDITOR_CSS }} />
@@ -354,8 +451,87 @@ export function SlashEditor({
         <input id="slash-img-input" type="file" accept="image/*" className="hidden" onChange={handleImageFile} />
       )}
 
+      {/* Selection toolbar — custom impl since BubbleMenu JSX isn't in TipTap v3 */}
+      <SelectionToolbar editor={editor} onSetLink={setLink} />
+
       <EditorContent editor={editor} />
       <SlashMenu state={slashMenu} />
     </div>
+  );
+}
+
+function SelectionToolbar({ editor, onSetLink }: { editor: any; onSetLink: () => void }) {
+  const [rect, setRect] = useState<DOMRect | null>(null);
+  const [, forceUpdate] = useState(0);
+
+  useEffect(() => {
+    if (!editor) return;
+    const onSelectionUpdate = () => {
+      const { from, to, empty } = editor.state.selection;
+      if (empty || from === to) {
+        setRect(null);
+        return;
+      }
+      const domRange = editor.view.domAtPos(from);
+      const range = document.createRange();
+      range.setStart(domRange.node, domRange.offset);
+      const endDom = editor.view.domAtPos(to);
+      range.setEnd(endDom.node, endDom.offset);
+      setRect(range.getBoundingClientRect());
+      forceUpdate(n => n + 1);
+    };
+    editor.on('selectionUpdate', onSelectionUpdate);
+    editor.on('blur', () => setRect(null));
+    return () => {
+      editor.off('selectionUpdate', onSelectionUpdate);
+    };
+  }, [editor]);
+
+  if (!rect || !editor) return null;
+
+  const top = rect.top - 44 + window.scrollY;
+  const left = rect.left + rect.width / 2;
+
+  return (
+    <div
+      className="fixed z-[9999] flex items-center gap-0.5 bg-[#1a1a1a] rounded-lg px-1 py-0.5 shadow-xl"
+      style={{ top: Math.max(4, rect.top - 44), left: Math.max(8, left - 120), transform: 'translateX(0)' }}
+    >
+      <FmtBtn active={editor.isActive('bold')} onClick={() => editor.chain().focus().toggleBold().run()}>
+        <Bold className="w-3.5 h-3.5" />
+      </FmtBtn>
+      <FmtBtn active={editor.isActive('italic')} onClick={() => editor.chain().focus().toggleItalic().run()}>
+        <Italic className="w-3.5 h-3.5" />
+      </FmtBtn>
+      <FmtBtn active={editor.isActive('underline')} onClick={() => editor.chain().focus().toggleUnderline().run()}>
+        <UnderlineIcon className="w-3.5 h-3.5" />
+      </FmtBtn>
+      <FmtBtn active={editor.isActive('strike')} onClick={() => editor.chain().focus().toggleStrike().run()}>
+        <Strikethrough className="w-3.5 h-3.5" />
+      </FmtBtn>
+      <FmtBtn active={editor.isActive('highlight')} onClick={() => editor.chain().focus().toggleHighlight().run()}>
+        <Highlighter className="w-3.5 h-3.5" />
+      </FmtBtn>
+      <FmtBtn active={editor.isActive('code')} onClick={() => editor.chain().focus().toggleCode().run()}>
+        <Code2 className="w-3.5 h-3.5" />
+      </FmtBtn>
+      <div className="w-px h-4 bg-white/20 mx-0.5" />
+      <FmtBtn active={editor.isActive('link')} onClick={onSetLink}>
+        <LinkIcon className="w-3.5 h-3.5" />
+      </FmtBtn>
+    </div>
+  );
+}
+
+function FmtBtn({ active, onClick, children }: { active: boolean; onClick: () => void; children: React.ReactNode }) {
+  return (
+    <button
+      onMouseDown={(e) => { e.preventDefault(); onClick(); }}
+      className={`p-1.5 rounded-md transition-colors ${
+        active ? 'bg-white/20 text-white' : 'text-white/60 hover:text-white hover:bg-white/10'
+      }`}
+    >
+      {children}
+    </button>
   );
 }

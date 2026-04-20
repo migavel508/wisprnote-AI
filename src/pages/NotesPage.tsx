@@ -153,50 +153,53 @@ export default function NotesPage({ selectedTask, onNavigateToAssets, isLoading 
   return (
     <div className="absolute inset-0 flex flex-col bg-white overflow-hidden">
       {/* Header */}
-      <div className="flex-none bg-white/80 backdrop-blur-lg border-b border-[#141414]/[0.06] sticky top-0 z-10">
-        <div className="max-w-3xl lg:max-w-4xl mx-auto w-full px-6 sm:px-8 pt-6 pb-4">
-          {/* Breadcrumb */}
-          <div className="flex items-center gap-1.5 mb-3 text-[11px] text-[#141414]/35 font-medium">
-            <BookOpen className="w-3 h-3" />
-            <span className="truncate">{selectedTask.filename}</span>
-            <span>·</span>
-            <span className="flex-shrink-0">
+      <div className="flex-none bg-white/95 backdrop-blur-xl sticky top-0 z-10">
+        <div className="max-w-3xl lg:max-w-4xl mx-auto w-full px-6 sm:px-8 pt-4 pb-3">
+          {/* Breadcrumb + date */}
+          <div className="flex items-center gap-1.5 mb-1.5 text-[10.5px] tracking-[0.04em] uppercase">
+            <BookOpen className="w-3 h-3 text-[#a89888]" />
+            <span className="truncate max-w-[180px] text-[#9a8d7f] font-semibold">{selectedTask.filename}</span>
+            <span className="text-[#c4bab0]">·</span>
+            <span className="flex-shrink-0 text-[#b5a99a] font-medium">
               {new Date(selectedTask.created_at!).toLocaleDateString('en-US', { month: 'short', day: 'numeric', year: 'numeric' })}
             </span>
           </div>
           
-          {/* Title row */}
-          <div className="flex items-center gap-3 mb-5">
-            <h1 className="text-[22px] sm:text-[26px] font-semibold tracking-[-0.02em] text-[#1a1a1a] truncate flex-1 leading-tight">
+          {/* Title row — tighter, warmer, editorial */}
+          <div className="flex items-center gap-2.5 mb-2.5">
+            <h1
+              className="text-[19px] sm:text-[22px] font-semibold tracking-[-0.02em] text-[#2c2520] truncate flex-1 leading-tight"
+              style={{ fontFamily: 'Georgia, "Times New Roman", serif', fontStyle: 'italic' }}
+            >
               {selectedTask.filename}
             </h1>
             <button
               onClick={handleGenerateTitle}
               disabled={isGeneratingTitle}
-              className="flex-shrink-0 flex items-center gap-1.5 px-2.5 py-1.5 text-[11px] font-medium text-[#141414]/40 hover:text-[#141414]/70 hover:bg-[#141414]/[0.04] rounded-lg transition-all disabled:opacity-30"
+              className="flex-shrink-0 flex items-center gap-1.5 px-2.5 py-1 text-[10.5px] font-semibold text-[#a89888] hover:text-[#5c5147] bg-[#e8e2da]/40 hover:bg-[#e8e2da]/80 rounded-md transition-all disabled:opacity-30"
               title="Generate AI title based on content"
             >
               {isGeneratingTitle ? (
-                <Loader2 className="w-3.5 h-3.5 animate-spin" />
+                <Loader2 className="w-3 h-3 animate-spin" />
               ) : titleGenerated ? (
-                <Check className="w-3.5 h-3.5 text-green-600" />
+                <Check className="w-3 h-3 text-green-600" />
               ) : (
-                <Sparkles className="w-3.5 h-3.5" />
+                <Sparkles className="w-3 h-3" />
               )}
-              <span className="hidden sm:inline">{titleGenerated ? 'Done!' : 'AI Title'}</span>
+              <span className="hidden sm:inline">{titleGenerated ? 'Done' : 'AI Title'}</span>
             </button>
           </div>
 
-          {/* Tab Switcher — pill style */}
-          <div className="flex gap-0.5 bg-[#141414]/[0.04] rounded-lg p-0.5 w-fit">
+          {/* Tab Switcher — compact warm pills */}
+          <div className="flex gap-[3px] bg-[#e8e2da]/60 rounded-lg p-[3px] w-fit">
             {(['transcription', 'summary', 'notes', 'note'] as NoteTab[]).map((tab) => (
               <button
                 key={tab}
                 onClick={() => setNoteTab(tab)}
-                className={`px-3.5 py-[6px] rounded-md text-[12px] font-medium transition-all ${
+                className={`px-3 py-[4px] rounded-md text-[11.5px] font-semibold transition-all ${
                   noteTab === tab
-                    ? 'bg-white text-[#1a1a1a] shadow-sm shadow-black/[0.04]'
-                    : 'text-[#141414]/40 hover:text-[#141414]/60'
+                    ? 'bg-white text-[#2c2520] shadow-sm shadow-[#c4bab0]/25'
+                    : 'text-[#9a8d7f] hover:text-[#5c5147]'
                 }`}
               >
                 {tab === 'note' ? 'My Note' : tab.charAt(0).toUpperCase() + tab.slice(1)}
@@ -204,6 +207,8 @@ export default function NotesPage({ selectedTask, onNavigateToAssets, isLoading 
             ))}
           </div>
         </div>
+        {/* Thin warm accent line */}
+        <div className="h-[1.5px] bg-gradient-to-r from-transparent via-[#c4bab0]/80 to-transparent" />
       </div>
 
       {/* Scrollable Content Area */}

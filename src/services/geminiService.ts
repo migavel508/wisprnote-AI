@@ -707,6 +707,27 @@ export async function generateEmailContent(text: string): Promise<any> {
   }
 }
 
+function cleanTranscriptionForKG(raw: string, maxChars = 8000): string {
+  let cleaned = raw
+    .replace(/\n{3,}/g, '\n\n')           // collapse 3+ newlines → 2
+    .replace(/[ \t]{2,}/g, ' ')            // collapse multiple spaces/tabs → 1
+    .replace(/(\b(um|uh|hmm|yeah|like|you know|I mean)\b[.,]?\s*)+/gi, ' ') // strip filler words
+    .trim();
+
+  if (cleaned.length <= maxChars) return cleaned;
+
+  // Truncate to last complete sentence within maxChars
+  const slice = cleaned.substring(0, maxChars);
+  const lastSentenceEnd = Math.max(
+    slice.lastIndexOf('. '),
+    slice.lastIndexOf('? '),
+    slice.lastIndexOf('! ')
+  );
+  return lastSentenceEnd > maxChars * 0.5
+    ? slice.substring(0, lastSentenceEnd + 1)
+    : slice;
+}
+
 export async function extractKnowledgeGraph(meetingId: string, meetingTitle: string, text: string): Promise<any> {
   const geminiApiKey = import.meta.env.VITE_GEMINI_API_KEY || import.meta.env.GEMINI_API_KEY || process.env.GEMINI_API_KEY;
   
@@ -732,7 +753,7 @@ Return ONLY this JSON structure:
 IMPORTANT: Do NOT default all statuses to "new". Carefully read the tone and context of the discussion for each topic. Most real meetings have a mix of statuses.
 
 Meeting: ${meetingTitle}
-Transcription: ${text.substring(0, 8000)}`;
+Transcription: ${cleanTranscriptionForKG(text)}`;
 
   try {
     const modelsToTry = ['gemini-3-flash-preview', 'gemini-3.1-flash-lite-preview'];

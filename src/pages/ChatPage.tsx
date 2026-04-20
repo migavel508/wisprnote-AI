@@ -19,6 +19,7 @@ import {
 import Markdown from 'react-markdown';
 import remarkGfm from 'remark-gfm';
 import { ChatPageSkeleton } from '../components/Skeleton';
+import { ShiningText } from '../components/ui/shining-text';
 
 interface Message {
   role: 'user' | 'model';
@@ -239,12 +240,7 @@ export default function ChatPage({
                 <div className="w-7 h-7 rounded-full bg-[#1a1a1a] flex items-center justify-center">
                   <Sparkles className="w-3.5 h-3.5 text-white" />
                 </div>
-                <div className="flex items-center gap-1.5 px-4 py-3 bg-[#f0ede9] rounded-3xl rounded-tl-md">
-                  {[0, 0.15, 0.3].map((delay, i) => (
-                    <motion.div key={i} className="w-1.5 h-1.5 bg-[#1a1a1a]/30 rounded-full"
-                      animate={{ y: [0, -4, 0] }} transition={{ duration: 0.5, repeat: Infinity, delay }} />
-                  ))}
-                </div>
+                <ShiningText text="Lumina is thinking..." />
               </div>
             </motion.div>
           )}
