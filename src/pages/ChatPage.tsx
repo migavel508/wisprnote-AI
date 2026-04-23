@@ -82,6 +82,8 @@ interface ChatPageProps {
   selectedAgentAsset?: GeneratedAsset | null;
   setSelectedAgentAsset?: (a: GeneratedAsset | null) => void;
   downloadExistingAsset?: (a: GeneratedAsset) => void | Promise<void>;
+  history?: TaskHistory[];
+  onSelectTask?: (task: TaskHistory | null) => void;
 }
 
 export default function ChatPage({
@@ -102,6 +104,8 @@ export default function ChatPage({
   selectedAgentAsset = null,
   setSelectedAgentAsset,
   downloadExistingAsset,
+  history = [],
+  onSelectTask,
 }: ChatPageProps) {
   const chatEndRef = useRef<HTMLDivElement>(null);
   const textareaRef = useRef<HTMLTextAreaElement>(null);
@@ -141,18 +145,44 @@ export default function ChatPage({
     if (handleAgentAction) handleAgentAction(type);
   };
 
-  if (isLoading || !selectedTask) {
+  if (isLoading) {
     return <ChatPageSkeleton />;
   }
 
   const isEmpty = chatMessages.length === 0 && agentAssetHistory.length === 0 && !pendingSlashCmd && !isGeneratingAsset;
+  const currentTaskLabel = selectedTask ? selectedTask.filename : 'All Meetings';
+  const taskOptions = selectedTask && selectedTask.id && !history.some(t => t.id === selectedTask.id)
+    ? [selectedTask, ...history]
+    : history;
 
   return (
     <div className="h-full w-full bg-white flex flex-col overflow-hidden font-[system-ui]">
       {/* Header */}
       <div className="flex-none flex items-center gap-2.5 px-6 sm:px-8 py-4 overflow-x-auto no-scrollbar whitespace-nowrap z-10">
         <MessageSquare className="w-4 h-4 flex-shrink-0 text-[#1a1a1a]/20" />
-        <span className="text-[13px] text-[#1a1a1a]/30 truncate">{selectedTask.filename}</span>
+        
+        {onSelectTask ? (
+          <select 
+            value={selectedTask?.id || 'all'}
+            onChange={(e) => {
+              if (e.target.value === 'all') {
+                onSelectTask(null);
+              } else {
+                const task = taskOptions.find(t => t.id === e.target.value);
+                if (task) onSelectTask(task);
+              }
+            }}
+            className="bg-transparent text-[13px] font-semibold text-[#1a1a1a]/70 outline-none cursor-pointer hover:bg-black/5 rounded px-1 transition-colors"
+          >
+            <option value="all">All Meetings</option>
+            {taskOptions.map(t => (
+              <option key={t.id} value={t.id}>{t.filename}</option>
+            ))}
+          </select>
+        ) : (
+          <span className="text-[13px] text-[#1a1a1a]/30 truncate">{currentTaskLabel}</span>
+        )}
+
         <span className="text-[#1a1a1a]/15">/</span>
         <span className="text-[13px] font-semibold text-[#1a1a1a]/70">AI Chat</span>
       </div>
@@ -166,7 +196,7 @@ export default function ChatPage({
             <div className="flex flex-col items-center justify-center text-center py-14">
               <h1 className="text-[28px] sm:text-[32px] font-serif italic text-[#1a1a1a]/70 leading-tight mb-2">Chat</h1>
               <p className="text-[14px] text-[#1a1a1a]/50 max-w-xl mb-10">
-                Ask anything about <span className="font-semibold text-[#1a1a1a]/80">{selectedTask.filename}</span>.
+                Ask anything about <span className="font-semibold text-[#1a1a1a]/80">{currentTaskLabel}</span>.
                 Type <kbd className="px-1.5 py-0.5 bg-[#1a1a1a]/[0.04] border border-[#1a1a1a]/[0.06] rounded-md text-[12px] font-medium">/</kbd> for AI commands.
               </p>
               <div className="grid grid-cols-1 sm:grid-cols-2 gap-3 w-full max-w-2xl mb-8">
