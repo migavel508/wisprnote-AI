@@ -50,8 +50,8 @@ export async function isSystemAudioRecording(): Promise<boolean> {
 // ─── Real-time Transcription — Integrated via Tauri commands + events ────────
 // No separate server needed! Audio capture + Deepgram streaming runs inside the Tauri app.
 
-export async function startRealtimeRecording(apiKey: string): Promise<void> {
-  await tauriInvoke<void>('start_realtime_audio', { apiKey });
+export async function startRealtimeRecording(apiKey: string, keyterms: string[] = []): Promise<void> {
+  await tauriInvoke<void>('start_realtime_audio', { apiKey, keyterms });
 }
 
 export async function stopRealtimeRecording(): Promise<string> {
@@ -68,18 +68,32 @@ export async function isRealtimeRecording(): Promise<boolean> {
 }
 
 export async function listenForTranscripts(
-  onTranscript: (text: string, isFinal: boolean) => void,
+  onTranscript: (text: string, isFinal: boolean, speaker?: string) => void,
 ): Promise<() => void> {
   const { listen } = await import('@tauri-apps/api/event');
 
   const unlisten = await listen<string>('realtime-transcript', (event) => {
     const raw = event.payload;
     // Format: [FINAL:speaker] text  or  [INTERIM:speaker] text
-    const match = raw.match(/^\[(FINAL|INTERIM)[:\w]*\]\s*(.*)/);
+    const match = raw.match(/^\[(FINAL|INTERIM):([^\]]+)\]\s*(.*)/);
     if (!match) return;
     const isFinal = match[1] === 'FINAL';
-    const clean = match[2].trim();
-    if (clean) onTranscript(clean, isFinal);
+    const speakerRaw = match[2]?.trim();
+    const clean = match[3].trim();
+    if (!clean) return;
+
+    const speaker = speakerRaw && speakerRaw !== 'U' ? speakerRaw : undefined;
+    if (speaker) {
+      // User-facing speaker labels (Deepgram starts speakers at 0).
+      const speakerNum = Number(speaker);
+      const safeSpeaker = Number.isFinite(speakerNum) ? `Speaker ${speakerNum + 1}` : `Speaker ${speaker}`;
+      const alreadyLabeled = /^speaker\s+\d+:/i.test(clean);
+      const displayText = alreadyLabeled ? clean : `${safeSpeaker}: ${clean}`;
+      onTranscript(displayText, isFinal, speaker);
+      return;
+    }
+
+    onTranscript(clean, isFinal, undefined);
   });
 
   return unlisten;

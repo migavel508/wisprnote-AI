@@ -34,6 +34,8 @@ interface ProcessPageProps {
   status: string;
   batches: Array<{ status: string }>;
   totalProgress: number;
+  processingHeadline?: string;
+  processingSubtext?: string;
   inputMode: 'upload' | 'record';
   setInputMode: (mode: 'upload' | 'record') => void;
   nativeServerAvailable: boolean;
@@ -71,6 +73,8 @@ export default function ProcessPage({
   status,
   batches,
   totalProgress,
+  processingHeadline = 'Working my magic ✨',
+  processingSubtext = 'Tiny wait, big result 😄',
   inputMode,
   setInputMode,
   nativeServerAvailable,
@@ -112,7 +116,7 @@ export default function ProcessPage({
 
   // Auto-collapse panel when processing starts
   useEffect(() => {
-    if (status === 'processing' || status === 'splitting') {
+    if (status === 'processing' || status === 'splitting' || status === 'finalizing') {
       setViewState('collapsed');
     }
   }, [status]);
@@ -143,7 +147,7 @@ export default function ProcessPage({
     setIsDragOver(false);
   };
 
-  const isProcessing = status === 'processing' || status === 'splitting';
+  const isProcessing = status === 'processing' || status === 'splitting' || status === 'finalizing';
 
   return (
     <div className="flex flex-col h-full bg-white font-[system-ui] overflow-hidden relative">
@@ -208,9 +212,14 @@ export default function ProcessPage({
                     <div className="w-7 h-7 rounded-full bg-[#1a1a1a]/[0.06] flex items-center justify-center">
                       <Loader2 className="w-3.5 h-3.5 text-[#1a1a1a]/60 animate-spin" />
                     </div>
-                    <span className="text-[13px] font-medium text-[#1a1a1a]/70">
-                      Processing audio…
-                    </span>
+                    <div className="flex flex-col">
+                      <span className="text-[13px] font-medium text-[#1a1a1a]/70">
+                        {processingHeadline}
+                      </span>
+                      <span className="text-[11px] text-[#1a1a1a]/45 mt-0.5">
+                        {processingSubtext}
+                      </span>
+                    </div>
                   </div>
                   <span className="text-[12px] font-medium text-[#1a1a1a]/35 tabular-nums">
                     {Math.round(totalProgress)}%
@@ -288,7 +297,7 @@ export default function ProcessPage({
           >
             <div className="bg-[#1a1a1a]/90 backdrop-blur-xl text-white/90 pl-4 pr-5 py-2.5 flex items-center gap-3 rounded-full shadow-lg shadow-black/10">
               <Loader2 className="w-3.5 h-3.5 animate-spin" />
-              <span className="text-[12px] font-medium">Processing · {Math.round(totalProgress)}%</span>
+              <span className="text-[12px] font-medium max-w-[280px] truncate">{processingHeadline} · {Math.round(totalProgress)}%</span>
               <div className="w-20 h-1.5 bg-white/15 rounded-full overflow-hidden">
                 <motion.div className="h-full bg-white/60 rounded-full" animate={{ width: `${totalProgress}%` }} />
               </div>
