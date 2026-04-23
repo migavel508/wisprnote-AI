@@ -225,6 +225,8 @@ export default function App() {
   const [notebookRefreshKey, setNotebookRefreshKey] = useState(0);
 
   const [history, setHistory] = useState<TaskHistory[]>([]);
+  const [chatMessages, setChatMessages] = useState<Message[]>([]);
+  const [allMeetingsChatMessages, setAllMeetingsChatMessages] = useState<Message[]>([]);
   const [selectedTask, setSelectedTask] = useState<TaskHistory | null>(null);
   const [isLoadingHistory, setIsLoadingHistory] = useState(true); // Start true, set false after first fetch
   
@@ -242,7 +244,6 @@ export default function App() {
   }, [location.pathname, history]);
   const [noteTab, setNoteTab] = useState<NoteTab>('transcription');
   const [isSidebarOpen, setIsSidebarOpen] = useState(true);
-  const [chatMessages, setChatMessages] = useState<Message[]>([]);
   const [chatInput, setChatInput] = useState('');
   const [isChatting, setIsChatting] = useState(false);
   const [isGeneratingImage, setIsGeneratingImage] = useState(false);
@@ -313,6 +314,7 @@ export default function App() {
     setIsLoadingKG(false);
     setIsExtractingNewKG(false);
     setChatMessages([]);
+    setAllMeetingsChatMessages([]);
     setChatInput('');
     setAgentAssetHistory([]);
     setSelectedAgentAsset(null);
@@ -417,8 +419,10 @@ export default function App() {
     if (selectedTask) {
       fetchAgentAssets(selectedTask.id!);
       fetchChatHistory(selectedTask.id!);
+    } else if (currentView === 'chat' && !selectedTask) {
+      setChatMessages(allMeetingsChatMessages);
     }
-  }, [selectedTask]);
+  }, [selectedTask, currentView]);
 
   const fetchAgentAssets = async (taskId: string) => {
     try {
@@ -430,7 +434,12 @@ export default function App() {
     }
   };
 
-  const fetchChatHistory = async (taskId: string) => {
+  const fetchChatHistory = async (taskId: string | null) => {
+    if (!taskId) {
+      setChatMessages(allMeetingsChatMessages);
+      return;
+    }
+    
     try {
       const data = await getChatHistory(taskId);
       // Transform to Message format
@@ -1496,10 +1505,10 @@ export default function App() {
   };
 
   const handleSendMessage = async () => {
-    if (!chatInput.trim() || !selectedTask || !selectedTask.id || isChatting) return;
+    if (!chatInput.trim() || isChatting) return;
 
-    // Ensure we have transcription content
-    if (!selectedTask.transcription) {
+    // Ensure we have transcription content if chatting about a specific meeting
+    if (selectedTask && !selectedTask.transcription) {
       setChatMessages(prev => [...prev, { role: 'model', text: 'Unable to chat: No transcription content available for this meeting.' }]);
       return;
     }
@@ -1511,40 +1520,65 @@ export default function App() {
     setIsChatting(true);
 
     try {
-      // Save user message to Supabase
-      await saveChatMessage({
-        task_id: selectedTask.id,
-        role: 'user',
-        text: userInput
-      });
+      // Save user message to Supabase if it's a specific meeting
+      if (selectedTask && selectedTask.id) {
+        await saveChatMessage({
+          task_id: selectedTask.id,
+          role: 'user',
+          text: userInput
+        });
+      }
 
-      const history = chatMessages.map(m => ({
+      if (!selectedTask) {
+        setAllMeetingsChatMessages(prev => [...prev, userMessage]);
+      }
+
+      const msgHistory = chatMessages.map(m => ({
         role: m.role,
         parts: [{ text: m.text }]
       }));
 
-      // Pass all available sources for richer RAG context
-      const response = await chatWithNotes(
-        {
-          transcription: selectedTask.transcription,
-          notes: selectedTask.notes || '',
-          summary: selectedTask.summary || '',
-          title: selectedTask.filename || '',
-        },
-        userInput,
-        history,
-        true
-      );
+      let response: string;
+
+      if (!selectedTask) {
+        // App's state variable is also called history, we can alias it or reference it via window or just use the state variable `history` directly since we renamed the local variable to `msgHistory`.
+        const contextStr = history.map(t => 
+           `Meeting: ${t.filename}\nSummary: ${t.summary || ''}\nTranscript Snippet: ${(t.transcription || '').substring(0, 1500)}`
+        ).join('\n\n---\n\n');
+        
+        response = await chatWithNotes(
+          { transcription: contextStr, notes: '', summary: '', title: 'All Meetings' },
+          userInput,
+          msgHistory,
+          true
+        );
+      } else {
+        response = await chatWithNotes(
+          {
+            transcription: selectedTask.transcription,
+            notes: selectedTask.notes || '',
+            summary: selectedTask.summary || '',
+            title: selectedTask.filename || '',
+          },
+          userInput,
+          msgHistory,
+          true
+        );
+      }
 
       const modelMessage: Message = { role: 'model', text: response };
       setChatMessages(prev => [...prev, modelMessage]);
 
-      // Save model response to Supabase
-      await saveChatMessage({
-        task_id: selectedTask.id!,
-        role: 'model',
-        text: response
-      });
+      if (!selectedTask) {
+        setAllMeetingsChatMessages(prev => [...prev, modelMessage]);
+      } else if (selectedTask && selectedTask.id) {
+        // Save model response to Supabase
+        await saveChatMessage({
+          task_id: selectedTask.id,
+          role: 'model',
+          text: response
+        });
+      }
     } catch (err) {
       console.error('Chat error:', err);
       setChatMessages(prev => [...prev, { role: 'model', text: 'Sorry, I encountered an error while processing your request.' }]);
@@ -2090,8 +2124,8 @@ export default function App() {
         onViewChange={(view) => {
           if (view === 'notes' && selectedTask) {
             setCurrentView('notes', selectedTask.id);
-          } else if (view === 'chat' && selectedTask) {
-            setCurrentView('chat', selectedTask.id);
+          } else if (view === 'chat') {
+            setCurrentView('chat', selectedTask?.id);
           } else {
             setCurrentView(view);
           }
@@ -2180,35 +2214,36 @@ export default function App() {
             )}
 
             {currentView === 'chat' && (
-              selectedTask ? (
-                <ChatPage
-                  selectedTask={selectedTask}
-                  chatMessages={chatMessages}
-                  chatInput={chatInput}
-                  setChatInput={setChatInput}
-                  isChatting={isChatting}
-                  isGeneratingImage={isGeneratingImage}
-                  handleSendMessage={handleSendMessage}
-                  handleVisualize={handleVisualize}
-                  isGeneratingAsset={isGeneratingAsset}
-                  handleAgentAction={handleAgentAction}
-                  wikiStyle={wikiStyle}
-                  setWikiStyle={setWikiStyle}
-                  agentAssetHistory={agentAssetHistory}
-                  selectedAgentAsset={selectedAgentAsset}
-                  setSelectedAgentAsset={setSelectedAgentAsset as (a: any) => void}
-                  downloadExistingAsset={downloadExistingAsset}
-                />
-              ) : (
-                <HistoryPage
-                  history={history}
-                  onSelectTask={(task) => {
-                    setSelectedTask(task);
-                    setCurrentView('chat', task.id);
-                  }}
-                  onTaskUpdated={handleTaskUpdated}
-                />
-              )
+              <ChatPage
+                selectedTask={selectedTask}
+                history={history}
+                onSelectTask={(task) => {
+                  if (task) {
+                    // Resolve from canonical history type to avoid cross-component type drift.
+                    const resolvedTask = history.find(h => h.id === task.id) ?? (task as TaskHistory);
+                    setSelectedTask(resolvedTask);
+                    fetchChatHistory(resolvedTask.id!);
+                  } else {
+                    setSelectedTask(null);
+                    setChatMessages(allMeetingsChatMessages);
+                  }
+                }}
+                chatMessages={chatMessages}
+                chatInput={chatInput}
+                setChatInput={setChatInput}
+                isChatting={isChatting}
+                isGeneratingImage={isGeneratingImage}
+                handleSendMessage={handleSendMessage}
+                handleVisualize={handleVisualize}
+                isGeneratingAsset={isGeneratingAsset}
+                handleAgentAction={handleAgentAction}
+                wikiStyle={wikiStyle}
+                setWikiStyle={setWikiStyle}
+                agentAssetHistory={agentAssetHistory}
+                selectedAgentAsset={selectedAgentAsset}
+                setSelectedAgentAsset={setSelectedAgentAsset as (a: any) => void}
+                downloadExistingAsset={downloadExistingAsset}
+              />
             )}
 
 
