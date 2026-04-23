@@ -11,6 +11,10 @@ export interface ProcessingProgress {
   id: string;
   filename: string;
   prompt: string;
+  mode?: 'batch' | 'realtime';
+  stage?: 'batch-transcription' | 'realtime-postprocess';
+  transcription?: string;
+  duration?: number;
   totalBatches: number;
   completedBatches: number;
   batches: Array<{

@@ -21,6 +21,8 @@ enum DeepgramResponse {
         channel: Channel,
         #[serde(default)]
         is_final: bool,
+        #[serde(default)]
+        speech_final: bool,
     },
     #[serde(rename = "Metadata")]
     Metadata {
@@ -68,6 +70,35 @@ fn group_words_by_speaker(words: &[Word]) -> Vec<(u32, String)> {
     segments
 }
 
+fn percent_encode_query_value(value: &str) -> String {
+    let mut encoded = String::new();
+    for byte in value.as_bytes() {
+        match byte {
+            b'A'..=b'Z' | b'a'..=b'z' | b'0'..=b'9' | b'-' | b'_' | b'.' | b'~' => {
+                encoded.push(*byte as char)
+            }
+            b' ' => encoded.push_str("%20"),
+            _ => encoded.push_str(&format!("%{:02X}", byte)),
+        }
+    }
+    encoded
+}
+
+fn format_transcript_with_speakers(words: &[Word], fallback: &str) -> (Option<u32>, String) {
+    let segments = group_words_by_speaker(words);
+    if segments.is_empty() {
+        return (None, fallback.trim().to_string());
+    }
+
+    let first_speaker = segments.first().map(|(speaker, _)| *speaker);
+    let text = segments
+        .into_iter()
+        .map(|(speaker, seg)| format!("Speaker {}: {}", speaker + 1, seg))
+        .collect::<Vec<_>>()
+        .join(" ");
+    (first_speaker, text)
+}
+
 pub struct DeepgramTranscriber {
     #[allow(dead_code)]
     api_key: String,
@@ -78,13 +109,13 @@ pub struct DeepgramTranscriber {
 }
 
 impl DeepgramTranscriber {
-    pub fn new(api_key: String, sample_rate: u32) -> Self {
+    pub fn new(api_key: String, sample_rate: u32, keyterms: Option<Vec<String>>) -> Self {
         let (tx, rx) = mpsc::unbounded_channel();
         let (transcript_tx, transcript_rx) = mpsc::unbounded_channel();
 
         let api_key_clone = api_key.clone();
         tokio::spawn(async move {
-            if let Err(e) = Self::run_websocket(api_key_clone, sample_rate, rx, transcript_tx).await {
+            if let Err(e) = Self::run_websocket(api_key_clone, sample_rate, keyterms, rx, transcript_tx).await {
                 eprintln!("Deepgram WebSocket error: {}", e);
             }
         });
@@ -108,13 +139,29 @@ impl DeepgramTranscriber {
     async fn run_websocket(
         api_key: String,
         sample_rate: u32,
+        keyterms: Option<Vec<String>>,
         mut audio_rx: mpsc::UnboundedReceiver<Vec<f32>>,
         transcript_tx: mpsc::UnboundedSender<String>,
     ) -> Result<()> {
-        let url = format!(
-            "{}?encoding=linear16&sample_rate={}&channels=1&model=nova-3&language=en-IN&interim_results=true&smart_format=true&punctuate=true&diarize=true&utterances=true&filler_words=false&endpointing=800&utterance_end_ms=2000&vad_events=true&no_delay=true",
+        // Deepgram tuning for live meetings:
+        // - diarize + utterances for speaker segmentation
+        // - lower endpointing/utterance_end for faster stable finalization
+        // - keyterm prompting for names/domain vocabulary
+        let mut url = format!(
+            "{}?encoding=linear16&sample_rate={}&channels=1&model=nova-3&language=en&interim_results=true&smart_format=true&punctuate=true&numerals=true&diarize=true&utterances=true&filler_words=false&endpointing=400&utterance_end_ms=1200&vad_events=true&no_delay=true",
             DEEPGRAM_WS_URL, sample_rate
         );
+        if let Some(terms) = keyterms {
+            for term in terms
+                .into_iter()
+                .map(|t| t.trim().to_string())
+                .filter(|t| !t.is_empty())
+                .take(50)
+            {
+                url.push_str("&keyterm=");
+                url.push_str(&percent_encode_query_value(&term));
+            }
+        }
 
         use tokio_tungstenite::tungstenite::client::IntoClientRequest;
         let mut request = url.into_client_request()
@@ -177,20 +224,20 @@ impl DeepgramTranscriber {
                 Ok(Message::Text(text)) => {
                     if let Ok(response) = serde_json::from_str::<DeepgramResponse>(&text) {
                         match response {
-                            DeepgramResponse::Results { channel, is_final } => {
+                            DeepgramResponse::Results { channel, is_final, speech_final: _ } => {
                                 if let Some(alt) = channel.alternatives.first() {
-                                    if !alt.transcript.is_empty() {
+                                    if !alt.transcript.trim().is_empty() {
                                         let kind = if is_final { "FINAL" } else { "INTERIM" };
-                                        let segments = group_words_by_speaker(&alt.words);
-                                        if segments.is_empty() {
-                                            let msg = format!("[{}:U] {}", kind, alt.transcript);
-                                            let _ = transcript_tx.send(msg);
+                                        let (speaker_hint, transcript_text) = if is_final {
+                                            format_transcript_with_speakers(&alt.words, &alt.transcript)
                                         } else {
-                                            for (speaker, text) in segments {
-                                                let msg = format!("[{}:{}] {}", kind, speaker, text);
-                                                let _ = transcript_tx.send(msg);
-                                            }
-                                        }
+                                            (alt.words.first().and_then(|w| w.speaker), alt.transcript.trim().to_string())
+                                        };
+                                        let speaker_tag = speaker_hint
+                                            .map(|s| s.to_string())
+                                            .unwrap_or_else(|| "U".to_string());
+                                        let msg = format!("[{}:{}] {}", kind, speaker_tag, transcript_text);
+                                        let _ = transcript_tx.send(msg);
                                     }
                                 }
                             }

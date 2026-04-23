@@ -369,7 +369,12 @@ pub mod macos {
             self.is_recording.load(Ordering::Relaxed)
         }
 
-        pub fn start(&mut self, api_key: String, app_handle: tauri::AppHandle) -> Result<(), String> {
+        pub fn start(
+            &mut self,
+            api_key: String,
+            keyterms: Option<Vec<String>>,
+            app_handle: tauri::AppHandle,
+        ) -> Result<(), String> {
             if self.is_recording.load(Ordering::Relaxed) {
                 return Err("Already recording in realtime mode".to_string());
             }
@@ -384,7 +389,7 @@ pub mod macos {
             let transcripts = self.transcripts.clone();
 
             let handle = std::thread::spawn(move || {
-                if let Err(e) = record_realtime(is_recording.clone(), transcripts, api_key, app_handle) {
+                if let Err(e) = record_realtime(is_recording.clone(), transcripts, api_key, keyterms, app_handle) {
                     eprintln!("Realtime recording error: {}", e);
                     is_recording.store(false, Ordering::Relaxed);
                 }
@@ -424,6 +429,7 @@ pub mod macos {
         is_recording: Arc<AtomicBool>,
         transcripts: Arc<Mutex<Vec<String>>>,
         api_key: String,
+        keyterms: Option<Vec<String>>,
         app_handle: tauri::AppHandle,
     ) -> Result<(), anyhow::Error> {
         use crate::device_monitor;
@@ -438,6 +444,7 @@ pub mod macos {
                 &is_recording,
                 &transcripts,
                 &api_key,
+                &keyterms,
                 &app_handle,
                 &dev_rx,
             ) {
@@ -469,6 +476,7 @@ pub mod macos {
         is_recording: &Arc<AtomicBool>,
         transcripts: &Arc<Mutex<Vec<String>>>,
         api_key: &str,
+        keyterms: &Option<Vec<String>>,
         app_handle: &tauri::AppHandle,
         dev_rx: &std::sync::mpsc::Receiver<crate::device_monitor::DeviceChange>,
     ) -> Result<(), anyhow::Error> {
@@ -542,7 +550,7 @@ pub mod macos {
         let device_changed_clone = device_changed.clone();
 
         rt.block_on(async {
-            let mut transcriber = DeepgramTranscriber::new(api_key.to_string(), sample_rate);
+            let mut transcriber = DeepgramTranscriber::new(api_key.to_string(), sample_rate, keyterms.clone());
             let mut chunk_buffer = Vec::with_capacity(CHUNK_SIZE);
 
             while is_recording.load(Ordering::Relaxed) {
@@ -587,7 +595,10 @@ pub mod macos {
                     // Accumulate FINAL transcripts
                     if transcript.contains("[FINAL") {
                         if let Ok(mut t) = transcripts.lock() {
-                            t.push(transcript.clone());
+                            let should_push = t.last().map(|prev| prev != &transcript).unwrap_or(true);
+                            if should_push {
+                                t.push(transcript.clone());
+                            }
                         }
                     }
                 }
@@ -606,7 +617,10 @@ pub mod macos {
                 let _ = app_handle.emit("realtime-transcript", &transcript);
                 if transcript.contains("[FINAL") {
                     if let Ok(mut t) = transcripts.lock() {
-                        t.push(transcript);
+                        let should_push = t.last().map(|prev| prev != &transcript).unwrap_or(true);
+                        if should_push {
+                            t.push(transcript);
+                        }
                     }
                 }
             }
@@ -706,7 +720,12 @@ pub mod stub {
             false
         }
 
-        pub fn start(&mut self, _api_key: String, _app_handle: tauri::AppHandle) -> Result<(), String> {
+        pub fn start(
+            &mut self,
+            _api_key: String,
+            _keyterms: Option<Vec<String>>,
+            _app_handle: tauri::AppHandle,
+        ) -> Result<(), String> {
             Err("Realtime recording is only supported on macOS".to_string())
         }
 

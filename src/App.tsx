@@ -121,7 +121,7 @@ declare global {
 }
 
 type View = 'process' | 'history' | 'notes' | 'chat' | 'knowledge' | 'notebooks' | 'audio-devices';
-type Status = 'idle' | 'splitting' | 'processing' | 'completed' | 'error';
+type Status = 'idle' | 'splitting' | 'processing' | 'finalizing' | 'completed' | 'error';
 type NoteTab = 'transcription' | 'summary' | 'notes';
 
 interface Message {
@@ -185,9 +185,11 @@ export default function App() {
   const [session, setSession] = useState<Session | null>(null);
   const [file, setFile] = useState<File | null>(null);
   const [prompt, setPrompt] = useState('');
-  const [status, setStatus] = useState<'idle' | 'splitting' | 'processing' | 'completed' | 'error'>('idle');
+  const [status, setStatus] = useState<Status>('idle');
   const [batches, setBatches] = useState<BatchStatus[]>([]);
   const [error, setError] = useState<string | null>(null);
+  const [processingHeadline, setProcessingHeadline] = useState('Preparing your meeting intelligence…');
+  const [processingSubtext, setProcessingSubtext] = useState('We will keep you posted at every step.');
   
   // Recovery state
   const [hasRecoverableProgress, setHasRecoverableProgress] = useState(false);
@@ -198,6 +200,7 @@ export default function App() {
   // Network status
   const [isOnline, setIsOnline] = useState(navigator.onLine);
   const [wasOffline, setWasOffline] = useState(false);
+  const [awaitingNetworkResume, setAwaitingNetworkResume] = useState(false);
   const [showReconnectingMessage, setShowReconnectingMessage] = useState(false);
   
   // Recording State
@@ -305,6 +308,28 @@ export default function App() {
   const prevUserIdRef = useRef<string | null>(null);
   const autoSyncRanRef = useRef(false);
 
+  const isNetworkRelatedError = (err: any): boolean => {
+    if (!err) return !navigator.onLine;
+    const status = err.status ?? err.statusCode ?? err?.error?.code ?? err?.code ?? 0;
+    const msg = String(err.message ?? err).toLowerCase();
+    const networkMarkers = [
+      'network',
+      'offline',
+      'failed to fetch',
+      'fetch failed',
+      'timed out',
+      'timeout',
+      'etimedout',
+      'econnreset',
+      'eai_again',
+      'enotfound',
+      '503',
+      '502',
+      '504',
+    ];
+    return !navigator.onLine || status === 0 || status === 502 || status === 503 || status === 504 || networkMarkers.some(marker => msg.includes(marker));
+  };
+
   // Wipe all user-scoped state so no data leaks between accounts
   const clearUserState = useCallback(() => {
     setHistory([]);
@@ -321,6 +346,9 @@ export default function App() {
     setFile(null);
     setStatus('idle');
     setError(null);
+    setProcessingHeadline('Notes are warming up ✨');
+    setProcessingSubtext('Hang tight, almost there 😄');
+    setAwaitingNetworkResume(false);
     autoSyncRanRef.current = false;
   }, []);
 
@@ -353,27 +381,32 @@ export default function App() {
     const handleOnline = async () => {
       setIsOnline(true);
       
-      // If we were processing when we went offline, auto-resume
-      if (wasOffline && currentProgressIdRef.current) {
+      // If we were processing when we went offline (or hit a network failure), auto-resume
+      if ((wasOffline || awaitingNetworkResume) && currentProgressIdRef.current) {
         setShowReconnectingMessage(true);
         try {
           const progress = await progressStorage.getProgress(currentProgressIdRef.current);
           if (progress && progress.completedBatches < progress.totalBatches) {
             console.log('Network reconnected - auto-resuming processing');
-            await startProcessing(progress);
+            if (progress.stage === 'realtime-postprocess') {
+              await processRealtimeTranscript(progress.transcription || '', progress);
+            } else {
+              await startProcessing(progress);
+            }
           }
         } catch (err) {
           console.error('Failed to auto-resume:', err);
         } finally {
           setShowReconnectingMessage(false);
           setWasOffline(false);
+          setAwaitingNetworkResume(false);
         }
       }
     };
     
     const handleOffline = () => {
       setIsOnline(false);
-      if (status === 'processing') {
+      if (status === 'processing' || status === 'splitting' || status === 'finalizing') {
         setWasOffline(true);
       }
     };
@@ -385,7 +418,7 @@ export default function App() {
       window.removeEventListener('online', handleOnline);
       window.removeEventListener('offline', handleOffline);
     };
-  }, [wasOffline, status]);
+  }, [wasOffline, awaitingNetworkResume, status]);
 
   // Check for recoverable progress on mount (only if not currently processing)
   useEffect(() => {
@@ -557,6 +590,18 @@ export default function App() {
     return `${m.toString().padStart(2, '0')}:${s.toString().padStart(2, '0')}`;
   };
 
+  const extractDeepgramKeyterms = (rawPrompt: string): string[] => {
+    if (!rawPrompt.trim()) return [];
+    const delimiters = /[,\n;]/;
+    const baseTerms = delimiters.test(rawPrompt)
+      ? rawPrompt.split(delimiters)
+      : rawPrompt.split(/\s+/);
+    return baseTerms
+      .map(term => term.trim())
+      .filter(term => term.length >= 3)
+      .slice(0, 25);
+  };
+
   const startRecording = async () => {
     if (nativeServerAvailable && desktopRecordingMode === 'batch') {
       // ── Native Batch Recording (mic + system audio via Tauri) ──
@@ -586,11 +631,23 @@ export default function App() {
           return;
         }
 
+        // Reset buffers before listener/stream starts to avoid dropping early words.
+        setRealtimeTranscript([]);
+        realtimeTranscriptRef.current = [];
+        setInterimTranscript('');
+
         // Start listening for transcript events BEFORE starting recording
         const unlisten = await listenForTranscripts((text, isFinal) => {
           if (isFinal) {
-            realtimeTranscriptRef.current = [...realtimeTranscriptRef.current, text];
-            setRealtimeTranscript(prev => [...prev, text]);
+            const trimmed = text.trim();
+            if (!trimmed) return;
+            // Avoid duplicate finals that can arrive across reconnections/finalization boundaries.
+            if (realtimeTranscriptRef.current[realtimeTranscriptRef.current.length - 1] === trimmed) {
+              setInterimTranscript('');
+              return;
+            }
+            realtimeTranscriptRef.current = [...realtimeTranscriptRef.current, trimmed];
+            setRealtimeTranscript(prev => [...prev, trimmed]);
             setInterimTranscript('');
           } else {
             setInterimTranscript(text);
@@ -598,15 +655,12 @@ export default function App() {
         });
         unlistenRef.current = unlisten;
 
-        await startRealtimeRecording(apiKey);
+        await startRealtimeRecording(apiKey, extractDeepgramKeyterms(prompt));
 
         setIsRecording(true);
         setIsPaused(false);
         setRecordingTime(0);
         setFile(null);
-        setRealtimeTranscript([]);
-        realtimeTranscriptRef.current = [];
-        setInterimTranscript('');
 
         timerRef.current = setInterval(() => {
           setRecordingTime(prev => prev + 1);
@@ -715,7 +769,13 @@ export default function App() {
         if (unlistenRef.current) { unlistenRef.current(); unlistenRef.current = null; }
         setIsRecording(false);
         setIsPaused(false);
-        setError(err.message || 'Failed to stop realtime recording.');
+        // If network drops while stopping the realtime stream, salvage any finalized transcript.
+        const fallbackTranscript = realtimeTranscriptRef.current.join(' ');
+        if (fallbackTranscript.trim()) {
+          await processRealtimeTranscript(fallbackTranscript);
+        } else {
+          setError(err.message || 'Failed to stop realtime recording.');
+        }
       }
     } else if (mediaRecorderRef.current && (mediaRecorderRef.current.state === 'recording' || mediaRecorderRef.current.state === 'paused')) {
       // ── Stop Browser Recording ──
@@ -729,29 +789,113 @@ export default function App() {
   startRecordingRef.current = startRecording;
   stopRecordingRef.current = stopRecording;
 
-  // Process real-time transcript: skip Gemini transcription, use Gemini only for intelligence
-  const processRealtimeTranscript = async (transcript: string) => {
+  // Process real-time transcript with step checkpointing for network-safe resume.
+  const processRealtimeTranscript = async (
+    transcript: string,
+    resumeFromProgress?: ProcessingProgress
+  ) => {
+    if (!transcript.trim()) return;
+
     try {
       setStatus('processing');
       setError(null);
+      setAwaitingNetworkResume(false);
+      setProcessingHeadline('Story mode on 🎬');
+      setProcessingSubtext('Good stuff coming up 😎');
 
-      const [summary, notes, meetingTitle] = await Promise.all([
-        generateSummary(transcript),
-        generateNotes(transcript),
-        generateMeetingTitle(transcript),
-      ]);
+      const progressId = resumeFromProgress?.id || generateProgressId(`realtime_${Date.now()}`);
+      currentProgressIdRef.current = progressId;
+
+      const initialCheckpointBatches = resumeFromProgress?.batches || [
+        { index: 0, status: 'pending' as const, startTime: 0, endTime: 0 }, // summary
+        { index: 1, status: 'pending' as const, startTime: 0, endTime: 0 }, // notes
+        { index: 2, status: 'pending' as const, startTime: 0, endTime: 0 }, // title
+        { index: 3, status: 'pending' as const, startTime: 0, endTime: 0 }, // save task
+      ];
+
+      let summary = resumeFromProgress?.batches?.find(b => b.index === 0)?.result || '';
+      let notes = resumeFromProgress?.batches?.find(b => b.index === 1)?.result || '';
+      let meetingTitle = resumeFromProgress?.batches?.find(b => b.index === 2)?.result || '';
+
+      const updateRealtimeCheckpoint = async (
+        updatedBatches: ProcessingProgress['batches'],
+        durationToStore: number
+      ) => {
+        const completedCount = updatedBatches.filter(b => b.status === 'completed').length;
+        await progressStorage.saveProgress({
+          id: progressId,
+          filename: `Realtime Meeting ${new Date().toLocaleString()}`,
+          prompt,
+          mode: 'realtime',
+          stage: 'realtime-postprocess',
+          transcription: transcript,
+          duration: durationToStore,
+          totalBatches: 4,
+          completedBatches: completedCount,
+          batches: updatedBatches,
+          createdAt: resumeFromProgress?.createdAt || Date.now(),
+          updatedAt: Date.now(),
+        });
+      };
+
+      const checkpointBatches = [...initialCheckpointBatches];
+      await updateRealtimeCheckpoint(checkpointBatches, resumeFromProgress?.duration ?? recordingTime);
+
+      if (!summary) {
+        setStatus('finalizing');
+        setProcessingHeadline('Cooking the summary 🍳');
+        setProcessingSubtext('Crispy highlights incoming 🌟');
+        checkpointBatches[0] = { ...checkpointBatches[0], status: 'processing', error: undefined };
+        await updateRealtimeCheckpoint(checkpointBatches, resumeFromProgress?.duration ?? recordingTime);
+        summary = await generateSummary(transcript);
+        checkpointBatches[0] = { ...checkpointBatches[0], status: 'completed', result: summary };
+        await updateRealtimeCheckpoint(checkpointBatches, resumeFromProgress?.duration ?? recordingTime);
+      }
+
+      if (!notes) {
+        setStatus('finalizing');
+        setProcessingHeadline('Notes getting fancy 📝');
+        setProcessingSubtext('Clean, sharp, and cute ✨');
+        checkpointBatches[1] = { ...checkpointBatches[1], status: 'processing', error: undefined };
+        await updateRealtimeCheckpoint(checkpointBatches, resumeFromProgress?.duration ?? recordingTime);
+        notes = await generateNotes(transcript);
+        checkpointBatches[1] = { ...checkpointBatches[1], status: 'completed', result: notes };
+        await updateRealtimeCheckpoint(checkpointBatches, resumeFromProgress?.duration ?? recordingTime);
+      }
+
+      if (!meetingTitle) {
+        setStatus('finalizing');
+        setProcessingHeadline('Title hunt begins 🏷️');
+        setProcessingSubtext('Finding the perfect vibe 😌');
+        checkpointBatches[2] = { ...checkpointBatches[2], status: 'processing', error: undefined };
+        await updateRealtimeCheckpoint(checkpointBatches, resumeFromProgress?.duration ?? recordingTime);
+        meetingTitle = await generateMeetingTitle(transcript);
+        checkpointBatches[2] = { ...checkpointBatches[2], status: 'completed', result: meetingTitle };
+        await updateRealtimeCheckpoint(checkpointBatches, resumeFromProgress?.duration ?? recordingTime);
+      }
+
+      checkpointBatches[3] = { ...checkpointBatches[3], status: 'processing', error: undefined };
+      setStatus('finalizing');
+      setProcessingHeadline('Final sparkle pass ✨');
+      setProcessingSubtext('Packing it up nicely 🎁');
+      await updateRealtimeCheckpoint(checkpointBatches, resumeFromProgress?.duration ?? recordingTime);
 
       const newTask: TaskHistory = {
-        filename: meetingTitle,
+        filename: meetingTitle || 'Untitled Meeting',
         transcription: transcript,
         summary,
         notes,
         prompt,
         status: 'completed',
-        duration: recordingTime,
+        duration: resumeFromProgress?.duration ?? recordingTime,
       };
 
       const savedTask = await saveTask(newTask);
+      checkpointBatches[3] = { ...checkpointBatches[3], status: 'completed', result: savedTask.id || '' };
+      await updateRealtimeCheckpoint(checkpointBatches, resumeFromProgress?.duration ?? recordingTime);
+
+      await progressStorage.deleteProgress(progressId);
+      currentProgressIdRef.current = null;
 
       if (savedTask && savedTask.id) {
         setIsExtractingNewKG(true);
@@ -780,10 +924,21 @@ export default function App() {
 
       setHistory([savedTask, ...history]);
       setSelectedTask(savedTask);
+      setProcessingHeadline('Your notes are ready 🎉');
+      setProcessingSubtext('Opening the magic now 🚀');
       setCurrentView('notes');
       setNoteTab('notes');
       setStatus('completed');
     } catch (err: any) {
+      if (isNetworkRelatedError(err)) {
+        setAwaitingNetworkResume(true);
+        setWasOffline(true);
+        setStatus('processing');
+        setProcessingHeadline('Oops, internet took a nap 😴');
+        setProcessingSubtext('We will bounce right back 🔄');
+        setError('Network issue detected. Progress is saved and will resume automatically when you reconnect.');
+        return;
+      }
       setError(err.message || 'Failed to process realtime transcript.');
       setStatus('error');
     }
@@ -1711,6 +1866,7 @@ export default function App() {
     if (!file && !resumeFromProgress) return;
 
     try {
+      setAwaitingNetworkResume(false);
       const currentFile = file || (resumeFromProgress?.audioBlob ? new File([resumeFromProgress.audioBlob], resumeFromProgress.filename) : null);
       if (!currentFile) {
         throw new Error('No audio file available');
@@ -1722,6 +1878,8 @@ export default function App() {
       if (shouldUseFileAPI(currentFile) && !resumeFromProgress) {
         setStatus('processing');
         setError(null);
+        setProcessingHeadline('Sending audio upstairs ☁️');
+        setProcessingSubtext('Quick trip, be right back 🛫');
         setBatches([{
           blob: currentFile,
           mimeType: currentFile.type || 'audio/mpeg',
@@ -1780,6 +1938,8 @@ export default function App() {
           
           setStatus('processing');
           setPrompt(resumeFromProgress.prompt);
+          setProcessingHeadline('Back in action 💪');
+          setProcessingSubtext('Picking up where we paused ⏯️');
           
           // Reconstruct batches from saved progress
           results = resumeFromProgress.batches.map(b => ({
@@ -1813,6 +1973,8 @@ export default function App() {
           
           setStatus('splitting');
           setError(null);
+          setProcessingHeadline('Audio prep party 🎧');
+          setProcessingSubtext('Cutting it nice and neat ✂️');
 
           // Split with overlapping chunks for better boundary handling
           audioBatches = await splitAudio(currentFile, 15, {
@@ -1830,6 +1992,8 @@ export default function App() {
             id: progressId,
             filename: currentFile.name,
             prompt,
+            mode: 'batch',
+            stage: 'batch-transcription',
             totalBatches: results.length,
             completedBatches: 0,
             batches: results.map(b => ({
@@ -1845,6 +2009,8 @@ export default function App() {
         }
 
         setStatus('processing');
+        setProcessingHeadline('Listening with big ears 👂');
+        setProcessingSubtext('Turning talk into gold 🪄');
         const CONCURRENCY = 3;
 
         // Process only pending/error batches
@@ -1853,6 +2019,10 @@ export default function App() {
           .filter(({ batch }) => batch.status === 'pending' || batch.status === 'error');
 
         for (let i = 0; i < batchesToProcess.length; i += CONCURRENCY) {
+          if (!navigator.onLine) {
+            throw new Error('NETWORK_RESUME_REQUIRED');
+          }
+
           const chunkEnd = Math.min(i + CONCURRENCY, batchesToProcess.length);
           const chunk = batchesToProcess.slice(i, chunkEnd);
 
@@ -1869,7 +2039,12 @@ export default function App() {
                 const result = await processAudioBatch(batch, prompt);
                 results[originalIndex] = { ...results[originalIndex], status: 'completed', result: result.text };
               } catch (err: any) {
-                results[originalIndex] = { ...results[originalIndex], status: 'error', error: err.message || 'Unknown error' };
+                if (isNetworkRelatedError(err)) {
+                  // Keep retryable network failures pending so reconnect resumes seamlessly.
+                  results[originalIndex] = { ...results[originalIndex], status: 'pending', error: err.message || 'Network interruption' };
+                } else {
+                  results[originalIndex] = { ...results[originalIndex], status: 'error', error: err.message || 'Unknown error' };
+                }
               }
               
               // Save progress after each batch completes
@@ -1878,6 +2053,8 @@ export default function App() {
                 id: progressId,
                 filename: currentFile.name,
                 prompt,
+                mode: 'batch',
+                stage: 'batch-transcription',
                 totalBatches: results.length,
                 completedBatches: completedCount,
                 batches: results.map(b => ({
@@ -1896,6 +2073,14 @@ export default function App() {
               setBatches([...results]);
             })
           );
+
+          if (results.some(r => r.status === 'pending')) {
+            throw new Error('NETWORK_RESUME_REQUIRED');
+          }
+        }
+
+        if (results.some(r => r.status !== 'completed')) {
+          throw new Error('BATCHES_REMAINING');
         }
 
         // Deduplicate overlapping transcriptions
@@ -1911,13 +2096,15 @@ export default function App() {
         currentProgressIdRef.current = null;
       }
 
-      setStatus('completed');
-
       if (!fullTranscription.trim()) {
         throw new Error('Transcription returned empty — please check the audio file and try again.');
       }
 
-      // ── Post-processing: run summary, notes, title & duration all in parallel ─
+      // ── Post-processing with visible milestones ──────────────────────────────
+      setStatus('finalizing');
+      setProcessingHeadline('Almost at the finish 🏁');
+      setProcessingSubtext('Final goodies loading 😍');
+
       const getDuration = (): Promise<number> =>
         new Promise(resolve => {
           const audioFile = file || (resumeFromProgress?.audioBlob ? new File([resumeFromProgress.audioBlob], 'audio') : null);
@@ -1928,12 +2115,19 @@ export default function App() {
           audio.onerror = () => resolve(0);
         });
 
-      const [summary, notes, meetingTitle, duration] = await Promise.all([
-        generateSummary(fullTranscription),
-        generateNotes(fullTranscription),
-        generateMeetingTitle(fullTranscription),
-        getDuration(),
-      ]);
+      setProcessingHeadline('Summary chef at work 👨‍🍳');
+      setProcessingSubtext('Only juicy bits stay 🍒');
+      const summary = await generateSummary(fullTranscription);
+
+      setProcessingHeadline('Notes in glow-up mode ✨');
+      setProcessingSubtext('Pretty, clear, and punchy 💫');
+      const notes = await generateNotes(fullTranscription);
+
+      setProcessingHeadline('Naming this masterpiece 🎨');
+      setProcessingSubtext('One tiny sec more ⏳');
+      const meetingTitle = await generateMeetingTitle(fullTranscription);
+
+      const duration = await getDuration();
 
       const newTask: TaskHistory = {
         filename: meetingTitle,
@@ -1974,10 +2168,30 @@ export default function App() {
 
       setHistory([savedTask, ...history]);
       setSelectedTask(savedTask);
+      setStatus('completed');
+      setProcessingHeadline('All done, yay 🎉');
+      setProcessingSubtext('Taking you to notes 📘');
       setCurrentView('notes');
       setNoteTab('notes');
 
     } catch (err: any) {
+      if (err?.message === 'NETWORK_RESUME_REQUIRED' || isNetworkRelatedError(err)) {
+        setAwaitingNetworkResume(true);
+        setWasOffline(true);
+        setStatus('processing');
+        setProcessingHeadline('Signal dipped, we got this 📶');
+        setProcessingSubtext('Resuming super soon 🔁');
+        setError('Network issue detected. Processing progress has been saved and will resume automatically when connection is restored.');
+        return;
+      }
+      if (err?.message === 'BATCHES_REMAINING') {
+        setAwaitingNetworkResume(true);
+        setStatus('processing');
+        setProcessingHeadline('Waiting for internet buddy 🌐');
+        setProcessingSubtext('We continue in a snap ⚡');
+        setError('Processing paused with unfinished batches. It will continue automatically once the network is stable.');
+        return;
+      }
       setError(err.message || 'Failed to process audio.');
       setStatus('error');
     }
@@ -1986,7 +2200,11 @@ export default function App() {
   const handleResumeProcessing = async () => {
     if (!recoverableProgress) return;
     setShowRecoveryPrompt(false);
-    await startProcessing(recoverableProgress);
+    if (recoverableProgress.stage === 'realtime-postprocess') {
+      await processRealtimeTranscript(recoverableProgress.transcription || '', recoverableProgress);
+    } else {
+      await startProcessing(recoverableProgress);
+    }
     setRecoverableProgress(null);
     setHasRecoverableProgress(false);
   };
@@ -2002,6 +2220,12 @@ export default function App() {
   const totalProgress = batches.length > 0 
     ? (batches.filter(b => b.status === 'completed').length / batches.length) * 100 
     : 0;
+
+  const processingProgress =
+    status === 'splitting' ? 8 :
+    status === 'finalizing' ? 92 :
+    status === 'processing' && batches.length === 0 ? 35 :
+    totalProgress;
 
   const combinedResult = batches
     .filter(b => b.status === 'completed')
@@ -2083,7 +2307,7 @@ export default function App() {
                   <div className="flex justify-between text-sm">
                     <span className="text-gray-600">Progress:</span>
                     <span className="font-medium">
-                      {recoverableProgress.completedBatches} / {recoverableProgress.totalBatches} batches
+                      {recoverableProgress.completedBatches} / {recoverableProgress.totalBatches} {recoverableProgress.stage === 'realtime-postprocess' ? 'steps' : 'batches'}
                     </span>
                   </div>
                   <div className="w-full bg-gray-200 rounded-full h-2 mt-2">
@@ -2167,7 +2391,9 @@ export default function App() {
                   startProcessing={startProcessing}
                   status={status}
                   batches={batches}
-                  totalProgress={totalProgress}
+                  totalProgress={processingProgress}
+                  processingHeadline={processingHeadline}
+                  processingSubtext={processingSubtext}
                   inputMode={inputMode}
                   setInputMode={setInputMode}
                   nativeServerAvailable={nativeServerAvailable}

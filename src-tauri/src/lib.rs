@@ -65,11 +65,12 @@ fn get_system_audio_size(state: tauri::State<AppState>) -> usize {
 #[tauri::command]
 fn start_realtime_audio(
     api_key: String,
+    keyterms: Option<Vec<String>>,
     app_handle: tauri::AppHandle,
     state: tauri::State<AppState>,
 ) -> Result<(), String> {
     let mut recorder = state.realtime_recorder.lock().map_err(|e| e.to_string())?;
-    recorder.start(api_key, app_handle)
+    recorder.start(api_key, keyterms, app_handle)
 }
 
 /// Stop realtime recording and return the full transcript
