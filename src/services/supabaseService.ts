@@ -40,6 +40,127 @@ export interface TaskHistory {
   visualization_image?: string;
 }
 
+interface PendingTaskRecord {
+  local_id: string;
+  created_at: string;
+  task: TaskHistory;
+}
+
+const PENDING_TASK_DB = 'WisprnotePendingTaskDB';
+const PENDING_TASK_DB_VERSION = 1;
+const PENDING_TASK_STORE = 'pendingTaskHistory';
+const MAX_PENDING_TASKS = 50;
+
+async function openPendingTaskDb(): Promise<IDBDatabase> {
+  return new Promise((resolve, reject) => {
+    const request = indexedDB.open(PENDING_TASK_DB, PENDING_TASK_DB_VERSION);
+    request.onerror = () => reject(request.error);
+    request.onsuccess = () => resolve(request.result);
+    request.onupgradeneeded = () => {
+      const db = request.result;
+      if (!db.objectStoreNames.contains(PENDING_TASK_STORE)) {
+        const store = db.createObjectStore(PENDING_TASK_STORE, { keyPath: 'local_id' });
+        store.createIndex('created_at', 'created_at', { unique: false });
+      }
+    };
+  });
+}
+
+async function getPendingTaskRecords(): Promise<PendingTaskRecord[]> {
+  const db = await openPendingTaskDb();
+  return new Promise((resolve, reject) => {
+    const tx = db.transaction([PENDING_TASK_STORE], 'readonly');
+    const store = tx.objectStore(PENDING_TASK_STORE);
+    const request = store.getAll();
+    request.onerror = () => reject(request.error);
+    request.onsuccess = () => {
+      const records = (request.result || []) as PendingTaskRecord[];
+      records.sort((a, b) => a.created_at.localeCompare(b.created_at));
+      resolve(records);
+    };
+  });
+}
+
+async function putPendingTaskRecord(record: PendingTaskRecord): Promise<void> {
+  const db = await openPendingTaskDb();
+  return new Promise((resolve, reject) => {
+    const tx = db.transaction([PENDING_TASK_STORE], 'readwrite');
+    const store = tx.objectStore(PENDING_TASK_STORE);
+    const request = store.put(record);
+    request.onerror = () => reject(request.error);
+    request.onsuccess = () => resolve();
+  });
+}
+
+async function deletePendingTaskRecord(localId: string): Promise<void> {
+  const db = await openPendingTaskDb();
+  return new Promise((resolve, reject) => {
+    const tx = db.transaction([PENDING_TASK_STORE], 'readwrite');
+    const store = tx.objectStore(PENDING_TASK_STORE);
+    const request = store.delete(localId);
+    request.onerror = () => reject(request.error);
+    request.onsuccess = () => resolve();
+  });
+}
+
+async function trimPendingTaskQueueIfNeeded(): Promise<void> {
+  const records = await getPendingTaskRecords();
+  const overflow = records.length - MAX_PENDING_TASKS;
+  if (overflow <= 0) return;
+  const toDelete = records.slice(0, overflow).map(r => r.local_id);
+  await Promise.all(toDelete.map(deletePendingTaskRecord));
+}
+
+export async function queuePendingTask(task: TaskHistory): Promise<string> {
+  const localId = `pending_${Date.now()}_${Math.random().toString(36).slice(2, 8)}`;
+  await putPendingTaskRecord({
+    local_id: localId,
+    created_at: new Date().toISOString(),
+    task,
+  });
+  await trimPendingTaskQueueIfNeeded();
+  return localId;
+}
+
+export async function getPendingTaskCount(): Promise<number> {
+  const records = await getPendingTaskRecords();
+  return records.length;
+}
+
+export async function flushPendingTasks(): Promise<TaskHistory[]> {
+  const records = await getPendingTaskRecords();
+  if (!records.length) return [];
+
+  const syncedTasks: TaskHistory[] = [];
+
+  for (const record of records) {
+    try {
+      const saved = await saveTask(record.task);
+      syncedTasks.push(saved);
+      await deletePendingTaskRecord(record.local_id);
+    } catch (error: any) {
+      const status = error?.status ?? error?.statusCode ?? 0;
+      const message = String(error?.message ?? error).toLowerCase();
+      const isNetworkIssue =
+        !navigator.onLine ||
+        status === 0 ||
+        status === 502 ||
+        status === 503 ||
+        status === 504 ||
+        message.includes('network') ||
+        message.includes('failed to fetch') ||
+        message.includes('timed out') ||
+        message.includes('timeout');
+
+      if (isNetworkIssue) {
+        continue;
+      }
+      // Keep non-network failures in queue as well (manual correction/retry later).
+    }
+  }
+  return syncedTasks;
+}
+
 export interface GeneratedAsset {
   id?: string;
   created_at?: string;
