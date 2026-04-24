@@ -59,6 +59,9 @@ import {
 import { 
   supabase, 
   saveTask, 
+  queuePendingTask,
+  flushPendingTasks,
+  getPendingTaskCount,
   getTasks, 
   TaskHistory, 
   saveAsset,
@@ -87,8 +90,10 @@ import {
   checkSystemAudioAvailable,
   startSystemAudioRecording,
   stopSystemAudioRecording,
+  isSystemAudioRecording,
   startRealtimeRecording,
   stopRealtimeRecording,
+  isRealtimeRecording,
   listenForTranscripts,
   RecordingMode,
 } from './services/nativeRecorderService';
@@ -211,6 +216,10 @@ export default function App() {
   const mediaRecorderRef = useRef<MediaRecorder | null>(null);
   const audioChunksRef = useRef<Blob[]>([]);
   const timerRef = useRef<NodeJS.Timeout | null>(null);
+  const realtimeBackupRecorderRef = useRef<MediaRecorder | null>(null);
+  const realtimeBackupChunksRef = useRef<Blob[]>([]);
+  const realtimeBackupStreamRef = useRef<MediaStream | null>(null);
+  const [realtimeNetworkInterrupted, setRealtimeNetworkInterrupted] = useState(false);
 
   // Native Desktop Recording
   const [nativeServerAvailable, setNativeServerAvailable] = useState(false);
@@ -219,6 +228,10 @@ export default function App() {
   const [interimTranscript, setInterimTranscript] = useState('');
   const unlistenRef = useRef<(() => void) | null>(null);
   const realtimeTranscriptRef = useRef<string[]>([]);
+  const pausedBatchSegmentsRef = useRef<File[]>([]);
+  const pausedRealtimeTranscriptRef = useRef<string[]>([]);
+  const pauseResumeInFlightRef = useRef(false);
+  const realtimeEngineActiveRef = useRef(false);
   const [permissionsGranted, setPermissionsGranted] = useState(false);
   const [currentInputDevice, setCurrentInputDevice] = useState<string | null>(null);
   const [deviceRestartNotice, setDeviceRestartNotice] = useState(false);
@@ -330,6 +343,23 @@ export default function App() {
     return !navigator.onLine || status === 0 || status === 502 || status === 503 || status === 504 || networkMarkers.some(marker => msg.includes(marker));
   };
 
+  const persistTaskWithOfflineQueue = async (task: TaskHistory): Promise<TaskHistory> => {
+    try {
+      return await saveTask(task);
+    } catch (err: any) {
+      if (!isNetworkRelatedError(err)) {
+        throw err;
+      }
+
+      const pendingId = await queuePendingTask(task);
+      return {
+        ...task,
+        id: pendingId,
+        created_at: new Date().toISOString(),
+      };
+    }
+  };
+
   // Wipe all user-scoped state so no data leaks between accounts
   const clearUserState = useCallback(() => {
     setHistory([]);
@@ -380,6 +410,18 @@ export default function App() {
   useEffect(() => {
     const handleOnline = async () => {
       setIsOnline(true);
+      try {
+        const pendingCount = await getPendingTaskCount();
+        if (pendingCount > 0) {
+          const syncedTasks = await flushPendingTasks();
+          if (syncedTasks.length > 0) {
+            await fetchHistory();
+            setError(null);
+          }
+        }
+      } catch (syncErr) {
+        console.error('Failed to sync pending tasks:', syncErr);
+      }
       
       // If we were processing when we went offline (or hit a network failure), auto-resume
       if ((wasOffline || awaitingNetworkResume) && currentProgressIdRef.current) {
@@ -406,6 +448,9 @@ export default function App() {
     
     const handleOffline = () => {
       setIsOnline(false);
+      if (isRecording && desktopRecordingMode === 'realtime') {
+        setRealtimeNetworkInterrupted(true);
+      }
       if (status === 'processing' || status === 'splitting' || status === 'finalizing') {
         setWasOffline(true);
       }
@@ -418,7 +463,7 @@ export default function App() {
       window.removeEventListener('online', handleOnline);
       window.removeEventListener('offline', handleOffline);
     };
-  }, [wasOffline, awaitingNetworkResume, status]);
+  }, [wasOffline, awaitingNetworkResume, status, isRecording, desktopRecordingMode]);
 
   // Check for recoverable progress on mount (only if not currently processing)
   useEffect(() => {
@@ -509,6 +554,13 @@ export default function App() {
       if (unlistenRef.current) {
         unlistenRef.current();
         unlistenRef.current = null;
+      }
+      if (realtimeBackupRecorderRef.current && realtimeBackupRecorderRef.current.state !== 'inactive') {
+        realtimeBackupRecorderRef.current.stop();
+      }
+      if (realtimeBackupStreamRef.current) {
+        realtimeBackupStreamRef.current.getTracks().forEach(track => track.stop());
+        realtimeBackupStreamRef.current = null;
       }
     };
   }, []);
@@ -602,11 +654,184 @@ export default function App() {
       .slice(0, 25);
   };
 
+  const startRealtimeBackupCapture = async () => {
+    try {
+      const stream = await navigator.mediaDevices.getUserMedia({ audio: true });
+      const recorder = new MediaRecorder(stream);
+      realtimeBackupChunksRef.current = [];
+      realtimeBackupStreamRef.current = stream;
+      realtimeBackupRecorderRef.current = recorder;
+      recorder.ondataavailable = (event) => {
+        if (event.data.size > 0) {
+          realtimeBackupChunksRef.current.push(event.data);
+        }
+      };
+      recorder.start(1000);
+    } catch (err) {
+      console.warn('Realtime backup capture unavailable:', err);
+      realtimeBackupRecorderRef.current = null;
+      realtimeBackupStreamRef.current = null;
+      realtimeBackupChunksRef.current = [];
+    }
+  };
+
+  const stopRealtimeBackupCapture = async (): Promise<File | null> => {
+    const recorder = realtimeBackupRecorderRef.current;
+    const stream = realtimeBackupStreamRef.current;
+    if (!recorder) return null;
+
+    return new Promise((resolve) => {
+      recorder.onstop = () => {
+        const blob = new Blob(realtimeBackupChunksRef.current, { type: 'audio/webm' });
+        const backupFile = blob.size > 0
+          ? new File([blob], `RealtimeBackup_${new Date().toISOString().replace(/[:.]/g, '-')}.webm`, { type: 'audio/webm' })
+          : null;
+
+        if (stream) {
+          stream.getTracks().forEach(track => track.stop());
+        }
+
+        realtimeBackupRecorderRef.current = null;
+        realtimeBackupStreamRef.current = null;
+        realtimeBackupChunksRef.current = [];
+        resolve(backupFile);
+      };
+
+      if (recorder.state !== 'inactive') {
+        recorder.stop();
+      } else {
+        if (stream) {
+          stream.getTracks().forEach(track => track.stop());
+        }
+        realtimeBackupRecorderRef.current = null;
+        realtimeBackupStreamRef.current = null;
+        realtimeBackupChunksRef.current = [];
+        resolve(null);
+      }
+    });
+  };
+
+  const mergeAudioFilesToWav = async (segments: File[]): Promise<File> => {
+    if (segments.length === 1) return segments[0];
+
+    const audioContext = new AudioContext();
+    try {
+      const decodedBuffers = await Promise.all(
+        segments.map(async (segment) => {
+          const arrayBuffer = await segment.arrayBuffer();
+          return await audioContext.decodeAudioData(arrayBuffer.slice(0));
+        })
+      );
+
+      const sampleRate = decodedBuffers[0]?.sampleRate || 48000;
+      const channelCount = Math.max(...decodedBuffers.map(b => b.numberOfChannels));
+      const totalLength = decodedBuffers.reduce((sum, b) => sum + b.length, 0);
+      const mergedBuffer = audioContext.createBuffer(channelCount, totalLength, sampleRate);
+
+      let offset = 0;
+      for (const buffer of decodedBuffers) {
+        for (let channel = 0; channel < channelCount; channel++) {
+          const sourceChannel = Math.min(channel, buffer.numberOfChannels - 1);
+          mergedBuffer.getChannelData(channel).set(buffer.getChannelData(sourceChannel), offset);
+        }
+        offset += buffer.length;
+      }
+
+      const numChannels = mergedBuffer.numberOfChannels;
+      const length = mergedBuffer.length * numChannels * 2 + 44;
+      const wavBuffer = new ArrayBuffer(length);
+      const view = new DataView(wavBuffer);
+
+      const writeString = (offsetPos: number, str: string) => {
+        for (let i = 0; i < str.length; i++) view.setUint8(offsetPos + i, str.charCodeAt(i));
+      };
+
+      writeString(0, 'RIFF');
+      view.setUint32(4, 36 + mergedBuffer.length * numChannels * 2, true);
+      writeString(8, 'WAVE');
+      writeString(12, 'fmt ');
+      view.setUint32(16, 16, true);
+      view.setUint16(20, 1, true);
+      view.setUint16(22, numChannels, true);
+      view.setUint32(24, sampleRate, true);
+      view.setUint32(28, sampleRate * numChannels * 2, true);
+      view.setUint16(32, numChannels * 2, true);
+      view.setUint16(34, 16, true);
+      writeString(36, 'data');
+      view.setUint32(40, mergedBuffer.length * numChannels * 2, true);
+
+      let writeOffset = 44;
+      for (let i = 0; i < mergedBuffer.length; i++) {
+        for (let channel = 0; channel < numChannels; channel++) {
+          const sample = Math.max(-1, Math.min(1, mergedBuffer.getChannelData(channel)[i]));
+          view.setInt16(writeOffset, sample < 0 ? sample * 0x8000 : sample * 0x7fff, true);
+          writeOffset += 2;
+        }
+      }
+
+      const mergedBlob = new Blob([wavBuffer], { type: 'audio/wav' });
+      return new File(
+        [mergedBlob],
+        `MergedRecording_${new Date().toISOString().replace(/[:.]/g, '-')}.wav`,
+        { type: 'audio/wav' }
+      );
+    } finally {
+      await audioContext.close();
+    }
+  };
+
+  const attachRealtimeTranscriptListener = async () => {
+    if (unlistenRef.current) {
+      unlistenRef.current();
+      unlistenRef.current = null;
+    }
+    const unlisten = await listenForTranscripts((text, isFinal) => {
+      if (isFinal) {
+        const trimmed = text.trim();
+        if (!trimmed) return;
+        if (realtimeTranscriptRef.current[realtimeTranscriptRef.current.length - 1] === trimmed) {
+          setInterimTranscript('');
+          return;
+        }
+        realtimeTranscriptRef.current = [...realtimeTranscriptRef.current, trimmed];
+        setRealtimeTranscript(prev => [...prev, trimmed]);
+        setInterimTranscript('');
+      } else {
+        setInterimTranscript(text);
+      }
+    });
+    unlistenRef.current = unlisten;
+  };
+
+  const wait = (ms: number) => new Promise(resolve => setTimeout(resolve, ms));
+
+  const safeStopRealtimeRecording = async (): Promise<string> => {
+    try {
+      const active = await isRealtimeRecording();
+      if (!active) {
+        realtimeEngineActiveRef.current = false;
+        return '';
+      }
+      const result = await stopRealtimeRecording();
+      realtimeEngineActiveRef.current = false;
+      return result;
+    } catch (err: any) {
+      const message = String(err?.message ?? err).toLowerCase();
+      if (message.includes('not recording') || message.includes('already stopped')) {
+        realtimeEngineActiveRef.current = false;
+        return '';
+      }
+      throw err;
+    }
+  };
+
   const startRecording = async () => {
     if (nativeServerAvailable && desktopRecordingMode === 'batch') {
       // ── Native Batch Recording (mic + system audio via Tauri) ──
       try {
         await startSystemAudioRecording();
+        pausedBatchSegmentsRef.current = [];
+        pausedRealtimeTranscriptRef.current = [];
         setIsRecording(true);
         setIsPaused(false);
         setRecordingTime(0);
@@ -632,30 +857,18 @@ export default function App() {
         }
 
         // Reset buffers before listener/stream starts to avoid dropping early words.
+        setRealtimeNetworkInterrupted(false);
+        pausedBatchSegmentsRef.current = [];
+        pausedRealtimeTranscriptRef.current = [];
         setRealtimeTranscript([]);
         realtimeTranscriptRef.current = [];
         setInterimTranscript('');
 
         // Start listening for transcript events BEFORE starting recording
-        const unlisten = await listenForTranscripts((text, isFinal) => {
-          if (isFinal) {
-            const trimmed = text.trim();
-            if (!trimmed) return;
-            // Avoid duplicate finals that can arrive across reconnections/finalization boundaries.
-            if (realtimeTranscriptRef.current[realtimeTranscriptRef.current.length - 1] === trimmed) {
-              setInterimTranscript('');
-              return;
-            }
-            realtimeTranscriptRef.current = [...realtimeTranscriptRef.current, trimmed];
-            setRealtimeTranscript(prev => [...prev, trimmed]);
-            setInterimTranscript('');
-          } else {
-            setInterimTranscript(text);
-          }
-        });
-        unlistenRef.current = unlisten;
+        await attachRealtimeTranscriptListener();
 
         await startRealtimeRecording(apiKey, extractDeepgramKeyterms(prompt));
+        realtimeEngineActiveRef.current = true;
 
         setIsRecording(true);
         setIsPaused(false);
@@ -668,6 +881,7 @@ export default function App() {
       } catch (err: any) {
         console.error('Realtime recording error:', err);
         if (unlistenRef.current) { unlistenRef.current(); unlistenRef.current = null; }
+        realtimeEngineActiveRef.current = false;
         setError(err.message || 'Failed to start integrated real-time recording.');
       }
     } else {
@@ -708,23 +922,92 @@ export default function App() {
     }
   };
 
-  const pauseRecording = () => {
-    if (mediaRecorderRef.current && mediaRecorderRef.current.state === 'recording') {
-      mediaRecorderRef.current.pause();
-      setIsPaused(true);
-      if (timerRef.current) {
-        clearInterval(timerRef.current);
+  const pauseRecording = async () => {
+    if (!isRecording || isPaused || pauseResumeInFlightRef.current) return;
+    pauseResumeInFlightRef.current = true;
+
+    try {
+      if (nativeServerAvailable && desktopRecordingMode === 'batch') {
+        // Emulate pause by checkpointing a finished native segment.
+        const active = await isSystemAudioRecording();
+        if (!active) {
+          pauseResumeInFlightRef.current = false;
+          return;
+        }
+        const segment = await stopSystemAudioRecording();
+        if (segment) pausedBatchSegmentsRef.current.push(segment);
+      } else if (desktopRecordingMode === 'realtime') {
+        // Emulate pause by stopping realtime stream and retaining transcript so far.
+        const partialTranscript = await safeStopRealtimeRecording();
+        if (partialTranscript.trim()) {
+          pausedRealtimeTranscriptRef.current.push(partialTranscript.trim());
+        }
+        if (unlistenRef.current) {
+          unlistenRef.current();
+          unlistenRef.current = null;
+        }
+      } else if (mediaRecorderRef.current && mediaRecorderRef.current.state === 'recording') {
+        mediaRecorderRef.current.pause();
+      } else {
+        return;
       }
+
+      setIsPaused(true);
+      setInterimTranscript('');
+      if (timerRef.current) clearInterval(timerRef.current);
+    } catch (err: any) {
+      console.error('Pause recording error:', err);
+      setError(err.message || 'Failed to pause recording.');
+    } finally {
+      pauseResumeInFlightRef.current = false;
     }
   };
 
-  const resumeRecording = () => {
-    if (mediaRecorderRef.current && mediaRecorderRef.current.state === 'paused') {
-      mediaRecorderRef.current.resume();
+  const resumeRecording = async () => {
+    if (!isRecording || !isPaused || pauseResumeInFlightRef.current) return;
+    pauseResumeInFlightRef.current = true;
+
+    try {
+      if (nativeServerAvailable && desktopRecordingMode === 'batch') {
+        await startSystemAudioRecording();
+      } else if (desktopRecordingMode === 'realtime') {
+        const apiKey = import.meta.env.VITE_DEEPGRAM_API_KEY;
+        if (!apiKey) {
+          setError('VITE_DEEPGRAM_API_KEY not set in .env.local');
+          return;
+        }
+        if (!realtimeEngineActiveRef.current) {
+          await attachRealtimeTranscriptListener();
+          let started = false;
+          let lastError: any = null;
+          for (let attempt = 0; attempt < 2; attempt++) {
+            try {
+              await startRealtimeRecording(apiKey, extractDeepgramKeyterms(prompt));
+              started = true;
+              realtimeEngineActiveRef.current = true;
+              break;
+            } catch (e) {
+              lastError = e;
+              await wait(150);
+            }
+          }
+          if (!started) throw lastError;
+        }
+      } else if (mediaRecorderRef.current && mediaRecorderRef.current.state === 'paused') {
+        mediaRecorderRef.current.resume();
+      } else {
+        return;
+      }
+
       setIsPaused(false);
       timerRef.current = setInterval(() => {
         setRecordingTime(prev => prev + 1);
       }, 1000);
+    } catch (err: any) {
+      console.error('Resume recording error:', err);
+      setError(err.message || 'Failed to resume recording.');
+    } finally {
+      pauseResumeInFlightRef.current = false;
     }
   };
 
@@ -734,48 +1017,70 @@ export default function App() {
     if (nativeServerAvailable && desktopRecordingMode === 'batch' && isRecording) {
       // ── Stop Native Batch Recording (Tauri) ──
       try {
-        const audioFile = await stopSystemAudioRecording();
+        let finalSegment: File | null = null;
+        if (!isPaused) {
+          finalSegment = await stopSystemAudioRecording();
+        }
+        const allSegments = [...pausedBatchSegmentsRef.current, ...(finalSegment ? [finalSegment] : [])];
+        const audioFile = allSegments.length > 0 ? await mergeAudioFilesToWav(allSegments) : null;
         setIsRecording(false);
         setIsPaused(false);
-        setFile(audioFile);
+        pausedBatchSegmentsRef.current = [];
+        if (audioFile) {
+          setFile(audioFile);
+        } else {
+          setError('No audio captured.');
+        }
       } catch (err: any) {
         console.error('Stop recording error:', err);
         setError(err.message || 'Failed to stop recording.');
         setIsRecording(false);
         setIsPaused(false);
+        pausedBatchSegmentsRef.current = [];
       }
     } else if (desktopRecordingMode === 'realtime' && isRecording) {
       // ── Stop Real-time mode: stop integrated Tauri recording ──
+      const backupAudioFile = await stopRealtimeBackupCapture();
       try {
-        const fullTranscript = await stopRealtimeRecording();
+        const fullTranscript = isPaused ? '' : await safeStopRealtimeRecording();
 
         if (unlistenRef.current) { unlistenRef.current(); unlistenRef.current = null; }
         setIsRecording(false);
         setIsPaused(false);
+        const pausedTranscript = pausedRealtimeTranscriptRef.current.join(' ').trim();
+        const refTranscript = realtimeTranscriptRef.current.join(' ').trim();
+        const transcriptToUse = [pausedTranscript, fullTranscript.trim(), refTranscript].filter(Boolean).join(' ').trim();
 
-        if (fullTranscript.trim()) {
-          await processRealtimeTranscript(fullTranscript);
+        if (realtimeNetworkInterrupted && backupAudioFile) {
+          setError('Realtime network interruption detected. Switching to local backup transcription.');
+          await startProcessing(undefined, backupAudioFile);
+        } else if (transcriptToUse) {
+          await processRealtimeTranscript(transcriptToUse);
+        } else if (backupAudioFile) {
+          await startProcessing(undefined, backupAudioFile);
         } else {
-          // Fallback: use ref-accumulated transcripts
-          const refTranscript = realtimeTranscriptRef.current.join(' ');
-          if (refTranscript.trim()) {
-            await processRealtimeTranscript(refTranscript);
-          } else {
-            setError('No speech detected during recording.');
-          }
+          setError('No speech detected during recording.');
         }
+        setRealtimeNetworkInterrupted(false);
+        pausedRealtimeTranscriptRef.current = [];
+        realtimeEngineActiveRef.current = false;
       } catch (err: any) {
         console.error('Stop realtime error:', err);
         if (unlistenRef.current) { unlistenRef.current(); unlistenRef.current = null; }
         setIsRecording(false);
         setIsPaused(false);
         // If network drops while stopping the realtime stream, salvage any finalized transcript.
-        const fallbackTranscript = realtimeTranscriptRef.current.join(' ');
-        if (fallbackTranscript.trim()) {
+        const fallbackTranscript = realtimeTranscriptRef.current.join(' ').trim();
+        if (fallbackTranscript) {
           await processRealtimeTranscript(fallbackTranscript);
+        } else if (backupAudioFile) {
+          await startProcessing(undefined, backupAudioFile);
         } else {
           setError(err.message || 'Failed to stop realtime recording.');
         }
+        setRealtimeNetworkInterrupted(false);
+        pausedRealtimeTranscriptRef.current = [];
+        realtimeEngineActiveRef.current = false;
       }
     } else if (mediaRecorderRef.current && (mediaRecorderRef.current.state === 'recording' || mediaRecorderRef.current.state === 'paused')) {
       // ── Stop Browser Recording ──
@@ -890,14 +1195,14 @@ export default function App() {
         duration: resumeFromProgress?.duration ?? recordingTime,
       };
 
-      const savedTask = await saveTask(newTask);
+      const savedTask = await persistTaskWithOfflineQueue(newTask);
       checkpointBatches[3] = { ...checkpointBatches[3], status: 'completed', result: savedTask.id || '' };
       await updateRealtimeCheckpoint(checkpointBatches, resumeFromProgress?.duration ?? recordingTime);
 
       await progressStorage.deleteProgress(progressId);
       currentProgressIdRef.current = null;
 
-      if (savedTask && savedTask.id) {
+      if (savedTask && savedTask.id && !savedTask.id.startsWith('pending_')) {
         setIsExtractingNewKG(true);
         extractKnowledgeGraph(savedTask.id, savedTask.filename, savedTask.transcription)
           .then(async (result) => {
@@ -922,13 +1227,16 @@ export default function App() {
           .finally(() => setIsExtractingNewKG(false));
       }
 
-      setHistory([savedTask, ...history]);
+      setHistory(prev => [savedTask, ...prev.filter(t => t.id !== savedTask.id)]);
       setSelectedTask(savedTask);
       setProcessingHeadline('Your notes are ready 🎉');
-      setProcessingSubtext('Opening the magic now 🚀');
+      setProcessingSubtext(savedTask.id?.startsWith('pending_') ? 'Saved locally. Will sync when internet is back.' : 'Opening the magic now 🚀');
       setCurrentView('notes');
       setNoteTab('notes');
       setStatus('completed');
+      if (savedTask.id?.startsWith('pending_')) {
+        setError('Connection dropped while saving. Notes are checkpointed locally and will auto-sync once online.');
+      }
     } catch (err: any) {
       if (isNetworkRelatedError(err)) {
         setAwaitingNetworkResume(true);
@@ -1862,12 +2170,12 @@ export default function App() {
     return result.filter(t => t.trim()).join('\n\n');
   };
 
-  const startProcessing = async (resumeFromProgress?: ProcessingProgress) => {
-    if (!file && !resumeFromProgress) return;
+  const startProcessing = async (resumeFromProgress?: ProcessingProgress, explicitFile?: File) => {
+    if (!file && !resumeFromProgress && !explicitFile) return;
 
     try {
       setAwaitingNetworkResume(false);
-      const currentFile = file || (resumeFromProgress?.audioBlob ? new File([resumeFromProgress.audioBlob], resumeFromProgress.filename) : null);
+      const currentFile = explicitFile || file || (resumeFromProgress?.audioBlob ? new File([resumeFromProgress.audioBlob], resumeFromProgress.filename) : null);
       if (!currentFile) {
         throw new Error('No audio file available');
       }
@@ -2139,9 +2447,9 @@ export default function App() {
         duration,
       };
 
-      const savedTask = await saveTask(newTask);
+      const savedTask = await persistTaskWithOfflineQueue(newTask);
 
-      if (savedTask && savedTask.id) {
+      if (savedTask && savedTask.id && !savedTask.id.startsWith('pending_')) {
         setIsExtractingNewKG(true);
         extractKnowledgeGraph(savedTask.id, savedTask.filename, savedTask.transcription)
           .then(async (result) => {
@@ -2166,13 +2474,16 @@ export default function App() {
           .finally(() => setIsExtractingNewKG(false));
       }
 
-      setHistory([savedTask, ...history]);
+      setHistory(prev => [savedTask, ...prev.filter(t => t.id !== savedTask.id)]);
       setSelectedTask(savedTask);
       setStatus('completed');
       setProcessingHeadline('All done, yay 🎉');
-      setProcessingSubtext('Taking you to notes 📘');
+      setProcessingSubtext(savedTask.id?.startsWith('pending_') ? 'Saved locally. Syncing when internet is back.' : 'Taking you to notes 📘');
       setCurrentView('notes');
       setNoteTab('notes');
+      if (savedTask.id?.startsWith('pending_')) {
+        setError('Connection dropped while saving. Notes are stored locally and will auto-sync when online.');
+      }
 
     } catch (err: any) {
       if (err?.message === 'NETWORK_RESUME_REQUIRED' || isNetworkRelatedError(err)) {

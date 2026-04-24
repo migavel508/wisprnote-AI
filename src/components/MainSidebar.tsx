@@ -1,3 +1,4 @@
+import { useEffect, useState } from 'react';
 import { 
   FileText, 
   MessageCircle, 
@@ -14,6 +15,7 @@ import {
   Settings,
 } from 'lucide-react';
 import { Session } from '@supabase/supabase-js';
+import { getPendingTaskCount } from '../services/supabaseService';
 
 type View = 'process' | 'history' | 'notes' | 'chat' | 'knowledge' | 'notebooks' | 'audio-devices';
 
@@ -36,6 +38,15 @@ export default function MainSidebar({
   onSignOut,
   status
 }: MainSidebarProps) {
+  const [pendingSyncCount, setPendingSyncCount] = useState(0);
+
+  useEffect(() => {
+    setPendingSyncCount(getPendingTaskCount());
+    const timer = window.setInterval(() => {
+      setPendingSyncCount(getPendingTaskCount());
+    }, 1500);
+    return () => window.clearInterval(timer);
+  }, []);
 
   const navItems = [
     { id: 'process' as View, label: 'Process', icon: Mic },
@@ -102,7 +113,7 @@ export default function MainSidebar({
         <div className="flex flex-col items-center gap-1 pb-2 px-1.5">
           <button
             onClick={() => onViewChange('history')}
-            className={`w-9 h-9 flex items-center justify-center rounded-lg transition-colors ${
+            className={`w-9 h-9 flex items-center justify-center rounded-lg transition-colors relative ${
               currentView === 'history'
                 ? 'bg-[#e8e0d8] text-[#1a1a1a]'
                 : 'text-[#8a8078] hover:bg-[#e8e0d8] hover:text-[#1a1a1a]'
@@ -110,6 +121,11 @@ export default function MainSidebar({
             title="History"
           >
             <History size={18} strokeWidth={1.8} />
+            {pendingSyncCount > 0 && (
+              <span className="absolute -top-1 -right-1 min-w-[16px] h-4 px-1 rounded-full bg-amber-500 text-white text-[9px] font-semibold leading-4 text-center">
+                {pendingSyncCount > 9 ? '9+' : pendingSyncCount}
+              </span>
+            )}
           </button>
           <button
             className="w-9 h-9 flex items-center justify-center rounded-lg text-[#8a8078] hover:bg-[#e8e0d8] hover:text-[#1a1a1a] transition-colors"
@@ -200,6 +216,11 @@ export default function MainSidebar({
           >
             <History size={16} strokeWidth={1.8} className="flex-shrink-0" />
             <span>All Meetings</span>
+            {pendingSyncCount > 0 && (
+              <span className="ml-auto inline-flex items-center rounded-full bg-amber-100 text-amber-700 text-[10px] font-semibold px-2 py-[1px]">
+                Sync {pendingSyncCount > 99 ? '99+' : pendingSyncCount}
+              </span>
+            )}
           </button>
         </div>
 

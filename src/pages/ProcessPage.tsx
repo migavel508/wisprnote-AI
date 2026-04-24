@@ -521,6 +521,23 @@ export default function ProcessPage({
                                 />
                               ))}
                             </div>
+                            {isPaused ? (
+                              <button
+                                onClick={resumeRecording}
+                                className="w-8 h-8 bg-[#1a1a1a] text-white rounded-full flex items-center justify-center hover:bg-[#333] transition-colors"
+                                title="Resume recording"
+                              >
+                                <PlayCircle className="w-4 h-4" />
+                              </button>
+                            ) : (
+                              <button
+                                onClick={pauseRecording}
+                                className="w-8 h-8 bg-[#1a1a1a]/[0.06] text-[#1a1a1a]/50 rounded-full flex items-center justify-center hover:bg-[#1a1a1a]/10 transition-colors"
+                                title="Pause recording"
+                              >
+                                <PauseCircle className="w-4 h-4" />
+                              </button>
+                            )}
                             <button onClick={stopRecording} className="ml-1 px-3 py-1.5 bg-red-500 text-white text-[11px] font-medium rounded-full hover:bg-red-600 transition-colors flex items-center gap-1.5">
                               <StopCircle className="w-3 h-3" /> Stop
                             </button>
