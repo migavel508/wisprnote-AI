@@ -590,24 +590,46 @@ export interface ChatMessage {
   id?: string;
   created_at?: string;
   user_id?: string;
-  task_id: string;
+  task_id?: string;
   role: 'user' | 'model';
   text: string;
   image?: string;
+  thread_id?: string;
+  citations?: Array<{
+    meeting_id: string;
+    meeting_title: string;
+    chunk_id: string;
+    score: number;
+  }>;
+  retrieval_meta?: {
+    scope?: 'single' | 'many';
+    confidence?: number;
+    selected_meeting_ids?: string[];
+    token_usage_total?: number;
+    covered_meetings_count?: number;
+    total_meetings_count?: number;
+  };
 }
 
 export async function saveChatMessage(message: ChatMessage) {
   const userId = await getAuthUserId();
 
+  const record: Record<string, any> = {
+    user_id: userId,
+    role: message.role,
+    text: message.text,
+    image: message.image,
+    thread_id: message.thread_id,
+    citations: message.citations,
+    retrieval_meta: message.retrieval_meta,
+  };
+  if (message.task_id) {
+    record.task_id = message.task_id;
+  }
+
   const { data, error } = await supabase
     .from('chat_history')
-    .insert({
-      user_id: userId,
-      task_id: message.task_id,
-      role: message.role,
-      text: message.text,
-      image: message.image
-    })
+    .insert(record)
     .select()
     .single();
   
@@ -626,7 +648,10 @@ export async function saveChatMessages(messages: ChatMessage[]) {
     task_id: msg.task_id,
     role: msg.role,
     text: msg.text,
-    image: msg.image
+    image: msg.image,
+    thread_id: msg.thread_id,
+    citations: msg.citations,
+    retrieval_meta: msg.retrieval_meta,
   }));
 
   const { data, error } = await supabase
@@ -653,6 +678,23 @@ export async function getChatHistory(taskId: string) {
   
   if (error) {
     console.error('Error fetching chat history:', error);
+    throw error;
+  }
+  return data as ChatMessage[];
+}
+
+export async function getChatHistoryByThread(threadId: string) {
+  const userId = await getAuthUserId();
+
+  const { data, error } = await supabase
+    .from('chat_history')
+    .select('*')
+    .eq('thread_id', threadId)
+    .eq('user_id', userId)
+    .order('created_at', { ascending: true });
+
+  if (error) {
+    console.error('Error fetching chat history by thread:', error);
     throw error;
   }
   return data as ChatMessage[];

@@ -45,7 +45,9 @@ import {
   processAudioBatch, 
   generateSummary, 
   generateNotes, 
-  chatWithNotes, 
+  chatWithNotes,
+  agentPlanQuery,
+  agentSynthesizeFromEvidence,
   generateConceptImage,
   generateEmailContent,
   generateWikiContent,
@@ -56,6 +58,13 @@ import {
   deleteFromFileAPI,
   transcribeViaFileAPI,
 } from './services/geminiService';
+import {
+  retrieveForSingleMeeting,
+  retrieveCrossMeeting,
+  retrieveForManyMeetings,
+  type MeetingDocument,
+} from './services/chatRetrievalService';
+import { indexMeetingTranscription, backfillExistingMeetings } from './services/turbopufferService';
 import { 
   supabase, 
   saveTask, 
@@ -73,6 +82,7 @@ import {
   KnowledgeGraphEntry,
   saveChatMessage,
   getChatHistory,
+  getChatHistoryByThread,
   ChatMessage,
   ManualNote,
   updateTaskSummary,
@@ -129,10 +139,33 @@ type View = 'process' | 'history' | 'notes' | 'chat' | 'knowledge' | 'notebooks'
 type Status = 'idle' | 'splitting' | 'processing' | 'finalizing' | 'completed' | 'error';
 type NoteTab = 'transcription' | 'summary' | 'notes';
 
+interface AgentStep {
+  id: string;
+  label: string;
+  status: 'pending' | 'running' | 'done' | 'error';
+  detail?: string;
+}
+
 interface Message {
   role: 'user' | 'model';
   text: string;
   image?: string;
+  agentStatus?: 'thinking' | 'planning' | 'executing' | 'done';
+  agentPlan?: AgentStep[];
+  citations?: Array<{
+    meetingId: string;
+    meetingTitle: string;
+    chunkId: string;
+    score: number;
+  }>;
+  retrievalMeta?: {
+    scope?: 'single' | 'many';
+    confidence?: number;
+    selectedMeetingIds?: string[];
+    tokenUsageTotal?: number;
+    coveredMeetingsCount?: number;
+    totalMeetingsCount?: number;
+  };
 }
 
 interface BatchStatus extends AudioBatch {
@@ -228,6 +261,7 @@ export default function App() {
   const [interimTranscript, setInterimTranscript] = useState('');
   const unlistenRef = useRef<(() => void) | null>(null);
   const realtimeTranscriptRef = useRef<string[]>([]);
+  const isRealtimePausedRef = useRef(false);
   const pausedBatchSegmentsRef = useRef<File[]>([]);
   const pausedRealtimeTranscriptRef = useRef<string[]>([]);
   const pauseResumeInFlightRef = useRef(false);
@@ -498,7 +532,7 @@ export default function App() {
       fetchAgentAssets(selectedTask.id!);
       fetchChatHistory(selectedTask.id!);
     } else if (currentView === 'chat' && !selectedTask) {
-      setChatMessages(allMeetingsChatMessages);
+      fetchChatHistory(null);
     }
   }, [selectedTask, currentView]);
 
@@ -512,21 +546,41 @@ export default function App() {
     }
   };
 
+  const ALL_MEETINGS_THREAD_ID = 'all-meetings';
+
+  const parseChatMessages = (data: any[]): Message[] =>
+    data.map(msg => ({
+      role: msg.role,
+      text: msg.text,
+      image: msg.image,
+      citations: (msg as any).citations?.map((c: any) => ({
+        meetingId: c.meeting_id,
+        meetingTitle: c.meeting_title,
+        chunkId: c.chunk_id,
+        score: c.score,
+      })),
+      retrievalMeta: (msg as any).retrieval_meta
+        ? {
+            scope: (msg as any).retrieval_meta.scope,
+            confidence: (msg as any).retrieval_meta.confidence,
+            selectedMeetingIds: (msg as any).retrieval_meta.selected_meeting_ids,
+            tokenUsageTotal: (msg as any).retrieval_meta.token_usage_total,
+            coveredMeetingsCount: (msg as any).retrieval_meta.covered_meetings_count,
+            totalMeetingsCount: (msg as any).retrieval_meta.total_meetings_count,
+          }
+        : undefined,
+    }));
+
   const fetchChatHistory = async (taskId: string | null) => {
-    if (!taskId) {
-      setChatMessages(allMeetingsChatMessages);
-      return;
-    }
-    
     try {
-      const data = await getChatHistory(taskId);
-      // Transform to Message format
-      const messages: Message[] = data.map(msg => ({
-        role: msg.role,
-        text: msg.text,
-        image: msg.image
-      }));
+      const data = taskId
+        ? await getChatHistory(taskId)
+        : await getChatHistoryByThread(ALL_MEETINGS_THREAD_ID);
+      const messages = parseChatMessages(data);
       setChatMessages(messages);
+      if (!taskId) {
+        setAllMeetingsChatMessages(messages);
+      }
     } catch (err) {
       console.error('Failed to fetch chat history:', err);
       setChatMessages([]);
@@ -786,6 +840,7 @@ export default function App() {
       unlistenRef.current = null;
     }
     const unlisten = await listenForTranscripts((text, isFinal) => {
+      if (isRealtimePausedRef.current) return;
       if (isFinal) {
         const trimmed = text.trim();
         if (!trimmed) return;
@@ -802,8 +857,6 @@ export default function App() {
     });
     unlistenRef.current = unlisten;
   };
-
-  const wait = (ms: number) => new Promise(resolve => setTimeout(resolve, ms));
 
   const safeStopRealtimeRecording = async (): Promise<string> => {
     try {
@@ -830,6 +883,7 @@ export default function App() {
       // ── Native Batch Recording (mic + system audio via Tauri) ──
       try {
         await startSystemAudioRecording();
+        isRealtimePausedRef.current = false;
         pausedBatchSegmentsRef.current = [];
         pausedRealtimeTranscriptRef.current = [];
         setIsRecording(true);
@@ -850,13 +904,14 @@ export default function App() {
     } else if (desktopRecordingMode === 'realtime') {
       // ── Real-time mode: integrated Deepgram transcription via Tauri ──
       try {
-        const apiKey = import.meta.env.VITE_DEEPGRAM_API_KEY;
+        const apiKey = (import.meta as any).env?.VITE_DEEPGRAM_API_KEY as string | undefined;
         if (!apiKey) {
           setError('VITE_DEEPGRAM_API_KEY not set in .env.local');
           return;
         }
 
         // Reset buffers before listener/stream starts to avoid dropping early words.
+        isRealtimePausedRef.current = false;
         setRealtimeNetworkInterrupted(false);
         pausedBatchSegmentsRef.current = [];
         pausedRealtimeTranscriptRef.current = [];
@@ -925,39 +980,36 @@ export default function App() {
   const pauseRecording = async () => {
     if (!isRecording || isPaused || pauseResumeInFlightRef.current) return;
     pauseResumeInFlightRef.current = true;
+    setIsPaused(true);
+    setInterimTranscript('');
+    if (timerRef.current) clearInterval(timerRef.current);
 
     try {
       if (nativeServerAvailable && desktopRecordingMode === 'batch') {
         // Emulate pause by checkpointing a finished native segment.
-        const active = await isSystemAudioRecording();
-        if (!active) {
-          pauseResumeInFlightRef.current = false;
-          return;
-        }
         const segment = await stopSystemAudioRecording();
         if (segment) pausedBatchSegmentsRef.current.push(segment);
       } else if (desktopRecordingMode === 'realtime') {
+        isRealtimePausedRef.current = true;
         // Emulate pause by stopping realtime stream and retaining transcript so far.
         const partialTranscript = await safeStopRealtimeRecording();
         if (partialTranscript.trim()) {
           pausedRealtimeTranscriptRef.current.push(partialTranscript.trim());
-        }
-        if (unlistenRef.current) {
-          unlistenRef.current();
-          unlistenRef.current = null;
         }
       } else if (mediaRecorderRef.current && mediaRecorderRef.current.state === 'recording') {
         mediaRecorderRef.current.pause();
       } else {
         return;
       }
-
-      setIsPaused(true);
-      setInterimTranscript('');
-      if (timerRef.current) clearInterval(timerRef.current);
     } catch (err: any) {
       console.error('Pause recording error:', err);
       setError(err.message || 'Failed to pause recording.');
+      // Roll back paused UI state if pause fails.
+      setIsPaused(false);
+      isRealtimePausedRef.current = false;
+      timerRef.current = setInterval(() => {
+        setRecordingTime(prev => prev + 1);
+      }, 1000);
     } finally {
       pauseResumeInFlightRef.current = false;
     }
@@ -966,46 +1018,40 @@ export default function App() {
   const resumeRecording = async () => {
     if (!isRecording || !isPaused || pauseResumeInFlightRef.current) return;
     pauseResumeInFlightRef.current = true;
+    setIsPaused(false);
 
     try {
       if (nativeServerAvailable && desktopRecordingMode === 'batch') {
         await startSystemAudioRecording();
       } else if (desktopRecordingMode === 'realtime') {
-        const apiKey = import.meta.env.VITE_DEEPGRAM_API_KEY;
+        const apiKey = (import.meta as any).env?.VITE_DEEPGRAM_API_KEY as string | undefined;
         if (!apiKey) {
           setError('VITE_DEEPGRAM_API_KEY not set in .env.local');
           return;
         }
-        if (!realtimeEngineActiveRef.current) {
+        if (!unlistenRef.current) {
           await attachRealtimeTranscriptListener();
-          let started = false;
-          let lastError: any = null;
-          for (let attempt = 0; attempt < 2; attempt++) {
-            try {
-              await startRealtimeRecording(apiKey, extractDeepgramKeyterms(prompt));
-              started = true;
-              realtimeEngineActiveRef.current = true;
-              break;
-            } catch (e) {
-              lastError = e;
-              await wait(150);
-            }
-          }
-          if (!started) throw lastError;
         }
+        if (!realtimeEngineActiveRef.current) {
+          await startRealtimeRecording(apiKey, extractDeepgramKeyterms(prompt));
+          realtimeEngineActiveRef.current = true;
+        }
+        isRealtimePausedRef.current = false;
       } else if (mediaRecorderRef.current && mediaRecorderRef.current.state === 'paused') {
         mediaRecorderRef.current.resume();
       } else {
         return;
       }
 
-      setIsPaused(false);
       timerRef.current = setInterval(() => {
         setRecordingTime(prev => prev + 1);
       }, 1000);
     } catch (err: any) {
       console.error('Resume recording error:', err);
       setError(err.message || 'Failed to resume recording.');
+      // Roll back resumed UI state if resume fails.
+      setIsPaused(true);
+      if (timerRef.current) clearInterval(timerRef.current);
     } finally {
       pauseResumeInFlightRef.current = false;
     }
@@ -1042,6 +1088,7 @@ export default function App() {
       // ── Stop Real-time mode: stop integrated Tauri recording ──
       const backupAudioFile = await stopRealtimeBackupCapture();
       try {
+        isRealtimePausedRef.current = false;
         const fullTranscript = isPaused ? '' : await safeStopRealtimeRecording();
 
         if (unlistenRef.current) { unlistenRef.current(); unlistenRef.current = null; }
@@ -1066,6 +1113,7 @@ export default function App() {
         realtimeEngineActiveRef.current = false;
       } catch (err: any) {
         console.error('Stop realtime error:', err);
+        isRealtimePausedRef.current = false;
         if (unlistenRef.current) { unlistenRef.current(); unlistenRef.current = null; }
         setIsRecording(false);
         setIsPaused(false);
@@ -1225,6 +1273,10 @@ export default function App() {
           })
           .catch(err => console.error('Background KG extraction failed:', err))
           .finally(() => setIsExtractingNewKG(false));
+
+        indexMeetingTranscription(savedTask.id, savedTask.filename, savedTask.transcription)
+          .then(() => console.log('Turbopuffer indexing complete for realtime meeting'))
+          .catch(err => console.warn('Background Turbopuffer indexing failed:', err));
       }
 
       setHistory(prev => [savedTask, ...prev.filter(t => t.id !== savedTask.id)]);
@@ -1970,7 +2022,6 @@ export default function App() {
   const handleSendMessage = async () => {
     if (!chatInput.trim() || isChatting) return;
 
-    // Ensure we have transcription content if chatting about a specific meeting
     if (selectedTask && !selectedTask.transcription) {
       setChatMessages(prev => [...prev, { role: 'model', text: 'Unable to chat: No transcription content available for this meeting.' }]);
       return;
@@ -1982,18 +2033,40 @@ export default function App() {
     setChatInput('');
     setIsChatting(true);
 
+    const updateAgentMessage = (updater: (prev: Message) => Partial<Message>) => {
+      setChatMessages(prev => {
+        const last = prev[prev.length - 1];
+        if (last?.role === 'model' && last.agentStatus) {
+          const updated = { ...last, ...updater(last) };
+          return [...prev.slice(0, -1), updated];
+        }
+        return prev;
+      });
+    };
+
+    const updateStep = (stepId: string, status: AgentStep['status'], detail?: string) => {
+      updateAgentMessage(prev => ({
+        agentPlan: prev.agentPlan?.map(s =>
+          s.id === stepId ? { ...s, status, detail: detail ?? s.detail } : s
+        ),
+      }));
+    };
+
     try {
-      // Save user message to Supabase if it's a specific meeting
       if (selectedTask && selectedTask.id) {
         await saveChatMessage({
           task_id: selectedTask.id,
           role: 'user',
-          text: userInput
+          text: userInput,
+          thread_id: `task:${selectedTask.id}`,
         });
-      }
-
-      if (!selectedTask) {
+      } else {
         setAllMeetingsChatMessages(prev => [...prev, userMessage]);
+        saveChatMessage({
+          role: 'user',
+          text: userInput,
+          thread_id: ALL_MEETINGS_THREAD_ID,
+        }).catch(err => console.warn('Failed to persist all-meetings user msg:', err));
       }
 
       const msgHistory = chatMessages.map(m => ({
@@ -2001,50 +2074,262 @@ export default function App() {
         parts: [{ text: m.text }]
       }));
 
-      let response: string;
+      // ═══════════ PHASE 1: THINKING ═══════════
+      const agentPlaceholder: Message = {
+        role: 'model',
+        text: '',
+        agentStatus: 'thinking',
+        agentPlan: [],
+      };
+      setChatMessages(prev => [...prev, agentPlaceholder]);
 
-      if (!selectedTask) {
-        // App's state variable is also called history, we can alias it or reference it via window or just use the state variable `history` directly since we renamed the local variable to `msgHistory`.
-        const contextStr = history.map(t => 
-           `Meeting: ${t.filename}\nSummary: ${t.summary || ''}\nTranscript Snippet: ${(t.transcription || '').substring(0, 1500)}`
-        ).join('\n\n---\n\n');
-        
-        response = await chatWithNotes(
-          { transcription: contextStr, notes: '', summary: '', title: 'All Meetings' },
-          userInput,
-          msgHistory,
-          true
-        );
-      } else {
+      const isSingleMeeting = !!selectedTask;
+      const allMeetings: MeetingDocument[] = history
+        .filter((task) => !!task.id && !!task.transcription?.trim())
+        .map((task) => ({
+          meetingId: task.id!,
+          title: task.filename || 'Untitled Meeting',
+          transcription: task.transcription || '',
+          summary: task.summary || '',
+          notes: task.notes || '',
+        }));
+      const meetingTitles = isSingleMeeting
+        ? [selectedTask!.filename || 'This meeting']
+        : allMeetings.map(m => m.title);
+
+      const plan = await agentPlanQuery(userInput, meetingTitles, isSingleMeeting);
+
+      // ═══════════ PHASE 2: PLANNING ═══════════
+      const singleSteps: AgentStep[] = [
+        { id: 'retrieve', label: 'Retrieve evidence', status: 'pending' },
+        { id: 'analyze', label: 'Analyze context', status: 'pending' },
+        { id: 'respond', label: 'Generate response', status: 'pending' },
+      ];
+      const multiSteps: AgentStep[] = [
+        { id: 'classify', label: `Understanding: ${plan.intent.slice(0, 50)}`, status: 'done' },
+        { id: 'search', label: `Searching across ${allMeetings.length} meetings`, status: 'pending' },
+        { id: 'synthesize', label: 'Compiling findings', status: 'pending' },
+      ];
+      const planSteps = isSingleMeeting ? singleSteps : multiSteps;
+      updateAgentMessage(() => ({
+        agentStatus: 'planning',
+        agentPlan: planSteps,
+      }));
+      await new Promise(r => setTimeout(r, 300));
+
+      // ═══════════ PHASE 3: EXECUTING ═══════════
+      updateAgentMessage(() => ({ agentStatus: 'executing' }));
+
+      let response: string;
+      let responseCitations: Message['citations'] = undefined;
+      let responseRetrievalMeta: Message['retrievalMeta'] = undefined;
+
+      if (isSingleMeeting) {
+        // --- Single meeting path ---
+        updateStep('retrieve', 'running');
+
+        const meeting: MeetingDocument = {
+          meetingId: selectedTask!.id || 'unknown',
+          title: selectedTask!.filename || 'Untitled Meeting',
+          transcription: selectedTask!.transcription || '',
+          summary: selectedTask!.summary || '',
+          notes: selectedTask!.notes || '',
+        };
+
+        const retrievalPlan = await retrieveForSingleMeeting({
+          query: userInput,
+          meeting,
+          totalTokenBudget: 3000,
+        });
+        updateStep('retrieve', 'done', `${retrievalPlan.evidence.length} chunks`);
+
+        updateStep('analyze', 'running');
+        responseCitations = retrievalPlan.evidence.slice(0, 6).map((e) => ({
+          meetingId: e.meetingId,
+          meetingTitle: e.meetingTitle,
+          chunkId: e.chunkId,
+          score: e.score,
+        }));
+        responseRetrievalMeta = {
+          scope: 'single',
+          confidence: retrievalPlan.confidence,
+          selectedMeetingIds: retrievalPlan.selectedMeetingIds,
+          tokenUsageTotal: retrievalPlan.tokenUsage.totalTokens,
+          coveredMeetingsCount: 1,
+          totalMeetingsCount: 1,
+        };
+        updateStep('analyze', 'done');
+
+        updateStep('respond', 'running');
         response = await chatWithNotes(
           {
-            transcription: selectedTask.transcription,
-            notes: selectedTask.notes || '',
-            summary: selectedTask.summary || '',
-            title: selectedTask.filename || '',
+            transcription: '',
+            title: selectedTask!.filename || '',
+            preparedContext: retrievalPlan.context,
+            retrievalMeta: {
+              scope: retrievalPlan.scope,
+              confidence: retrievalPlan.confidence,
+              selectedMeetingIds: retrievalPlan.selectedMeetingIds,
+              tokenUsage: { totalTokens: retrievalPlan.tokenUsage.totalTokens },
+            },
           },
           userInput,
           msgHistory,
           true
         );
+        updateStep('respond', 'done');
+
+      } else {
+        // --- Many meetings: single cross-meeting Turbopuffer query ---
+        updateStep('search', 'running');
+        console.log(`[Agent] Multi-meeting path: isBroad=${plan.isBroad}, intent="${plan.intent}", ${allMeetings.length} meetings`);
+
+        const topK = plan.isBroad ? 50 : 20;
+        const meetingTitleMap = new Map(allMeetings.map(m => [m.meetingId, m.title]));
+        const meetingSummaryMap = new Map(
+          allMeetings.filter(m => m.summary).map(m => [m.meetingId, m.summary || ''])
+        );
+
+        const crossResult = await retrieveCrossMeeting({
+          query: userInput,
+          topK,
+          isBroad: plan.isBroad,
+          totalMeetingsCount: allMeetings.length,
+          meetingTitleMap,
+          meetingSummaryMap,
+        });
+
+        let contextForSynthesis: string;
+        let coveredCount: number;
+        let coveredIds: string[];
+        let confidence: number;
+
+        if (crossResult && crossResult.evidence.length > 0) {
+          const evidenceMeetingCount = crossResult.meetingGroups.length;
+          console.log(`[Agent] Turbopuffer returned ${crossResult.evidence.length} chunks from ${evidenceMeetingCount} meetings, covering ${crossResult.coveredMeetingIds.length} total`);
+          contextForSynthesis = crossResult.context;
+          coveredCount = crossResult.coveredMeetingIds.length;
+          coveredIds = crossResult.coveredMeetingIds;
+          confidence = crossResult.confidence;
+
+          responseCitations = crossResult.evidence.slice(0, 8).map(e => ({
+            meetingId: e.meetingId,
+            meetingTitle: e.meetingTitle,
+            chunkId: e.chunkId,
+            score: e.score,
+          }));
+
+          updateStep('search', 'done',
+            plan.isBroad
+              ? `Covering all ${coveredCount} meetings (deep evidence from ${evidenceMeetingCount})`
+              : `Found evidence in ${evidenceMeetingCount} meetings`
+          );
+        } else {
+          console.log(`[Agent] Turbopuffer returned null/empty, falling back to BM25 for ${allMeetings.length} meetings (broad=${plan.isBroad})`);
+          updateStep('search', 'done', `Using summaries from ${allMeetings.length} meetings`);
+
+          const fallbackResult = await retrieveForManyMeetings({
+            query: userInput,
+            meetings: allMeetings,
+            totalTokenBudget: plan.isBroad ? 6000 : 3200,
+          });
+
+          contextForSynthesis = fallbackResult.context;
+          coveredCount = fallbackResult.coveredMeetingsCount;
+          coveredIds = fallbackResult.selectedMeetingIds;
+          confidence = fallbackResult.confidence;
+
+          responseCitations = fallbackResult.evidence.slice(0, 8).map(e => ({
+            meetingId: e.meetingId,
+            meetingTitle: e.meetingTitle,
+            chunkId: e.chunkId,
+            score: e.score,
+          }));
+        }
+
+        responseRetrievalMeta = {
+          scope: 'many',
+          confidence,
+          selectedMeetingIds: coveredIds,
+          tokenUsageTotal: 0,
+          coveredMeetingsCount: coveredCount,
+          totalMeetingsCount: allMeetings.length,
+        };
+
+        updateStep('synthesize', 'running',
+          plan.isBroad
+            ? `Synthesizing across all ${coveredCount} meetings...`
+            : `Compiling findings from ${coveredCount} meetings...`
+        );
+
+        response = await agentSynthesizeFromEvidence({
+          userQuery: userInput,
+          intent: plan.intent,
+          context: contextForSynthesis,
+          history: msgHistory,
+          meetingsVisited: coveredCount,
+          totalMeetings: allMeetings.length,
+        });
+
+        updateStep('synthesize', 'done');
       }
 
-      const modelMessage: Message = { role: 'model', text: response };
-      setChatMessages(prev => [...prev, modelMessage]);
+      // ═══════════ PHASE 4: DONE — replace agent placeholder with final response ═══════════
+      const modelMessage: Message = {
+        role: 'model',
+        text: response,
+        agentStatus: 'done',
+        citations: responseCitations,
+        retrievalMeta: responseRetrievalMeta,
+      };
+
+      setChatMessages(prev => {
+        const withoutPlaceholder = prev.filter(m => !(m.role === 'model' && m.agentStatus && m.agentStatus !== 'done'));
+        return [...withoutPlaceholder, modelMessage];
+      });
+
+      const chatSaveMeta = {
+        citations: responseCitations?.map((c) => ({
+          meeting_id: c.meetingId,
+          meeting_title: c.meetingTitle,
+          chunk_id: c.chunkId,
+          score: c.score,
+        })),
+        retrieval_meta: responseRetrievalMeta
+          ? {
+              scope: responseRetrievalMeta.scope,
+              confidence: responseRetrievalMeta.confidence,
+              selected_meeting_ids: responseRetrievalMeta.selectedMeetingIds,
+              token_usage_total: responseRetrievalMeta.tokenUsageTotal,
+              covered_meetings_count: responseRetrievalMeta.coveredMeetingsCount,
+              total_meetings_count: responseRetrievalMeta.totalMeetingsCount,
+            }
+          : undefined,
+      };
 
       if (!selectedTask) {
         setAllMeetingsChatMessages(prev => [...prev, modelMessage]);
+        saveChatMessage({
+          role: 'model',
+          text: response,
+          thread_id: ALL_MEETINGS_THREAD_ID,
+          ...chatSaveMeta,
+        }).catch(err => console.warn('Failed to persist all-meetings model msg:', err));
       } else if (selectedTask && selectedTask.id) {
-        // Save model response to Supabase
         await saveChatMessage({
           task_id: selectedTask.id,
           role: 'model',
-          text: response
+          text: response,
+          thread_id: `task:${selectedTask.id}`,
+          ...chatSaveMeta,
         });
       }
     } catch (err) {
       console.error('Chat error:', err);
-      setChatMessages(prev => [...prev, { role: 'model', text: 'Sorry, I encountered an error while processing your request.' }]);
+      setChatMessages(prev => {
+        const cleaned = prev.filter(m => !(m.role === 'model' && m.agentStatus && m.agentStatus !== 'done'));
+        return [...cleaned, { role: 'model', text: 'Sorry, I encountered an error while processing your request.' }];
+      });
     } finally {
       setIsChatting(false);
     }
@@ -2069,7 +2354,8 @@ export default function App() {
           task_id: selectedTask.id!,
           role: 'model',
           text: visualMessage.text,
-          image: imageUrl
+          image: imageUrl,
+          thread_id: `task:${selectedTask.id}`,
         });
       } else {
         setChatMessages(prev => [
@@ -2093,7 +2379,12 @@ export default function App() {
       setIsLoadingHistory(true);
       const data = await getTasks();
       setHistory(data);
-      // We will sync KG data after both history and KG data are loaded, handled by a separate useEffect
+
+      backfillExistingMeetings(
+        data
+          .filter(t => t.id && t.status === 'completed' && t.transcription?.trim())
+          .map(t => ({ id: t.id!, title: t.filename || 'Untitled', transcription: t.transcription! }))
+      ).catch(err => console.warn('Turbopuffer backfill error:', err));
     } catch (err) {
       console.error('Failed to fetch history:', err);
     } finally {
@@ -2472,6 +2763,10 @@ export default function App() {
           })
           .catch(err => console.error('Background KG extraction failed:', err))
           .finally(() => setIsExtractingNewKG(false));
+
+        indexMeetingTranscription(savedTask.id, savedTask.filename, savedTask.transcription)
+          .then(() => console.log('Turbopuffer indexing complete for uploaded meeting'))
+          .catch(err => console.warn('Background Turbopuffer indexing failed:', err));
       }
 
       setHistory(prev => [savedTask, ...prev.filter(t => t.id !== savedTask.id)]);
@@ -2762,7 +3057,7 @@ export default function App() {
                     fetchChatHistory(resolvedTask.id!);
                   } else {
                     setSelectedTask(null);
-                    setChatMessages(allMeetingsChatMessages);
+                    fetchChatHistory(null);
                   }
                 }}
                 chatMessages={chatMessages}
