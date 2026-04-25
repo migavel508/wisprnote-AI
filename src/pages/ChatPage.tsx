@@ -1,4 +1,4 @@
-import { useRef, useEffect, useState } from 'react';
+import React, { useRef, useEffect, useState } from 'react';
 import { motion, AnimatePresence } from 'framer-motion';
 import {
   MessageSquare,
@@ -21,10 +21,33 @@ import remarkGfm from 'remark-gfm';
 import { ChatPageSkeleton } from '../components/Skeleton';
 import { ShiningText } from '../components/ui/shining-text';
 
+interface AgentStep {
+  id: string;
+  label: string;
+  status: 'pending' | 'running' | 'done' | 'error';
+  detail?: string;
+}
+
 interface Message {
   role: 'user' | 'model';
   text: string;
   image?: string;
+  agentStatus?: 'thinking' | 'planning' | 'executing' | 'done';
+  agentPlan?: AgentStep[];
+  citations?: Array<{
+    meetingId: string;
+    meetingTitle: string;
+    chunkId: string;
+    score: number;
+  }>;
+  retrievalMeta?: {
+    scope?: 'single' | 'many';
+    confidence?: number;
+    selectedMeetingIds?: string[];
+    tokenUsageTotal?: number;
+    coveredMeetingsCount?: number;
+    totalMeetingsCount?: number;
+  };
 }
 
 interface TaskHistory {
@@ -230,8 +253,8 @@ export default function ChatPage({
             </div>
           )}
 
-          {/* Regular chat messages */}
-          {chatMessages.map((msg, i) => (
+          {/* Regular chat messages — skip in-progress agent placeholders */}
+          {chatMessages.filter(msg => !(msg.role === 'model' && msg.agentStatus && msg.agentStatus !== 'done')).map((msg, i) => (
             <motion.div key={`msg-${i}`} initial={{ opacity: 0, y: 8 }} animate={{ opacity: 1, y: 0 }}
               className={`flex ${msg.role === 'user' ? 'justify-end' : 'justify-start'}`}>
               <div className={`max-w-[88%] sm:max-w-[80%] ${msg.role === 'user' ? 'bg-[#f5f2ef] text-[#1a1a1a] px-5 py-3.5 rounded-3xl rounded-tr-md' : 'bg-transparent text-[#1a1a1a]'}`}>
@@ -251,6 +274,37 @@ export default function ChatPage({
                     <img src={msg.image} alt="Visualization" className="w-full h-auto" />
                   </div>
                 )}
+                {msg.role === 'model' && !!msg.citations?.length && (
+                  <div className="mt-3 ml-10">
+                    <p className="text-[10px] font-medium text-[#1a1a1a]/35 mb-1.5">Sources</p>
+                    <div className="flex flex-wrap gap-2">
+                    {msg.citations.slice(0, 4).map((citation, citationIdx) => (
+                      <span
+                        key={`${citation.meetingId}-${citation.chunkId}-${citationIdx}`}
+                        className="px-2.5 py-1 rounded-full text-[11px] bg-[#1a1a1a]/[0.05] text-[#1a1a1a]/60 border border-[#1a1a1a]/[0.08]"
+                        title={`${citation.meetingTitle} • ${citation.chunkId} • score ${citation.score.toFixed(2)}`}
+                      >
+                        {citation.meetingTitle} • {citation.chunkId}
+                      </span>
+                    ))}
+                    </div>
+                  </div>
+                )}
+                {msg.role === 'model' && msg.retrievalMeta && (
+                  <div className="mt-2 ml-10 text-[10px] text-[#1a1a1a]/35">
+                    Scope: {msg.retrievalMeta.scope === 'many' ? 'All meetings' : 'This meeting'}
+                    {typeof msg.retrievalMeta.confidence === 'number'
+                      ? ` • Confidence ${Math.round(msg.retrievalMeta.confidence * 100)}%`
+                      : ''}
+                    {typeof msg.retrievalMeta.tokenUsageTotal === 'number'
+                      ? ` • Context ${msg.retrievalMeta.tokenUsageTotal} tok`
+                      : ''}
+                    {typeof msg.retrievalMeta.coveredMeetingsCount === 'number' &&
+                    typeof msg.retrievalMeta.totalMeetingsCount === 'number'
+                      ? ` • Coverage ${msg.retrievalMeta.coveredMeetingsCount}/${msg.retrievalMeta.totalMeetingsCount}`
+                      : ''}
+                  </div>
+                )}
                 {msg.role === 'model' && !msg.image && !isGeneratingImage && (
                   <div className="mt-3 ml-10">
                     <button onClick={() => handleVisualize(msg.text.substring(0, 100))}
@@ -263,17 +317,63 @@ export default function ChatPage({
             </motion.div>
           ))}
 
-          {/* Chat thinking indicator */}
-          {isChatting && (
-            <motion.div initial={{ opacity: 0 }} animate={{ opacity: 1 }} className="flex justify-start">
-              <div className="flex items-center gap-2.5">
-                <div className="w-7 h-7 rounded-full bg-[#1a1a1a] flex items-center justify-center">
-                  <Sparkles className="w-3.5 h-3.5 text-white" />
+          {/* Agentic execution status — shows plan steps in real time */}
+          {isChatting && (() => {
+            const lastModel = [...chatMessages].reverse().find(m => m.role === 'model' && m.agentStatus);
+            const agentMsg = lastModel?.agentStatus ? lastModel : null;
+            if (agentMsg?.agentPlan?.length) {
+              return (
+                <motion.div initial={{ opacity: 0, y: 8 }} animate={{ opacity: 1, y: 0 }} className="flex justify-start">
+                  <div className="max-w-[88%] sm:max-w-[80%]">
+                    <div className="flex items-center gap-2.5 mb-3">
+                      <div className="w-7 h-7 rounded-full bg-[#1a1a1a] flex items-center justify-center flex-shrink-0">
+                        <Sparkles className="w-3.5 h-3.5 text-white" />
+                      </div>
+                      <span className="text-[13px] font-semibold text-[#1a1a1a]/80">
+                        {agentMsg.agentStatus === 'thinking' ? 'Understanding your request...' :
+                         agentMsg.agentStatus === 'planning' ? 'Planning approach...' :
+                         agentMsg.agentStatus === 'executing' ? 'Working on it...' :
+                         'Finishing up...'}
+                      </span>
+                    </div>
+                    <div className="pl-10 space-y-2">
+                      {agentMsg.agentPlan.map((step) => (
+                        <div key={step.id} className="flex items-start gap-2.5">
+                          {step.status === 'done' ? (
+                            <CheckCircle2 className="w-4 h-4 text-emerald-500 mt-0.5 flex-shrink-0" />
+                          ) : step.status === 'running' ? (
+                            <Loader2 className="w-4 h-4 text-blue-500 animate-spin mt-0.5 flex-shrink-0" />
+                          ) : step.status === 'error' ? (
+                            <X className="w-4 h-4 text-red-400 mt-0.5 flex-shrink-0" />
+                          ) : (
+                            <div className="w-4 h-4 rounded-full border-2 border-[#1a1a1a]/15 mt-0.5 flex-shrink-0" />
+                          )}
+                          <div className="min-w-0">
+                            <span className={`text-[13px] ${step.status === 'done' ? 'text-[#1a1a1a]/60' : step.status === 'running' ? 'text-[#1a1a1a]/80 font-medium' : 'text-[#1a1a1a]/35'}`}>
+                              {step.label}
+                            </span>
+                            {step.detail && (step.status === 'done' || step.status === 'running') && (
+                              <span className={`text-[11px] ml-2 ${step.status === 'running' ? 'text-blue-400' : 'text-[#1a1a1a]/30'}`}>{step.detail}</span>
+                            )}
+                          </div>
+                        </div>
+                      ))}
+                    </div>
+                  </div>
+                </motion.div>
+              );
+            }
+            return (
+              <motion.div initial={{ opacity: 0 }} animate={{ opacity: 1 }} className="flex justify-start">
+                <div className="flex items-center gap-2.5">
+                  <div className="w-7 h-7 rounded-full bg-[#1a1a1a] flex items-center justify-center">
+                    <Sparkles className="w-3.5 h-3.5 text-white" />
+                  </div>
+                  <ShiningText text="Lumina is thinking..." />
                 </div>
-                <ShiningText text="Lumina is thinking..." />
-              </div>
-            </motion.div>
-          )}
+              </motion.div>
+            );
+          })()}
 
           {/* Agent asset cards — inline in chat stream */}
           {agentAssetHistory.map((asset, i) => {

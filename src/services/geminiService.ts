@@ -395,6 +395,107 @@ export interface ChatTaskData {
   notes?: string;
   summary?: string;
   title?: string;
+  preparedContext?: string;
+  retrievalMeta?: {
+    confidence?: number;
+    scope?: 'single' | 'many';
+    selectedMeetingIds?: string[];
+    tokenUsage?: {
+      totalTokens?: number;
+    };
+  };
+}
+
+function estimateTokens(text: string): number {
+  return Math.ceil(text.length * 0.25);
+}
+
+function trimHistoryToTokenBudget(
+  history: { role: 'user' | 'model'; parts: { text: string }[] }[],
+  tokenBudget: number,
+): { role: 'user' | 'model'; parts: { text: string }[] }[] {
+  if (!history.length) return [];
+  const kept: { role: 'user' | 'model'; parts: { text: string }[] }[] = [];
+  let used = 0;
+  for (let i = history.length - 1; i >= 0; i--) {
+    const message = history[i];
+    const joined = message.parts.map((p) => p.text).join('\n');
+    const tokens = estimateTokens(joined) + 12;
+    if (used + tokens > tokenBudget) break;
+    used += tokens;
+    kept.push(message);
+  }
+  return kept.reverse();
+}
+
+function sanitizeInlineCitations(text: string): string {
+  return text
+    .replace(/\[M\d+-E\d+(?:\s*,\s*M\d+-E\d+)*\]/gi, '')
+    .replace(/\[\d+(?:\s*,\s*\d+)*\]/g, '')
+    .replace(/\[(summary|source)\]/gi, '')
+    .replace(/\s{2,}/g, ' ')
+    .replace(/\n{3,}/g, '\n\n')
+    .trim();
+}
+
+export interface AgentPlan {
+  intent: string;
+  scope: 'single' | 'many';
+  isBroad: boolean;
+}
+
+export async function agentPlanQuery(
+  userQuery: string,
+  meetingTitles: string[],
+  isSingleMeeting: boolean,
+): Promise<AgentPlan> {
+  const response = await generateWithFallback({
+    model: 'gemini-3-flash-preview',
+    contents: [{ role: 'user', parts: [{ text: userQuery }] }],
+    config: {
+      systemInstruction: `You are a precise intent classifier for a meeting AI assistant called Lumina.
+
+The user has ${isSingleMeeting ? '1 meeting selected' : `${meetingTitles.length} meetings available`}.
+
+Your job is to deeply understand exactly what the user is asking for — not more, not less.
+
+Output ONLY valid JSON (no markdown fences):
+{
+  "intent": "<precise, actionable 1-sentence description that captures EXACTLY what the user wants — include the specific deliverable, scope, and any constraints they mentioned>",
+  "isBroad": ${isSingleMeeting ? 'false' : '<true if the user explicitly or implicitly wants to cover ALL/EVERY meeting, or asks for exhaustive cross-meeting analysis like "key topics from all meetings" or "summarize everything". false if they want specific information that likely lives in a few meetings>'}
+}
+
+CRITICAL RULES for intent:
+- Preserve the user's exact scope: if they say "key topics" write "key topics", not "decisions" or "action items"
+- If they say "all meetings", the intent MUST reflect covering ALL meetings, not a subset
+- If they ask for one specific thing (e.g. "key topics"), do NOT expand it to multiple things (e.g. don't add "decisions, action items, and next steps")
+- The intent should be a direct instruction that could be given to another AI to execute`,
+      maxOutputTokens: 200,
+    },
+  });
+
+  try {
+    const raw = (response.text || '').replace(/```json\s*/gi, '').replace(/```\s*/gi, '').trim();
+    const parsed = JSON.parse(raw);
+    return {
+      intent: parsed.intent || userQuery,
+      scope: isSingleMeeting ? 'single' : 'many',
+      isBroad: !!parsed.isBroad,
+    };
+  } catch {
+    const broadPatterns = [
+      'all meetings', 'every meeting', 'across all', 'across meetings',
+      'all the meetings', 'from all meetings', 'overall', 'main decisions',
+      'key decisions', 'key topics', 'all decisions', 'everything',
+    ];
+    const qLower = userQuery.toLowerCase();
+    const isBroad = !isSingleMeeting && broadPatterns.some(p => qLower.includes(p));
+    return {
+      intent: userQuery,
+      scope: isSingleMeeting ? 'single' : 'many',
+      isBroad,
+    };
+  }
 }
 
 export async function chatWithNotes(
@@ -423,34 +524,39 @@ export async function chatWithNotes(
   // ── Build rich context from all available sources ──────────────────────────
   let contextSections: string[] = [];
 
+  if (data.preparedContext?.trim()) {
+    contextSections.push(data.preparedContext.trim());
+  } else {
+
   // 1. Always include structured notes and summary when available (highest quality)
-  if (summary?.trim()) {
-    contextSections.push(`=== AI-GENERATED MEETING SUMMARY ===\n${summary.trim()}`);
-  }
-  if (notes?.trim()) {
-    // Strip HTML tags from notes (TipTap saves HTML)
-    const plainNotes = notes.replace(/<[^>]+>/g, ' ').replace(/\s{2,}/g, ' ').trim();
-    if (plainNotes.length > 20) {
-      contextSections.push(`=== MEETING NOTES ===\n${plainNotes}`);
+    if (summary?.trim()) {
+      contextSections.push(`=== AI-GENERATED MEETING SUMMARY ===\n${summary.trim()}`);
     }
-  }
+    if (notes?.trim()) {
+      // Strip HTML tags from notes (TipTap saves HTML)
+      const plainNotes = notes.replace(/<[^>]+>/g, ' ').replace(/\s{2,}/g, ' ').trim();
+      if (plainNotes.length > 20) {
+        contextSections.push(`=== MEETING NOTES ===\n${plainNotes}`);
+      }
+    }
 
   // 2. Add transcription chunks via BM25 retrieval
-  if (transcription?.trim() && useRAG) {
-    const chunks = chunkTranscription(transcription);
-    // For overview queries fetch more chunks; for specific queries fewer but more precise
-    const topK = isOverview ? 10 : 6;
-    const results = await retrieveRelevantChunks(message, chunks, topK);
-    const retrieved = prepareContext(results);
+    if (transcription?.trim() && useRAG) {
+      const chunks = chunkTranscription(transcription);
+      // For overview queries fetch more chunks; for specific queries fewer but more precise
+      const topK = isOverview ? 10 : 6;
+      const results = await retrieveRelevantChunks(message, chunks, topK);
+      const retrieved = prepareContext(results);
 
-    if (retrieved.trim()) {
-      contextSections.push(`=== TRANSCRIPTION EXCERPTS ===\n${retrieved}`);
-    } else if (transcription.trim()) {
-      // Fallback: use entire transcription (capped at 6000 chars) when BM25 finds nothing
-      contextSections.push(`=== FULL TRANSCRIPTION ===\n${transcription.substring(0, 6000)}${transcription.length > 6000 ? '\n[... truncated ...]' : ''}`);
+      if (retrieved.trim()) {
+        contextSections.push(`=== TRANSCRIPTION EXCERPTS ===\n${retrieved}`);
+      } else if (transcription.trim()) {
+        // Fallback: use entire transcription (capped at 6000 chars) when BM25 finds nothing
+        contextSections.push(`=== FULL TRANSCRIPTION ===\n${transcription.substring(0, 6000)}${transcription.length > 6000 ? '\n[... truncated ...]' : ''}`);
+      }
+    } else if (transcription?.trim()) {
+      contextSections.push(`=== TRANSCRIPTION ===\n${transcription}`);
     }
-  } else if (transcription?.trim()) {
-    contextSections.push(`=== TRANSCRIPTION ===\n${transcription}`);
   }
 
   const fullContext = contextSections.join('\n\n');
@@ -471,7 +577,13 @@ GUIDELINES:
 - Only say information is unavailable if it is genuinely absent from ALL provided sources.
 
 MEETING CONTEXT:
-${fullContext}`
+${fullContext}
+
+RESPONSE QUALITY CONTRACT:
+- Ground all factual claims in provided evidence blocks.
+- Do NOT print bracketed citation markers in the answer body.
+- Do NOT output placeholders like [M1-E2], [2], [Summary], or [Source].
+- If evidence confidence appears weak, state uncertainty clearly and avoid speculation.`
 
     : `You are a precise meeting assistant for ${meetingLabel}.
 
@@ -486,20 +598,80 @@ GUIDELINES:
 - Never fabricate or infer facts not present in the context.
 
 MEETING CONTEXT:
-${fullContext}`;
+${fullContext}
+
+RESPONSE QUALITY CONTRACT:
+- Answer only from supplied evidence.
+- Do NOT print bracketed citation markers in the answer body.
+- Do NOT output placeholders like [M1-E2], [2], [Summary], or [Source].
+- If evidence is insufficient, explicitly say what is missing instead of guessing.`;
+
+  // Token minimization with quality guardrails:
+  // keep most recent conversational turns within budget; do not drop the latest user turn.
+  const recentHistory = trimHistoryToTokenBudget(history, 1100);
 
   const response = await generateWithFallback({
     model: "gemini-3-flash-preview",
     contents: [
-      ...history,
+      ...recentHistory,
       { role: 'user', parts: [{ text: message }] }
     ],
     config: {
       systemInstruction,
-      maxOutputTokens: isOverview ? 2048 : 1024,
+      maxOutputTokens: isOverview ? 1600 : 900,
     }
   });
-  return response.text || "";
+  return sanitizeInlineCitations(response.text || "");
+}
+
+export async function agentSynthesizeFromEvidence(params: {
+  userQuery: string;
+  intent: string;
+  context: string;
+  history: { role: 'user' | 'model'; parts: { text: string }[] }[];
+  meetingsVisited: number;
+  totalMeetings: number;
+}): Promise<string> {
+  const systemInstruction = `You are Lumina, an expert meeting AI assistant.
+
+USER'S EXACT REQUEST: "${params.userQuery}"
+INTERPRETED TASK: ${params.intent}
+Evidence was retrieved across ${params.meetingsVisited} out of ${params.totalMeetings} total meetings.
+
+STRICT ALIGNMENT RULES (most important):
+- Answer EXACTLY what the user asked — nothing more, nothing less.
+- If the user asked for "key topics", deliver key topics. Do NOT add action items, next steps, or other extras unless asked.
+- If the user asked to cover "all meetings", your response MUST reference ALL meetings with evidence. State how many meetings you covered.
+- If the user asked about a specific aspect (decisions, topics, action items), focus ONLY on that aspect.
+- Do NOT fabricate information. If evidence doesn't support a claim, don't make it.
+
+FORMATTING:
+- Use headings, bullet points, or numbered lists for clarity.
+- Reference specific speakers and meeting names when available.
+- Cover findings from EVERY meeting that had relevant evidence — do not skip any.
+- State the total number of meetings covered at the beginning of your response.
+
+RESPONSE QUALITY CONTRACT:
+- Ground all claims in the evidence provided.
+- Do NOT print bracketed citation markers like [1], [M1-E2], [Source], etc.
+- If evidence is weak or missing for some meetings, state that clearly.
+
+${params.context}`;
+
+  const recentHistory = trimHistoryToTokenBudget(params.history, 600);
+
+  const response = await generateWithFallback({
+    model: 'gemini-3-flash-preview',
+    contents: [
+      ...recentHistory,
+      { role: 'user', parts: [{ text: params.userQuery }] },
+    ],
+    config: {
+      systemInstruction,
+      maxOutputTokens: 3200,
+    },
+  });
+  return sanitizeInlineCitations(response.text || '');
 }
 
 export async function generateConceptImage(description: string): Promise<string | null> {
@@ -729,7 +901,7 @@ function cleanTranscriptionForKG(raw: string, maxChars = 8000): string {
 }
 
 export async function extractKnowledgeGraph(meetingId: string, meetingTitle: string, text: string): Promise<any> {
-  const geminiApiKey = import.meta.env.VITE_GEMINI_API_KEY || import.meta.env.GEMINI_API_KEY || process.env.GEMINI_API_KEY;
+  const geminiApiKey = (import.meta as any).env?.VITE_GEMINI_API_KEY || (import.meta as any).env?.GEMINI_API_KEY || process.env.GEMINI_API_KEY;
   
   if (!geminiApiKey) {
     console.error('Gemini API key is not configured');

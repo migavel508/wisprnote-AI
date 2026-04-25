@@ -6,6 +6,12 @@
     "core:default",
     "core:event:default",
     "shell:allow-open",
-    "shell:default"
+    "shell:default",
+    {
+      "identifier": "http:default",
+      "allow": [
+        { "url": "https://*.turbopuffer.com/**" }
+      ]
+    }
   ]
 }
