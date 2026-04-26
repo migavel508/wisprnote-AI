@@ -330,60 +330,68 @@ export default function ProcessPage({
             animate={{ opacity: 1, y: 0 }}
             exit={{ opacity: 0, y: 8 }}
             transition={{ type: 'spring', damping: 28, stiffness: 380 }}
-            className="absolute bottom-5 sm:bottom-6 left-1/2 -translate-x-1/2 z-40 w-[calc(100%-40px)] sm:w-auto max-w-[560px]"
+            className="absolute bottom-5 sm:bottom-6 left-1/2 -translate-x-1/2 z-40 w-[calc(100%-40px)] sm:w-auto max-w-[580px]"
           >
-            <div className="flex items-center gap-3">
-              {/* Left pill — waveform + chevron */}
+            <div className="flex items-center gap-3" style={{ height: 52 }}>
+              {/* Left icon pill */}
               <button 
                 onClick={() => setViewState('expanded')}
-                className="flex items-center gap-2.5 bg-white hover:bg-[#faf8f6] rounded-full shadow-[0_2px_20px_rgba(0,0,0,0.08)] border border-[#1a1a1a]/[0.05] pl-5 pr-4 py-3 transition-all group"
+                className={`h-[52px] flex-shrink-0 flex items-center justify-center rounded-full transition-all duration-300 group border border-white/60 ${
+                  isRecording
+                    ? 'gap-2.5 px-5 bg-gradient-to-br from-red-50 via-orange-50 to-amber-50 border-red-200/40 shadow-[0_0_20px_rgba(239,68,68,0.08)]'
+                    : 'w-[52px] bg-gradient-to-br from-[#f0ece7] to-[#e8e2db] hover:from-[#ebe6e0] hover:to-[#e0d9d1] shadow-[0_2px_12px_rgba(0,0,0,0.04)]'
+                }`}
               >
                 {isRecording ? (
                   <>
-                    <div className="flex items-center gap-[3px] h-[18px]">
+                    <div className="flex items-center gap-[3px]">
                       {[0, 1, 2].map((i) => (
                         <motion.div
                           key={i}
-                          className={`w-[3.5px] rounded-full ${isPaused ? 'bg-[#1a1a1a]/20' : 'bg-red-400'}`}
+                          className={`w-[2.5px] rounded-full ${isPaused ? 'bg-[#1a1a1a]/15' : 'bg-red-400'}`}
                           style={{ height: `${barHeights[i]}px` }}
                         />
                       ))}
                     </div>
-                    <span className="text-[13px] font-semibold text-red-500 tabular-nums">
+                    <span className="text-[12px] font-semibold text-red-500 tabular-nums font-mono tracking-wide">
                       {formatTime(recordingTime)}
                     </span>
                   </>
                 ) : (
-                  <>
-                    <div className="flex items-center gap-[4px] h-[18px]">
+                  <div className="flex items-center gap-1">
+                    <div className="flex items-center gap-[3px]">
                       {[0, 1, 2].map((i) => (
-                        <div key={i} className="w-[3.5px] rounded-full bg-[#1a1a1a]/15 group-hover:bg-[#1a1a1a]/30 transition-colors" style={{ height: `${7 + i * 4}px` }} />
+                        <div
+                          key={i}
+                          className="w-[2.5px] rounded-full bg-[#4a4038] group-hover:bg-[#2a2420] transition-all duration-300"
+                          style={{ height: `${6 + i * 3}px`, transitionDelay: `${i * 40}ms` }}
+                        />
                       ))}
                     </div>
-                    <ChevronUp className="w-4 h-4 text-[#1a1a1a]/25 group-hover:text-[#1a1a1a]/45 transition-colors" />
-                  </>
+                    <ChevronUp className="w-3.5 h-3.5 text-[#4a4038] group-hover:text-[#2a2420] group-hover:-translate-y-[1px] transition-all duration-300" />
+                  </div>
                 )}
               </button>
 
-              {/* Right pill — text + record/upload button */}
-              <div className="flex-1 sm:flex-none flex items-center bg-white rounded-full shadow-[0_2px_20px_rgba(0,0,0,0.08)] border border-[#1a1a1a]/[0.05] pl-5 pr-1.5 py-1.5">
+              {/* Right long bar */}
+              <div className="flex-1 sm:flex-none flex items-center h-[52px] bg-gradient-to-r from-[#f0ece7] to-[#ece7e1] rounded-full pl-5 pr-1.5 border border-white/60 shadow-[0_2px_12px_rgba(0,0,0,0.04)]">
                 <div 
                   onClick={() => setViewState('expanded')}
-                  className="flex-1 flex items-center py-1.5 cursor-pointer sm:min-w-[260px] overflow-hidden"
+                  className="flex-1 flex items-center py-1.5 cursor-pointer sm:min-w-[280px] overflow-hidden"
                 >
-                  <span className="text-[14px] text-[#1a1a1a]/25 truncate">
+                  <span className="text-[14px] text-[#1a1a1a]/28 truncate tracking-[-0.01em]">
                     {file ? file.name : 'Drop audio or record...'}
                   </span>
                 </div>
 
                 <button 
                   onClick={() => setInputMode(inputMode === 'upload' ? 'record' : 'upload')}
-                  className="flex-shrink-0 flex items-center gap-2 px-4 py-2.5 text-[13px] font-medium text-[#1a1a1a]/60 bg-[#1a1a1a]/[0.04] hover:bg-[#1a1a1a]/[0.07] rounded-full transition-all"
+                  className="flex-shrink-0 flex items-center gap-2 bg-white/90 hover:bg-white rounded-full px-4 py-2.5 text-[13px] font-medium text-[#1a1a1a]/55 hover:text-[#1a1a1a]/80 shadow-[0_1px_4px_rgba(0,0,0,0.04)] border border-white/80 transition-all duration-200"
                 >
                   {inputMode === 'upload' ? (
-                    <><Mic className="w-4 h-4 text-[#1a1a1a]/35" /><span>Record</span></>
+                    <><Mic className="w-4 h-4 text-[#1a1a1a]/30" /><span>Record</span></>
                   ) : (
-                    <><Upload className="w-4 h-4 text-[#1a1a1a]/35" /><span>Upload</span></>
+                    <><Upload className="w-4 h-4 text-[#1a1a1a]/30" /><span>Upload</span></>
                   )}
                 </button>
               </div>
@@ -459,7 +467,7 @@ export default function ProcessPage({
                         ? 'bg-[#1a1a1a]/[0.06] border-2 border-[#1a1a1a]/20' 
                         : file 
                           ? 'bg-green-50/60 border-2 border-green-200/40' 
-                          : 'bg-[#faf8f6] border-2 border-dashed border-[#1a1a1a]/[0.08] hover:border-[#1a1a1a]/15 hover:bg-[#f5f0eb]/50'
+                          : 'bg-[#faf8f6] border-2 border-dashed border-[#1a1a1a]/[0.08] hover:border-[#1a1a1a]/15 hover:bg-[#e5ddd4]/50'
                     }`}
                   >
                     <input type="file" ref={fileInputRef} onChange={handleFileChange} className="hidden" accept="audio/*" />

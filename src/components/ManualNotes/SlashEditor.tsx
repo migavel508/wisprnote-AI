@@ -21,6 +21,29 @@ import {
 } from 'lucide-react';
 import { uploadNoteImage } from '../../services/supabaseService';
 
+// ─── Helpers ──────────────────────────────────────────────────────────────────
+
+function fileToBase64(file: File): Promise<string> {
+  return new Promise((resolve, reject) => {
+    const reader = new FileReader();
+    reader.onload = () => resolve(reader.result as string);
+    reader.onerror = reject;
+    reader.readAsDataURL(file);
+  });
+}
+
+function extractImageFiles(dataTransfer: DataTransfer): File[] {
+  const files: File[] = [];
+  for (let i = 0; i < dataTransfer.items.length; i++) {
+    const item = dataTransfer.items[i];
+    if (item.type.startsWith('image/')) {
+      const file = item.getAsFile();
+      if (file) files.push(file);
+    }
+  }
+  return files;
+}
+
 // ─── Command definitions ──────────────────────────────────────────────────────
 
 export interface SlashCommandItem {
@@ -358,10 +381,15 @@ export function SlashEditor({
     })
   );
 
+  // Ref-based image handler so paste/drop closures always see the latest editor
+  const imageHandlerRef = useRef<(file: File) => void>(() => {});
+
   const editor = useEditor({
     extensions: [
       StarterKit.configure({
         heading: { levels: [1, 2, 3] },
+        link: false,
+        underline: false,
       }),
       Link.configure({
         openOnClick: false,
@@ -384,47 +412,93 @@ export function SlashEditor({
     editorProps: {
       attributes: { class: 'focus:outline-none' },
       handleKeyDown: (_view, event) => {
-        // Ensure Enter works correctly after links/inline marks
         if (event.key === 'Enter' && !event.shiftKey) {
-          return false; // let TipTap handle it normally
+          return false;
         }
         return false;
+      },
+      handlePaste: (_view, event) => {
+        if (!enableImageUpload) return false;
+        const clipboardData = event.clipboardData;
+        if (!clipboardData) return false;
+        const imageFiles = extractImageFiles(clipboardData);
+        if (imageFiles.length === 0) return false;
+        event.preventDefault();
+        for (const file of imageFiles) {
+          imageHandlerRef.current(file);
+        }
+        return true;
+      },
+      handleDrop: (_view, event) => {
+        if (!enableImageUpload) return false;
+        const dataTransfer = event.dataTransfer;
+        if (!dataTransfer) return false;
+        const imageFiles = extractImageFiles(dataTransfer);
+        if (imageFiles.length === 0) return false;
+        event.preventDefault();
+        for (const file of imageFiles) {
+          imageHandlerRef.current(file);
+        }
+        return true;
       },
     },
   });
 
-  const handleImageFile = useCallback(async (e: React.ChangeEvent<HTMLInputElement>) => {
-    const file = e.target.files?.[0];
-    if (!file || !editor) return;
-    e.target.value = '';
+  // Image handler: base64-first strategy.
+  // 1. Convert to base64 immediately → insert into editor (always valid, always persists in saved HTML)
+  // 2. Try Supabase upload in background → if successful, swap base64 for the permanent URL
+  // This eliminates the race condition where auto-save captures a dead blob URL.
+  useEffect(() => {
+    imageHandlerRef.current = async (file: File) => {
+      if (!editor) return;
 
-    // Insert a temporary blob URL so the user sees the image immediately
-    const objUrl = URL.createObjectURL(file);
-    editor.chain().focus().setImage({ src: objUrl }).run();
+      // Step 1: Convert to base64 first — this is the durable source that will survive saves/reloads
+      let base64Src: string;
+      try {
+        base64Src = await fileToBase64(file);
+      } catch (err) {
+        log.error('image_base64_conversion_failed', { error: err instanceof Error ? err : undefined });
+        return;
+      }
 
-    try {
-      const permanentUrl = await uploadNoteImage(file);
-      // Walk the document to find the node with the blob URL and replace it
-      const { doc } = editor.state;
-      let replaced = false;
-      doc.descendants((node, pos) => {
-        if (replaced) return false;
-        if (node.type.name === 'resizableImage' && node.attrs.src === objUrl) {
-          editor.chain().focus()
-            .command(({ tr }) => {
-              tr.setNodeMarkup(pos, undefined, { ...node.attrs, src: permanentUrl });
-              return true;
-            })
-            .run();
-          replaced = true;
-          return false;
+      editor.chain().focus().setImage({ src: base64Src }).run();
+      log.info('image_inserted_as_base64', { size: file.size, type: file.type });
+
+      // Step 2: Try uploading to Supabase Storage in the background for a lighter permanent URL
+      try {
+        const permanentUrl = await uploadNoteImage(file);
+        // Replace base64 with the permanent URL (smaller HTML, CDN-served)
+        const { doc } = editor.state;
+        let replaced = false;
+        doc.descendants((node, pos) => {
+          if (replaced) return false;
+          if (node.type.name === 'resizableImage' && node.attrs.src === base64Src) {
+            editor.chain().focus()
+              .command(({ tr }) => {
+                tr.setNodeMarkup(pos, undefined, { ...node.attrs, src: permanentUrl });
+                return true;
+              })
+              .run();
+            replaced = true;
+            return false;
+          }
+        });
+        if (replaced) {
+          log.info('image_upgraded_to_permanent_url', { url: permanentUrl.substring(0, 80) });
         }
-      });
-      URL.revokeObjectURL(objUrl);
-    } catch (err) {
-      log.error('image_upload_failed', { error: err instanceof Error ? err : undefined });
-    }
+      } catch {
+        // Upload failed — base64 is already in the document, image works fine
+        log.info('image_keeping_base64', { reason: 'supabase_upload_failed' });
+      }
+    };
   }, [editor]);
+
+  const handleImageFile = useCallback((e: React.ChangeEvent<HTMLInputElement>) => {
+    const file = e.target.files?.[0];
+    if (!file) return;
+    e.target.value = '';
+    imageHandlerRef.current(file);
+  }, []);
 
   if (!editor) {
     return (

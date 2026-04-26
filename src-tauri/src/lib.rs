@@ -158,23 +158,26 @@ pub fn run() {
             let window = app.get_webview_window("main").unwrap();
             window.set_title("Wisprnote AI").ok();
 
-            // Spawn audio device monitor — emits events when mic/speaker changes
+            // Spawn audio device monitor — emits events when mic/speaker changes.
+            // Only forward actual default-device changes to the frontend.
+            // DeviceListChanged is ignored because our own aggregate device
+            // creation/destruction triggers it, causing a false-positive feedback loop.
             let monitor_handle = app.handle().clone();
             let (dev_tx, dev_rx) = std::sync::mpsc::channel();
             let _monitor = device_monitor::spawn_monitor(dev_tx);
             std::thread::spawn(move || {
                 while let Ok(change) = dev_rx.recv() {
-                    let event_name = match &change {
-                        device_monitor::DeviceChange::DefaultInputChanged => "audio-device-change",
-                        device_monitor::DeviceChange::DefaultOutputChanged => "audio-device-change",
-                        device_monitor::DeviceChange::DeviceListChanged => "audio-device-change",
-                    };
-                    let payload = match &change {
-                        device_monitor::DeviceChange::DefaultInputChanged => "input-changed",
-                        device_monitor::DeviceChange::DefaultOutputChanged => "output-changed",
-                        device_monitor::DeviceChange::DeviceListChanged => "device-list-changed",
-                    };
-                    let _ = monitor_handle.emit(event_name, payload);
+                    match &change {
+                        device_monitor::DeviceChange::DefaultInputChanged => {
+                            let _ = monitor_handle.emit("audio-device-change", "input-changed");
+                        }
+                        device_monitor::DeviceChange::DefaultOutputChanged => {
+                            let _ = monitor_handle.emit("audio-device-change", "output-changed");
+                        }
+                        device_monitor::DeviceChange::DeviceListChanged => {
+                            // Intentionally not forwarded — our aggregate devices trigger this
+                        }
+                    }
                 }
             });
 
