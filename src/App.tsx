@@ -126,6 +126,9 @@ import MainSidebar from './components/MainSidebar';
 import { ManualNotesList } from './components/ManualNotes/ManualNotesList';
 import { ManualNoteEditor } from './components/ManualNotes/ManualNoteEditor';
 import { logger } from './lib/logger';
+import { readKGLedger, markKGExtracted, markKGExtractedBatch, clearKGLedger, reconcileKGLedger } from './lib/kgLedger';
+import { clearArtifactCache } from './lib/kgArtifactCache';
+import { clearAllEmbedCaches } from './lib/knowledgeGraph.utils';
 
 const log = logger.scope('App');
 
@@ -1325,6 +1328,11 @@ export default function App() {
         }));
         setKgData(transformed);
         setKgBuilt(true);
+
+        // Populate ledger with all IDs that already have KG data in Supabase
+        const supabaseIds = new Set(data.map(e => e.task_id));
+        markKGExtractedBatch(Array.from(supabaseIds));
+        reconcileKGLedger(supabaseIds);
       }
     } catch (err) {
       log.error('fetch_knowledge_graph_failed', { error: err instanceof Error ? err : undefined });
@@ -1347,14 +1355,23 @@ export default function App() {
   useEffect(() => {
     if (history.length > 0 && kgBuilt && !isExtractingNewKG && !autoSyncRanRef.current) {
       const syncMissingMeetingsToKG = async () => {
+        const ledger = readKGLedger();
         const currentKgData = kgDataRef.current;
         const kgTaskIds = new Set(currentKgData.map(kg => kg.meetingId));
-        const missingTasks = history.filter(task => task.id && !kgTaskIds.has(task.id) && task.status === 'completed' && task.transcription && task.transcription.trim().length > 0);
+        // Skip meetings that are either in the KG data OR already in the ledger
+        const missingTasks = history.filter(task =>
+          task.id &&
+          !kgTaskIds.has(task.id) &&
+          !ledger.has(task.id) &&
+          task.status === 'completed' &&
+          task.transcription &&
+          task.transcription.trim().length > 0
+        );
         
         if (missingTasks.length === 0) return;
         
         autoSyncRanRef.current = true;
-        log.info('kg_auto_sync_started', { missingCount: missingTasks.length });
+        log.info('kg_auto_sync_started', { missingCount: missingTasks.length, ledgerSize: ledger.size });
         setIsExtractingNewKG(true);
         
         try {
@@ -1376,6 +1393,7 @@ export default function App() {
               };
               
               await saveKnowledgeGraphBatch([entryToSave]);
+              markKGExtracted(task.id!);
               setKgData(prevData => [...prevData, result]);
               
               if (i < missingTasks.length - 1) {
@@ -1399,9 +1417,12 @@ export default function App() {
     setIsLoadingKG(true);
     setSelectedNode(null);
 
+    // ── Force-clear all caches so we get a genuinely fresh rebuild ────────────
+    clearKGLedger();
+    await Promise.all([clearArtifactCache(), clearAllEmbedCaches()]);
+    log.info('kg_rebuild_caches_cleared');
+
     // ── Shared rate limiter + concurrent worker pool ─────────────────────────
-    // Free-tier Gemini = 15 RPM → 1 token every 4.2 s.
-    // JS is single-threaded so nextSlotAt++ is race-free across workers.
     const CONCURRENCY = 3;
     const SLOT_MS = 4200;
     let nextSlotAt = 0;
@@ -1439,6 +1460,11 @@ export default function App() {
     const alreadyDone = allCompleted
       .filter(t => processedIds.has(t.id!))
       .map(t => latestKgData.find((k: any) => k.meetingId === t.id)!);
+
+    // Re-populate ledger with meetings already persisted in Supabase
+    if (alreadyDone.length > 0) {
+      markKGExtractedBatch(alreadyDone.map(m => m.meetingId));
+    }
 
     // Seed UI immediately with what we already have so the graph stays visible
     const accumulated = [...alreadyDone];
@@ -1484,6 +1510,7 @@ export default function App() {
             action_items: result.actionItems || [],
             refs: result.references || [],
           });
+          markKGExtracted(task.id!);
         } catch (saveErr) {
           log.error('kg_checkpoint_save_failed', { filename: task.filename, error: saveErr instanceof Error ? saveErr : undefined });
         }

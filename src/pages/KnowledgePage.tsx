@@ -35,6 +35,7 @@ import {
   searchNodes,
   buildChatContext,
 } from '../lib/knowledgeGraph.utils';
+import { buildFingerprint, loadCachedArtifact, saveCachedArtifact } from '../lib/kgArtifactCache';
 
 interface KnowledgePageProps {
   kgData: any[];
@@ -111,18 +112,31 @@ export default function KnowledgePage({
     return kgData.map((m: any) => m.meetingId).sort().join(',');
   }, [kgData]);
 
-  // Embedding pipeline: runs once when kgData is available after extraction
-  // Re-runs if kgData changes (rebuild or new meeting auto-synced)
+  // Embedding pipeline: runs once when kgData is available after extraction.
+  // Checks IndexedDB artifact cache first — if fingerprint matches, hydrates
+  // instantly (zero API calls). Otherwise runs the full pipeline and caches result.
   useEffect(() => {
     if (!kgBuilt || kgData.length === 0 || isEmbedding) return;
-    // Skip if artifact already built from the same data
     if (kgArtifactRef.current && lastBuildKeyRef.current === kgDataKey) return;
 
     let cancelled = false;
     const run = async () => {
       setIsEmbedding(true);
       setEmbedProgress({ current: 0, total: 3 });
+
+      const fingerprint = buildFingerprint(kgData.map((m: any) => m.meetingId));
+
       try {
+        // Try IndexedDB artifact cache first — instant render, zero API calls
+        const cached = await loadCachedArtifact(fingerprint);
+        if (cached && !cancelled) {
+          kgArtifactRef.current = cached;
+          lastBuildKeyRef.current = kgDataKey;
+          log.info('artifact_cache_hit_render', { meetings: kgData.length });
+          return;
+        }
+
+        // Cache miss — run full pipeline
         const artifact = await buildKnowledgeGraphPipeline(
           kgData as MeetingRecord[],
           (current, total) => {
@@ -132,6 +146,10 @@ export default function KnowledgePage({
         if (!cancelled) {
           kgArtifactRef.current = artifact;
           lastBuildKeyRef.current = kgDataKey;
+          // Persist to IndexedDB so next load is instant
+          saveCachedArtifact(fingerprint, artifact).catch(err =>
+            log.warn('artifact_cache_save_failed', { error: err instanceof Error ? err : undefined })
+          );
         }
       } catch (err) {
         log.error('embedding_pipeline_failed', { error: err instanceof Error ? err : undefined });
