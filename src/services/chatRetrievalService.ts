@@ -10,6 +10,9 @@ import {
   embedQuery,
   type HybridResult,
 } from './turbopufferService';
+import { logger } from '../lib/logger';
+
+const log = logger.scope('ChatRetrieval');
 
 export interface MeetingDocument {
   meetingId: string;
@@ -190,7 +193,7 @@ async function retrieveViaHybrid(
     const msg = String(err?.message || err || '');
     const isNotFound = msg.includes('404') || msg.includes('not found');
     if (!isNotFound) {
-      console.warn('[chatRetrieval] Turbopuffer hybrid query failed, falling back to BM25:', err);
+      log.warn('hybrid_query_failed', { error: err instanceof Error ? err : undefined });
     }
     return null;
   }
@@ -394,7 +397,7 @@ export async function retrieveForManyMeetings(params: {
     } catch (err: any) {
       const msg = String(err?.message || err || '');
       if (!msg.includes('404') && !msg.includes('not found')) {
-        console.warn('[chatRetrieval] Cross-meeting Turbopuffer query failed, falling back:', err);
+        log.warn('cross_meeting_query_failed', { error: err instanceof Error ? err : undefined });
       }
     }
   }
@@ -663,7 +666,7 @@ export async function retrieveCrossMeeting(params: {
   } catch (err: any) {
     const msg = String(err?.message || err || '');
     if (!msg.includes('404') && !msg.includes('not found')) {
-      console.warn('[chatRetrieval] Cross-meeting Turbopuffer query failed:', err);
+      log.warn('cross_meeting_query_failed', { error: err instanceof Error ? err : undefined });
     }
     return null;
   }

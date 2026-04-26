@@ -1,5 +1,8 @@
 import React, { useState, useEffect } from 'react';
 import { motion } from 'motion/react';
+import { logger } from '../../lib/logger';
+
+const log = logger.scope('ManualNotesList');
 import { 
   FileText, Plus, Search, MoreHorizontal, 
   Trash2, Loader2, Calendar
@@ -26,7 +29,7 @@ export function ManualNotesList({ onSelectNote, onCreateNote }: ManualNotesListP
       const fetchedNotes = await getManualNotes();
       setNotes(fetchedNotes);
     } catch (error) {
-      console.error('Failed to fetch notes:', error);
+      log.error('fetch_notes_failed', { error: error instanceof Error ? error : undefined });
     } finally {
       setIsLoading(false);
     }
@@ -41,7 +44,7 @@ export function ManualNotesList({ onSelectNote, onCreateNote }: ManualNotesListP
       await deleteManualNote(id);
       setNotes(notes.filter(n => n.id !== id));
     } catch (error) {
-      console.error('Failed to delete note:', error);
+      log.error('delete_note_failed', { error: error instanceof Error ? error : undefined });
     } finally {
       setDeletingId(null);
     }

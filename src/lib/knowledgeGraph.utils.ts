@@ -1,3 +1,7 @@
+import { logger } from './logger';
+
+const log = logger.scope('KnowledgeGraph');
+
 // ============================================================
 // Piece 1 — Types
 // ============================================================
@@ -223,7 +227,7 @@ async function fetchWithRetry(
     lastResponse = response;
     if (attempt < maxRetries) {
       const delay = baseDelayMs * Math.pow(2, attempt) + Math.random() * 1000;
-      console.warn(`API returned ${response.status}, retrying in ${Math.round(delay)}ms (attempt ${attempt + 1}/${maxRetries})…`);
+      log.warn('api_retry', { status: response.status, delayMs: Math.round(delay), attempt: attempt + 1, maxRetries });
       await new Promise(r => setTimeout(r, delay));
     }
   }
@@ -247,7 +251,7 @@ export async function batchEmbed(
   });
 
   if (uncached.length === 0) return result;
-  console.log(`[batchEmbed] ${result.size} cache hits, ${uncached.length} API calls`);
+  log.debug('batch_embed', { cacheHits: result.size, apiCalls: uncached.length });
 
   for (let start = 0; start < uncached.length; start += EMBED_BATCH_SIZE) {
     const batch = uncached.slice(start, start + EMBED_BATCH_SIZE);
@@ -283,7 +287,7 @@ export async function batchEmbed(
 
       if (response.ok) {
         if (currentEmbedModel !== model) {
-          console.warn(`Embedding model switched: ${currentEmbedModel} → ${model}`);
+          log.warn('embedding_model_switched', { from: currentEmbedModel, to: model });
           currentEmbedModel = model;
         }
         break;
@@ -455,7 +459,7 @@ export async function extractContextualRelationships(
   // Return cached relationships if the meeting set is unchanged
   const fingerprint = kgData.map(m => m.meetingId).sort().join('|');
   if (_relCacheKey === fingerprint) {
-    console.log('[extractContextualRelationships] cache hit, skipping API call');
+    log.debug('relationships_cache_hit');
     return _relCacheValue;
   }
 
@@ -505,7 +509,7 @@ Return a JSON array of NEW relationship objects only. Each object must have exac
 Return ONLY the JSON array, no markdown fences, no explanation.
 If no new relationships are found, return an empty array [].`;
 
-    console.log(`[extractContextualRelationships] incremental: ${newMeetings.length} new meetings, ${_relCacheValue.length} cached relationships`);
+    log.info('relationships_incremental', { newMeetings: newMeetings.length, cached: _relCacheValue.length });
   } else {
     // Full extraction
     const meetingSummaries = kgData.map(buildMeetingSummary).join('\n---\n');
@@ -552,7 +556,7 @@ If no relationships are found, return an empty array [].`;
 
     if (!response.ok) {
       const body = await response.text();
-      console.warn(`Relationship extraction API error ${response.status}: ${body}`);
+      log.warn('relationship_extraction_api_error', { status: response.status, body: body.slice(0, 200) });
       return [];
     }
 
@@ -598,7 +602,7 @@ If no relationships are found, return an empty array [].`;
     saveRelCacheToStorage(fingerprint, merged);
     return merged;
   } catch (err) {
-    console.warn('Relationship extraction failed, continuing with embeddings only:', err);
+    log.warn('relationship_extraction_failed', { error: err instanceof Error ? err : undefined });
     return [];
   }
 }

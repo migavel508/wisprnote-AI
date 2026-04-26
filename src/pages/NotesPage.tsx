@@ -1,4 +1,7 @@
 import { useState, useEffect } from 'react';
+import { logger } from '../lib/logger';
+
+const log = logger.scope('NotesPage');
 import { motion, AnimatePresence } from 'framer-motion';
 import { BookOpen, Sparkles, Loader2, Check, RefreshCw, Image as ImageIcon } from 'lucide-react';
 import Markdown from 'react-markdown';
@@ -68,7 +71,7 @@ export default function NotesPage({ selectedTask, onNavigateToAssets, isLoading 
       setTitleGenerated(true);
       setTimeout(() => setTitleGenerated(false), 2000);
     } catch (error) {
-      console.error('Error generating title:', error);
+      log.error('generate_title_failed', { error: error instanceof Error ? error : undefined });
     } finally {
       setIsGeneratingTitle(false);
     }
@@ -94,7 +97,7 @@ export default function NotesPage({ selectedTask, onNavigateToAssets, isLoading 
       setSummaryRegenerated(true);
       setTimeout(() => setSummaryRegenerated(false), 2000);
     } catch (error) {
-      console.error('Error regenerating summary:', error);
+      log.error('regenerate_summary_failed', { error: error instanceof Error ? error : undefined });
     } finally {
       setIsRegeneratingSummary(false);
     }
@@ -118,7 +121,7 @@ export default function NotesPage({ selectedTask, onNavigateToAssets, isLoading 
         }
       }
     } catch (error) {
-      console.error('Error visualizing notes:', error);
+      log.error('visualize_notes_failed', { error: error instanceof Error ? error : undefined });
     } finally {
       setIsVisualizing(false);
     }
@@ -144,7 +147,7 @@ export default function NotesPage({ selectedTask, onNavigateToAssets, isLoading 
       setNotesRegenerated(true);
       setTimeout(() => setNotesRegenerated(false), 2000);
     } catch (error) {
-      console.error('Error regenerating notes:', error);
+      log.error('regenerate_notes_failed', { error: error instanceof Error ? error : undefined });
     } finally {
       setIsRegeneratingNotes(false);
     }

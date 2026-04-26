@@ -1,5 +1,8 @@
 import { Turbopuffer } from '@turbopuffer/turbopuffer';
 import { fetch as tauriFetch } from '@tauri-apps/plugin-http';
+import { logger } from '../lib/logger';
+
+const log = logger.scope('Turbopuffer');
 
 const NAMESPACE = 'lumina-meetings';
 const RRF_K = 60;
@@ -84,9 +87,7 @@ export async function upsertMeetingChunks(
     });
   }
 
-  console.log(
-    `[Turbopuffer] Indexed ${chunks.length} chunks for meeting "${meetingTitle}" (${meetingId})`,
-  );
+  log.info('indexed_chunks', { chunkCount: chunks.length, meetingTitle, meetingId });
 }
 
 export async function deleteMeetingChunks(meetingId: string): Promise<void> {
@@ -95,9 +96,9 @@ export async function deleteMeetingChunks(meetingId: string): Promise<void> {
     await ns.write({
       delete_by_filter: ['meeting_id', 'Eq', meetingId],
     });
-    console.log(`[Turbopuffer] Deleted chunks for meeting ${meetingId}`);
+    log.info('deleted_chunks', { meetingId });
   } catch (err) {
-    console.warn(`[Turbopuffer] Failed to delete chunks for ${meetingId}:`, err);
+    log.warn('delete_chunks_failed', { meetingId, error: err instanceof Error ? err : undefined });
   }
 }
 
@@ -301,11 +302,11 @@ export async function backfillExistingMeetings(
     m => m.id && m.transcription?.trim() && !ledger.has(m.id),
   );
   if (!eligible.length) {
-    console.log(`[Turbopuffer] All ${meetings.length} meetings already indexed.`);
+    log.info('backfill_skipped', { totalMeetings: meetings.length });
     return;
   }
 
-  console.log(`[Turbopuffer] Backfilling ${eligible.length} new meetings (${meetings.length - eligible.length} already indexed)...`);
+  log.info('backfill_started', { eligible: eligible.length, alreadyIndexed: meetings.length - eligible.length });
 
   let indexed = 0;
   for (const meeting of eligible) {
@@ -313,9 +314,9 @@ export async function backfillExistingMeetings(
       await indexMeetingTranscription(meeting.id, meeting.title, meeting.transcription);
       indexed++;
     } catch (err) {
-      console.warn(`[Turbopuffer] Backfill failed for "${meeting.title}":`, err);
+      log.warn('backfill_meeting_failed', { title: meeting.title, error: err instanceof Error ? err : undefined });
     }
   }
 
-  console.log(`[Turbopuffer] Backfill complete: ${indexed}/${eligible.length} new meetings indexed.`);
+  log.info('backfill_complete', { indexed, total: eligible.length });
 }

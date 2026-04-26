@@ -1,5 +1,8 @@
 import React, { useState, useRef, useEffect } from 'react';
 import { Loader2, Check } from 'lucide-react';
+import { logger } from '../../lib/logger';
+
+const log = logger.scope('MeetingNoteTab');
 import { updatePersonalNote } from '../../services/supabaseService';
 import { SlashEditor } from './SlashEditor';
 
@@ -29,7 +32,7 @@ export function MeetingNoteTab({ taskId, initialContent }: MeetingNoteTabProps) 
         setSaveStatus('saved');
         setTimeout(() => setSaveStatus('idle'), 2000);
       } catch (err) {
-        console.error('Failed to save meeting note', err);
+        log.error('save_meeting_note_failed', { error: err instanceof Error ? err : undefined });
         setSaveStatus('idle');
       }
     }, 1500);

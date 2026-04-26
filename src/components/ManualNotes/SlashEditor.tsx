@@ -1,5 +1,8 @@
 import React, { useState, useRef, useEffect, useCallback } from 'react';
 import { useEditor, EditorContent, Extension } from '@tiptap/react';
+import { logger } from '../../lib/logger';
+
+const log = logger.scope('SlashEditor');
 import StarterKit from '@tiptap/starter-kit';
 import { ResizableImage } from './ResizableImage';
 import Placeholder from '@tiptap/extension-placeholder';
@@ -419,7 +422,7 @@ export function SlashEditor({
       });
       URL.revokeObjectURL(objUrl);
     } catch (err) {
-      console.error('Image upload failed, keeping local preview:', err);
+      log.error('image_upload_failed', { error: err instanceof Error ? err : undefined });
     }
   }, [editor]);
 

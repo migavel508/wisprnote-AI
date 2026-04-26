@@ -1,5 +1,8 @@
 import React, { useState, useEffect, useCallback } from 'react';
 import { motion, AnimatePresence } from 'motion/react';
+import { logger } from '../lib/logger';
+
+const log = logger.scope('AudioDevicesPage');
 import {
   Mic,
   Volume2,
@@ -104,7 +107,7 @@ export default function AudioDevicesPage({ isRecording, currentInputDevice, devi
       setDefaultInput(defInput);
       setDefaultOutput(defOutput);
     } catch (e) {
-      console.error('[AudioDevicesPage] Failed to refresh devices:', e);
+      log.error('refresh_devices_failed', { error: e instanceof Error ? e : undefined });
     } finally {
       setIsLoading(false);
     }

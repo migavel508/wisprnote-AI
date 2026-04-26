@@ -125,6 +125,9 @@ import AudioDevicesPage from './pages/AudioDevicesPage';
 import MainSidebar from './components/MainSidebar';
 import { ManualNotesList } from './components/ManualNotes/ManualNotesList';
 import { ManualNoteEditor } from './components/ManualNotes/ManualNoteEditor';
+import { logger } from './lib/logger';
+
+const log = logger.scope('App');
 
 declare global {
   interface Window {
@@ -173,6 +176,8 @@ interface BatchStatus extends AudioBatch {
   result?: string;
   error?: string;
 }
+
+log.info('app_loaded', { timestamp: new Date().toISOString() });
 
 export default function App() {
   const navigate = useNavigate();
@@ -454,7 +459,7 @@ export default function App() {
           }
         }
       } catch (syncErr) {
-        console.error('Failed to sync pending tasks:', syncErr);
+        log.error('sync_pending_tasks_failed', { error: syncErr instanceof Error ? syncErr : undefined });
       }
       
       // If we were processing when we went offline (or hit a network failure), auto-resume
@@ -463,7 +468,7 @@ export default function App() {
         try {
           const progress = await progressStorage.getProgress(currentProgressIdRef.current);
           if (progress && progress.completedBatches < progress.totalBatches) {
-            console.log('Network reconnected - auto-resuming processing');
+            log.info('network_reconnected_resuming');
             if (progress.stage === 'realtime-postprocess') {
               await processRealtimeTranscript(progress.transcription || '', progress);
             } else {
@@ -471,7 +476,7 @@ export default function App() {
             }
           }
         } catch (err) {
-          console.error('Failed to auto-resume:', err);
+          log.error('auto_resume_failed', { error: err instanceof Error ? err : undefined });
         } finally {
           setShowReconnectingMessage(false);
           setWasOffline(false);
@@ -512,7 +517,7 @@ export default function App() {
           setShowRecoveryPrompt(true);
         }
       } catch (err) {
-        console.error('Failed to check recovery:', err);
+        log.error('check_recovery_failed', { error: err instanceof Error ? err : undefined });
       }
     };
     if (session) {
@@ -542,7 +547,7 @@ export default function App() {
       const agentAssets = data.filter((a: GeneratedAsset) => a.type === 'email' || a.type === 'wiki');
       setAgentAssetHistory(agentAssets);
     } catch (err) {
-      console.error('Failed to fetch assets:', err);
+      log.error('fetch_assets_failed', { error: err instanceof Error ? err : undefined });
     }
   };
 
@@ -582,7 +587,7 @@ export default function App() {
         setAllMeetingsChatMessages(messages);
       }
     } catch (err) {
-      console.error('Failed to fetch chat history:', err);
+      log.error('fetch_chat_history_failed', { error: err instanceof Error ? err : undefined });
       setChatMessages([]);
     }
   };
@@ -666,19 +671,17 @@ export default function App() {
 
       // Listen for device changes — refresh current device info
       unlistenChange = await listenForDeviceChanges(async (changeType) => {
-        console.log('[audio-device] change detected:', changeType);
+        log.info('audio_device_change', { changeType });
         const newDevice = await getDefaultInput();
         if (newDevice) {
           setCurrentInputDevice(newDevice.name);
-          console.log('[audio-device] new default input:', newDevice.name,
-            '| transport:', newDevice.transport_type,
-            '| headphone:', newDevice.is_headphone);
+          log.info('audio_device_new_default_input', { name: newDevice.name, transport: newDevice.transport_type, isHeadphone: newDevice.is_headphone });
         }
       });
 
       // Listen for device restart events (emitted when recording auto-restarts)
       unlistenRestart = await listenForDeviceRestart(() => {
-        console.log('[audio-device] recording restarting due to device change');
+        log.info('audio_device_recording_restart');
         setDeviceRestartNotice(true);
         setTimeout(() => setDeviceRestartNotice(false), 3000);
       });
@@ -722,7 +725,7 @@ export default function App() {
       };
       recorder.start(1000);
     } catch (err) {
-      console.warn('Realtime backup capture unavailable:', err);
+      log.warn('realtime_backup_unavailable', { error: err instanceof Error ? err : undefined });
       realtimeBackupRecorderRef.current = null;
       realtimeBackupStreamRef.current = null;
       realtimeBackupChunksRef.current = [];
@@ -898,7 +901,7 @@ export default function App() {
           setRecordingTime(prev => prev + 1);
         }, 1000);
       } catch (err: any) {
-        console.error('Native recording error:', err);
+        log.error('native_recording_error', { error: err instanceof Error ? err : undefined });
         setError(err.message || 'Failed to start system audio recording.');
       }
     } else if (desktopRecordingMode === 'realtime') {
@@ -934,7 +937,7 @@ export default function App() {
           setRecordingTime(prev => prev + 1);
         }, 1000);
       } catch (err: any) {
-        console.error('Realtime recording error:', err);
+        log.error('realtime_recording_error', { error: err instanceof Error ? err : undefined });
         if (unlistenRef.current) { unlistenRef.current(); unlistenRef.current = null; }
         realtimeEngineActiveRef.current = false;
         setError(err.message || 'Failed to start integrated real-time recording.');
@@ -971,7 +974,7 @@ export default function App() {
         }, 1000);
 
       } catch (err) {
-        console.error('Error accessing microphone:', err);
+        log.error('microphone_access_failed', { error: err instanceof Error ? err : undefined });
         setError('Could not access microphone. Please check permissions.');
       }
     }
@@ -1002,7 +1005,7 @@ export default function App() {
         return;
       }
     } catch (err: any) {
-      console.error('Pause recording error:', err);
+      log.error('pause_recording_error', { error: err instanceof Error ? err : undefined });
       setError(err.message || 'Failed to pause recording.');
       // Roll back paused UI state if pause fails.
       setIsPaused(false);
@@ -1047,7 +1050,7 @@ export default function App() {
         setRecordingTime(prev => prev + 1);
       }, 1000);
     } catch (err: any) {
-      console.error('Resume recording error:', err);
+      log.error('resume_recording_error', { error: err instanceof Error ? err : undefined });
       setError(err.message || 'Failed to resume recording.');
       // Roll back resumed UI state if resume fails.
       setIsPaused(true);
@@ -1078,7 +1081,7 @@ export default function App() {
           setError('No audio captured.');
         }
       } catch (err: any) {
-        console.error('Stop recording error:', err);
+        log.error('stop_recording_error', { error: err instanceof Error ? err : undefined });
         setError(err.message || 'Failed to stop recording.');
         setIsRecording(false);
         setIsPaused(false);
@@ -1112,7 +1115,7 @@ export default function App() {
         pausedRealtimeTranscriptRef.current = [];
         realtimeEngineActiveRef.current = false;
       } catch (err: any) {
-        console.error('Stop realtime error:', err);
+        log.error('stop_realtime_error', { error: err instanceof Error ? err : undefined });
         isRealtimePausedRef.current = false;
         if (unlistenRef.current) { unlistenRef.current(); unlistenRef.current = null; }
         setIsRecording(false);
@@ -1269,14 +1272,14 @@ export default function App() {
               const filtered = prevData.filter(d => d.meetingId !== result.meetingId);
               return [...filtered, result];
             });
-            console.log('Auto-extracted KG for realtime meeting');
+            log.info('kg_auto_extracted_realtime');
           })
-          .catch(err => console.error('Background KG extraction failed:', err))
+          .catch(err => log.error('kg_background_extraction_failed', { error: err instanceof Error ? err : undefined }))
           .finally(() => setIsExtractingNewKG(false));
 
         indexMeetingTranscription(savedTask.id, savedTask.filename, savedTask.transcription)
-          .then(() => console.log('Turbopuffer indexing complete for realtime meeting'))
-          .catch(err => console.warn('Background Turbopuffer indexing failed:', err));
+          .then(() => log.info('turbopuffer_indexing_complete_realtime'))
+          .catch(err => log.warn('turbopuffer_indexing_failed', { error: err instanceof Error ? err : undefined }));
       }
 
       setHistory(prev => [savedTask, ...prev.filter(t => t.id !== savedTask.id)]);
@@ -1324,7 +1327,7 @@ export default function App() {
         setKgBuilt(true);
       }
     } catch (err) {
-      console.error('Failed to fetch knowledge graph:', err);
+      log.error('fetch_knowledge_graph_failed', { error: err instanceof Error ? err : undefined });
     }
   };
 
@@ -1351,13 +1354,13 @@ export default function App() {
         if (missingTasks.length === 0) return;
         
         autoSyncRanRef.current = true;
-        console.log(`Found ${missingTasks.length} meetings missing from Knowledge Graph. Starting auto-sync...`);
+        log.info('kg_auto_sync_started', { missingCount: missingTasks.length });
         setIsExtractingNewKG(true);
         
         try {
           for (let i = 0; i < missingTasks.length; i++) {
             const task = missingTasks[i];
-            console.log(`Auto-extracting KG for: ${task.filename}`);
+            log.info('kg_auto_extracting', { filename: task.filename });
             
             try {
               const result = await extractKnowledgeGraph(task.id!, task.filename, task.transcription);
@@ -1379,7 +1382,7 @@ export default function App() {
                 await new Promise(resolve => setTimeout(resolve, 5000));
               }
             } catch (err) {
-              console.error(`Failed to auto-extract KG for ${task.filename}:`, err);
+              log.error('kg_auto_extract_failed', { filename: task.filename, error: err instanceof Error ? err : undefined });
             }
           }
         } finally {
@@ -1443,7 +1446,7 @@ export default function App() {
     setKgBuilt(alreadyDone.length > 0);
     setKgProgress({ current: 0, total: toExtract.length });
 
-    console.log(`KG rebuild: ${alreadyDone.length} cached, ${toExtract.length} to extract`);
+    log.info('kg_rebuild_started', { cached: alreadyDone.length, toExtract: toExtract.length });
 
     // Work-stealing queue: workers grab the next index atomically (safe in JS)
     let qi = 0;
@@ -1463,7 +1466,7 @@ export default function App() {
           try {
             result = await extractKnowledgeGraph(task.id!, task.filename, task.transcription);
           } catch (err) {
-            console.error(`KG extraction failed for "${task.filename}":`, err);
+            log.error('kg_extraction_failed', { filename: task.filename, error: err instanceof Error ? err : undefined });
             result = { meetingId: task.id!, meetingTitle: task.filename, topics: [], decisions: [], people: [], actionItems: [], references: [] };
           }
         } else {
@@ -1482,7 +1485,7 @@ export default function App() {
             refs: result.references || [],
           });
         } catch (saveErr) {
-          console.error(`Checkpoint save failed for "${task.filename}":`, saveErr);
+          log.error('kg_checkpoint_save_failed', { filename: task.filename, error: saveErr instanceof Error ? saveErr : undefined });
         }
 
         accumulated.push(result);
@@ -1889,7 +1892,7 @@ export default function App() {
       setAgentAssetHistory([asset, ...agentAssetHistory]);
       setSelectedAgentAsset(asset);
     } catch (err) {
-      console.error('Agent error:', err);
+      log.error('agent_error', { error: err instanceof Error ? err : undefined });
       setError('Agent encountered an error processing your request.');
     } finally {
       setIsGeneratingAsset(false);
@@ -2066,7 +2069,7 @@ export default function App() {
           role: 'user',
           text: userInput,
           thread_id: ALL_MEETINGS_THREAD_ID,
-        }).catch(err => console.warn('Failed to persist all-meetings user msg:', err));
+        }).catch(err => log.warn('persist_all_meetings_user_msg_failed', { error: err instanceof Error ? err : undefined }));
       }
 
       const msgHistory = chatMessages.map(m => ({
@@ -2182,7 +2185,7 @@ export default function App() {
       } else {
         // --- Many meetings: single cross-meeting Turbopuffer query ---
         updateStep('search', 'running');
-        console.log(`[Agent] Multi-meeting path: isBroad=${plan.isBroad}, intent="${plan.intent}", ${allMeetings.length} meetings`);
+        log.debug('agent_multi_meeting_path', { isBroad: plan.isBroad, intent: plan.intent, meetingCount: allMeetings.length });
 
         const topK = plan.isBroad ? 50 : 20;
         const meetingTitleMap = new Map(allMeetings.map(m => [m.meetingId, m.title]));
@@ -2206,7 +2209,7 @@ export default function App() {
 
         if (crossResult && crossResult.evidence.length > 0) {
           const evidenceMeetingCount = crossResult.meetingGroups.length;
-          console.log(`[Agent] Turbopuffer returned ${crossResult.evidence.length} chunks from ${evidenceMeetingCount} meetings, covering ${crossResult.coveredMeetingIds.length} total`);
+          log.debug('agent_turbopuffer_result', { chunks: crossResult.evidence.length, meetingGroups: evidenceMeetingCount, covered: crossResult.coveredMeetingIds.length });
           contextForSynthesis = crossResult.context;
           coveredCount = crossResult.coveredMeetingIds.length;
           coveredIds = crossResult.coveredMeetingIds;
@@ -2225,7 +2228,7 @@ export default function App() {
               : `Found evidence in ${evidenceMeetingCount} meetings`
           );
         } else {
-          console.log(`[Agent] Turbopuffer returned null/empty, falling back to BM25 for ${allMeetings.length} meetings (broad=${plan.isBroad})`);
+          log.debug('agent_turbopuffer_fallback', { meetingCount: allMeetings.length, isBroad: plan.isBroad });
           updateStep('search', 'done', `Using summaries from ${allMeetings.length} meetings`);
 
           const fallbackResult = await retrieveForManyMeetings({
@@ -2314,7 +2317,7 @@ export default function App() {
           text: response,
           thread_id: ALL_MEETINGS_THREAD_ID,
           ...chatSaveMeta,
-        }).catch(err => console.warn('Failed to persist all-meetings model msg:', err));
+        }).catch(err => log.warn('persist_all_meetings_model_msg_failed', { error: err instanceof Error ? err : undefined }));
       } else if (selectedTask && selectedTask.id) {
         await saveChatMessage({
           task_id: selectedTask.id,
@@ -2325,7 +2328,7 @@ export default function App() {
         });
       }
     } catch (err) {
-      console.error('Chat error:', err);
+      log.error('chat_error', { error: err instanceof Error ? err : undefined });
       setChatMessages(prev => {
         const cleaned = prev.filter(m => !(m.role === 'model' && m.agentStatus && m.agentStatus !== 'done'));
         return [...cleaned, { role: 'model', text: 'Sorry, I encountered an error while processing your request.' }];
@@ -2364,7 +2367,7 @@ export default function App() {
         ]);
       }
     } catch (err) {
-      console.error('Image generation error:', err);
+      log.error('image_generation_error', { error: err instanceof Error ? err : undefined });
       setChatMessages(prev => [
         ...prev.slice(0, -1), 
         { role: 'model', text: 'Error generating visualization.' }
@@ -2384,9 +2387,9 @@ export default function App() {
         data
           .filter(t => t.id && t.status === 'completed' && t.transcription?.trim())
           .map(t => ({ id: t.id!, title: t.filename || 'Untitled', transcription: t.transcription! }))
-      ).catch(err => console.warn('Turbopuffer backfill error:', err));
+      ).catch(err => log.warn('turbopuffer_backfill_error', { error: err instanceof Error ? err : undefined }));
     } catch (err) {
-      console.error('Failed to fetch history:', err);
+      log.error('fetch_history_failed', { error: err instanceof Error ? err : undefined });
     } finally {
       setIsLoadingHistory(false);
     }
@@ -2518,7 +2521,7 @@ export default function App() {
           }]);
 
         } catch (fileApiError: any) {
-          console.warn('File API failed, falling back to batch processing:', fileApiError);
+          log.warn('file_api_fallback', { error: fileApiError instanceof Error ? fileApiError : undefined });
           // Fall through to batch processing
           fullTranscription = '';
         }
@@ -2759,14 +2762,14 @@ export default function App() {
               const filtered = prevData.filter(d => d.meetingId !== result.meetingId);
               return [...filtered, result];
             });
-            console.log('Automatically extracted and saved knowledge graph for new meeting');
+            log.info('kg_auto_extracted_upload');
           })
-          .catch(err => console.error('Background KG extraction failed:', err))
+          .catch(err => log.error('kg_background_extraction_failed', { error: err instanceof Error ? err : undefined }))
           .finally(() => setIsExtractingNewKG(false));
 
         indexMeetingTranscription(savedTask.id, savedTask.filename, savedTask.transcription)
-          .then(() => console.log('Turbopuffer indexing complete for uploaded meeting'))
-          .catch(err => console.warn('Background Turbopuffer indexing failed:', err));
+          .then(() => log.info('turbopuffer_indexing_complete_upload'))
+          .catch(err => log.warn('turbopuffer_indexing_failed', { error: err instanceof Error ? err : undefined }));
       }
 
       setHistory(prev => [savedTask, ...prev.filter(t => t.id !== savedTask.id)]);

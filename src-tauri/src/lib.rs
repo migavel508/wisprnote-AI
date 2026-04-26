@@ -6,6 +6,7 @@ use std::sync::Mutex;
 mod audio_device;
 mod deepgram_transcriber;
 mod device_monitor;
+mod logger;
 mod permissions;
 mod system_audio;
 use system_audio::SystemAudioRecorder;
@@ -247,7 +248,8 @@ pub fn run() {
             check_permissions,
             request_microphone_permission,
             open_screen_recording_settings,
-            open_microphone_settings
+            open_microphone_settings,
+            logger::write_logs
         ])
         .run(tauri::generate_context!())
         .expect("error while running Wisprnote AI");
