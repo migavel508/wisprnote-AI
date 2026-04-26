@@ -1,4 +1,5 @@
 import { logger } from './logger';
+import { loadEmbedCacheFromIDB, saveEmbedCacheToIDB, clearEmbedCacheIDB } from './kgEmbedCache';
 
 const log = logger.scope('KnowledgeGraph');
 
@@ -202,8 +203,11 @@ function saveRelCacheToStorage(key: string, value: ExtractedRelationship[]) {
 
 // ── Module-level embedding cache ─────────────────────────────────────────────
 // Key: the exact text being embedded → Value: embedding vector.
-// Hydrated from localStorage on module load; persisted after each batch.
+// L1: in-memory Map (instant). Hydrated from localStorage on module load.
+// L2: IndexedDB (durable, unlimited). Hydrated lazily on first batchEmbed call.
+// L3: Gemini API (only for genuinely new items).
 const _embedCache = loadEmbedCacheFromStorage();
+let _idbHydrated = false;
 
 // ── Module-level relationship cache ──────────────────────────────────────────
 // Key: sorted meetingId fingerprint. Invalidated only when the meeting set changes.
@@ -239,6 +243,26 @@ export async function batchEmbed(
 ): Promise<Map<string, EmbeddingVector>> {
   const apiKey = getApiKey();
   const result = new Map<string, EmbeddingVector>();
+
+  // Hydrate L1 from L2 (IndexedDB) on first call — one-time async load
+  if (!_idbHydrated) {
+    _idbHydrated = true;
+    try {
+      const idbEntries = await loadEmbedCacheFromIDB();
+      let backfilled = 0;
+      for (const [text, vector] of idbEntries) {
+        if (!_embedCache.has(text)) {
+          _embedCache.set(text, vector);
+          backfilled++;
+        }
+      }
+      if (backfilled > 0) {
+        log.info('idb_embed_backfill', { backfilled, totalL1: _embedCache.size });
+      }
+    } catch (err) {
+      log.warn('idb_embed_hydrate_failed', { error: err instanceof Error ? err : undefined });
+    }
+  }
 
   // Serve cache hits immediately — no API call needed
   const uncached = items.filter(item => {
@@ -318,8 +342,18 @@ export async function batchEmbed(
     }
   }
 
-  // Persist to localStorage so embeddings survive reloads
+  // Persist to localStorage (L1 cold tier) so embeddings survive reloads
   saveEmbedCacheToStorage(_embedCache);
+
+  // Persist new entries to IndexedDB (L2) — durable, unlimited storage
+  const newIdbEntries = new Map<string, number[]>();
+  for (const item of uncached) {
+    const vec = _embedCache.get(item.text);
+    if (vec) newIdbEntries.set(item.text, vec);
+  }
+  saveEmbedCacheToIDB(newIdbEntries).catch(err =>
+    log.warn('idb_embed_persist_failed', { error: err instanceof Error ? err : undefined })
+  );
 
   return result;
 }
@@ -1130,4 +1164,18 @@ export function buildChatContext(
   return `You are a helpful assistant answering questions about the user's meeting knowledge graph. Use the structured data below. Be concise.
 
 ${context}`;
+}
+
+/**
+ * Clear all embedding caches (L1 memory + localStorage + L2 IndexedDB)
+ * and the relationship cache. Used when a full forced rebuild is requested.
+ */
+export async function clearAllEmbedCaches(): Promise<void> {
+  _embedCache.clear();
+  _idbHydrated = false;
+  _relCacheKey = '';
+  _relCacheValue = [];
+  try { localStorage.removeItem(LS_EMBED_KEY); } catch { /* ok */ }
+  try { localStorage.removeItem(LS_REL_KEY); } catch { /* ok */ }
+  await clearEmbedCacheIDB();
 }
