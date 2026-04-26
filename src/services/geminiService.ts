@@ -1,5 +1,8 @@
 import { GoogleGenAI, GenerateContentResponse, Type } from "@google/genai";
 import { AudioBatch, blobToBase64 } from "./audioService";
+import { logger } from '../lib/logger';
+
+const log = logger.scope('Gemini');
 
 const ai = new GoogleGenAI({ apiKey: process.env.GEMINI_API_KEY || "" });
 
@@ -28,7 +31,7 @@ async function withRetry<T>(fn: () => Promise<T>, maxRetries = 5, baseDelayMs = 
       if (!retryable) throw error;
       
       const delay = baseDelayMs * Math.pow(2, attempt) + Math.random() * 1000;
-      console.warn(`[Gemini] Retry ${attempt + 1}/${maxRetries} in ${Math.round(delay)}ms — (Status: ${status}) ${error.message}`);
+      log.warn('retry_attempt', { attempt: attempt + 1, maxRetries, delayMs: Math.round(delay), status, message: error.message });
       await new Promise(r => setTimeout(r, delay));
     }
   }
@@ -57,7 +60,7 @@ async function generateWithFallback(
         retries
       );
     } catch (error: any) {
-      console.warn(`Model ${model} exhausted retries:`, error.message);
+      log.warn('model_retries_exhausted', { model, message: error.message });
       lastError = error;
       // The Google Gen AI SDK can nest the status in different ways
       const status: number = error.status ?? error.statusCode ?? error?.error?.code ?? error?.code ?? 0;
@@ -94,7 +97,7 @@ export async function processAudioBatch(batch: AudioBatch, prompt: string): Prom
       }
     }
   } catch (e) {
-    console.warn("Failed to get user session for prompt", e);
+    log.warn('get_user_session_failed', { error: e instanceof Error ? e : undefined });
   }
   
   // Calculate overlap info for the prompt
@@ -263,7 +266,7 @@ export async function transcribeViaFileAPI(
       }
     }
   } catch (e) {
-    console.warn("Failed to get user session for prompt", e);
+    log.warn('get_user_session_failed', { error: e instanceof Error ? e : undefined });
   }
 
   const transcriptionPrompt = `You are a professional transcription service. Your ONLY task is to transcribe ALL spoken words in this audio accurately and completely.
@@ -807,7 +810,7 @@ ${notes}`;
     }
     return null;
   } catch (error) {
-    console.error('Error generating visualization:', error);
+    log.error('generate_visualization_failed', { error: error instanceof Error ? error : undefined });
     return null;
   }
 }
@@ -874,7 +877,7 @@ export async function generateEmailContent(text: string): Promise<any> {
   try {
     return JSON.parse(response.text || "{}");
   } catch (e) {
-    console.error("Failed to parse Email JSON:", e);
+    log.error('parse_email_json_failed', { error: e instanceof Error ? e : undefined });
     return { subject: "Follow-up", greeting: "Hi Team,", meetingObjective: "", keyDecisions: [], discussionPoints: [], tasks: [], nextMeeting: "", closing: "Best regards" };
   }
 }
@@ -904,7 +907,7 @@ export async function extractKnowledgeGraph(meetingId: string, meetingTitle: str
   const geminiApiKey = (import.meta as any).env?.VITE_GEMINI_API_KEY || (import.meta as any).env?.GEMINI_API_KEY || process.env.GEMINI_API_KEY;
   
   if (!geminiApiKey) {
-    console.error('Gemini API key is not configured');
+    log.error('api_key_missing');
     return { meetingId, meetingTitle, topics: [], decisions: [], people: [], actionItems: [], references: [] };
   }
   
@@ -957,13 +960,13 @@ Transcription: ${cleanTranscriptionForKG(text)}`;
         if (response.status !== 503 && response.status !== 429) break;
         if (attempt < MAX_RETRIES) {
           const delay = BASE_DELAY * Math.pow(2, attempt) + Math.random() * 1000;
-          console.warn(`KG extraction ${model} returned ${response.status}, retrying in ${Math.round(delay)}ms (${attempt + 1}/${MAX_RETRIES})…`);
+          log.warn('kg_extraction_retry', { model, status: response.status, delayMs: Math.round(delay), attempt: attempt + 1 });
           await new Promise(r => setTimeout(r, delay));
         }
       }
       if (succeeded) break;
       const errorText = await response!.text();
-      console.warn(`KG extraction model ${model} failed (${response!.status}):`, errorText);
+      log.warn('kg_extraction_model_failed', { model, status: response!.status, body: errorText.slice(0, 200) });
     }
 
     if (!response || !response.ok) {
@@ -1015,7 +1018,7 @@ Transcription: ${cleanTranscriptionForKG(text)}`;
         parsed = JSON.parse(repairJson(cleanContent));
       } catch {
         // Last resort: extract what we can manually
-        console.warn("JSON repair failed, extracting partial data");
+        log.warn('json_repair_failed');
         parsed = {
           topics: [],
           decisions: [],
@@ -1044,7 +1047,7 @@ Transcription: ${cleanTranscriptionForKG(text)}`;
     
     return { meetingId, meetingTitle, ...parsed };
   } catch (e) {
-    console.error("Failed to extract KG via Gemini API:", e);
+    log.error('kg_extraction_failed', { error: e instanceof Error ? e : undefined });
     return { meetingId, meetingTitle, topics: [], decisions: [], people: [], actionItems: [], references: [] };
   }
 }
@@ -1093,7 +1096,7 @@ export async function generateWikiContent(text: string, style: 'MECE' | 'PRD'): 
   try {
     return JSON.parse(response.text || "{}");
   } catch (e) {
-    console.error("Failed to parse Wiki JSON:", e);
+    log.error('parse_wiki_json_failed', { error: e instanceof Error ? e : undefined });
     return { title: "Wiki Document", subtitle: "", date: new Date().toLocaleDateString(), sections: [], conclusion: "" };
   }
 }
@@ -1136,7 +1139,7 @@ export async function generatePodcastScript(text: string): Promise<any> {
   try {
     return JSON.parse(response.text || "{}");
   } catch (e) {
-    console.error("Failed to parse Podcast JSON:", e);
+    log.error('parse_podcast_json_failed', { error: e instanceof Error ? e : undefined });
     return { title: "Meeting Breakdown", dialogue: [{ speaker: "Alex", text: "Welcome to the podcast! We had some issues processing the notes, but we'll try again later." }] };
   }
 }
@@ -1188,7 +1191,7 @@ export async function chatWithPodcast(context: string, currentDialogue: any[], u
   try {
     return JSON.parse(response.text || "{}").dialogue || [];
   } catch (e) {
-    console.error("Failed to parse Podcast Chat JSON:", e);
+    log.error('parse_podcast_chat_json_failed', { error: e instanceof Error ? e : undefined });
     return [{ speaker: "Alex", text: "Wow, great point from our guest!" }, { speaker: "Sarah", text: "Absolutely, thanks for joining us." }];
   }
 }

@@ -1,4 +1,7 @@
 import { useState, useMemo, useEffect, useRef, useCallback } from 'react';
+import { logger } from '../lib/logger';
+
+const log = logger.scope('HistoryPage');
 import { motion, AnimatePresence } from 'framer-motion';
 import { FileText, Search, ChevronRight, X, Loader2, Sparkles, Calendar, Clock } from 'lucide-react';
 import { TaskHistory, TaskMetadata, getTasksLightweight, getTaskById, updateTaskTitle } from '../services/supabaseService';
@@ -105,7 +108,7 @@ export default function HistoryPage({ history, onSelectTask, isLoading = false, 
       // Update cache with merged task
       taskCache.set(task.id, mergedTask);
     } catch (error) {
-      console.error('Error generating title:', error);
+      log.error('generate_title_failed', { error: error instanceof Error ? error : undefined });
     } finally {
       setGeneratingTitleId(null);
     }
@@ -176,7 +179,7 @@ export default function HistoryPage({ history, onSelectTask, isLoading = false, 
           onSelectTask(fullTask);
         }
       } catch (error) {
-        console.error('Error fetching task details:', error);
+        log.error('fetch_task_details_failed', { error: error instanceof Error ? error : undefined });
       } finally {
         setLoadingTaskId(null);
       }

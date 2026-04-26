@@ -1,5 +1,8 @@
 import React, { useState, useEffect, useRef } from 'react';
 import { ChevronLeft, Loader2, Check } from 'lucide-react';
+import { logger } from '../../lib/logger';
+
+const log = logger.scope('ManualNoteEditor');
 import { ManualNote, saveManualNote } from '../../services/supabaseService';
 import { SlashEditor } from './SlashEditor';
 
@@ -33,7 +36,7 @@ export function ManualNoteEditor({ note, onSave, onBack }: ManualNoteEditorProps
       setTimeout(() => setSaveStatus('idle'), 2000);
       onSave(saved);
     } catch (err) {
-      console.error('Save failed', err);
+      log.error('save_failed', { error: err instanceof Error ? err : undefined });
     } finally {
       setIsSaving(false);
     }

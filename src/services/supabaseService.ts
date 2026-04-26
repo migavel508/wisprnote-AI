@@ -1,4 +1,7 @@
 import { createClient } from '@supabase/supabase-js';
+import { logger } from '../lib/logger';
+
+const log = logger.scope('Supabase');
 
 const supabaseUrl = import.meta.env.VITE_SUPABASE_URL || '';
 const supabaseAnonKey = import.meta.env.VITE_SUPABASE_ANON_KEY || '';
@@ -180,7 +183,7 @@ export async function saveTask(task: TaskHistory) {
     .select();
   
   if (error) {
-    console.error('Error saving task:', error);
+    log.error('save_task_failed', { error: error as Error });
     throw error;
   }
   return data[0];
@@ -210,7 +213,7 @@ export async function updateTaskTitle(taskId: string, newTitle: string): Promise
     .single();
   
   if (error) {
-    console.error('Error updating task title:', error);
+    log.error('update_task_title_failed', { error: error as Error });
     throw error;
   }
   return data as TaskHistory;
@@ -228,7 +231,7 @@ export async function updateTaskSummary(taskId: string, newSummary: string): Pro
     .single();
   
   if (error) {
-    console.error('Error updating task summary:', error);
+    log.error('update_task_summary_failed', { error: error as Error });
     throw error;
   }
   return data as TaskHistory;
@@ -246,7 +249,7 @@ export async function updateTaskNotes(taskId: string, newNotes: string): Promise
     .single();
   
   if (error) {
-    console.error('Error updating task notes:', error);
+    log.error('update_task_notes_failed', { error: error as Error });
     throw error;
   }
   return data as TaskHistory;
@@ -264,7 +267,7 @@ export async function updateTaskVisualization(taskId: string, imageBase64: strin
     .single();
   
   if (error) {
-    console.error('Error updating task visualization:', error);
+    log.error('update_task_visualization_failed', { error: error as Error });
     throw error;
   }
   return data as TaskHistory;
@@ -299,7 +302,7 @@ export async function getTasksLightweight(page: number = 0, pageSize: number = 2
     .range(page * pageSize, (page + 1) * pageSize - 1);
   
   if (error) {
-    console.error('Error fetching tasks:', error);
+    log.error('fetch_tasks_failed', { error: error as Error });
     throw error;
   }
   
@@ -323,7 +326,7 @@ export async function getTaskById(taskId: string): Promise<TaskHistory | null> {
   
   if (error) {
     if (error.code === 'PGRST116') return null; // Not found
-    console.error('Error fetching task:', error);
+    log.error('fetch_task_failed', { error: error as Error });
     throw error;
   }
   return data as TaskHistory;
@@ -340,7 +343,7 @@ export async function getTasks() {
     .order('created_at', { ascending: false });
   
   if (error) {
-    console.error('Error fetching tasks:', error);
+    log.error('fetch_all_tasks_failed', { error: error as Error });
     throw error;
   }
   return data as TaskHistory[];
@@ -355,7 +358,7 @@ export async function saveAsset(asset: GeneratedAsset) {
     .select();
   
   if (error) {
-    console.error('Error saving asset:', error);
+    log.error('save_asset_failed', { error: error as Error });
     throw error;
   }
   return data[0];
@@ -372,7 +375,7 @@ export async function getAssets(taskId: string) {
     .order('created_at', { ascending: false });
   
   if (error) {
-    console.error('Error fetching assets:', error);
+    log.error('fetch_assets_failed', { error: error as Error });
     throw error;
   }
   return data as GeneratedAsset[];
@@ -402,7 +405,7 @@ export async function saveManualNote(note: ManualNote) {
     .select();
 
   if (error) {
-    console.error('Error saving manual note:', error);
+    log.error('save_manual_note_failed', { error: error as Error });
     throw error;
   }
   return data[0] as ManualNote;
@@ -418,7 +421,7 @@ export async function getManualNotes() {
     .order('updated_at', { ascending: false });
 
   if (error) {
-    console.error('Error fetching manual notes:', error);
+    log.error('fetch_manual_notes_failed', { error: error as Error });
     throw error;
   }
   return data as ManualNote[];
@@ -434,7 +437,7 @@ export async function deleteManualNote(noteId: string) {
     .eq('user_id', userId);
 
   if (error) {
-    console.error('Error deleting manual note:', error);
+    log.error('delete_manual_note_failed', { error: error as Error });
     throw error;
   }
 }
@@ -452,7 +455,7 @@ export async function uploadNoteImage(file: File): Promise<string> {
 
 
   if (uploadError) {
-    console.error('Error uploading image:', uploadError);
+    log.error('upload_image_failed', { error: uploadError as Error });
     throw uploadError;
   }
 
@@ -502,7 +505,7 @@ export async function saveKnowledgeGraph(entry: KnowledgeGraphEntry) {
     .select();
   
   if (error) {
-    console.error('Error saving knowledge graph:', error);
+    log.error('save_knowledge_graph_failed', { error: error as Error });
     throw error;
   }
   return data?.[0];
@@ -528,7 +531,7 @@ export async function saveKnowledgeGraphBatch(entries: KnowledgeGraphEntry[]) {
     .select();
   
   if (error) {
-    console.error('Error saving knowledge graph batch:', error);
+    log.error('save_knowledge_graph_batch_failed', { error: error as Error });
     throw error;
   }
   return data as KnowledgeGraphEntry[];
@@ -544,7 +547,7 @@ export async function getKnowledgeGraph() {
     .order('created_at', { ascending: false });
   
   if (error) {
-    console.error('Error fetching knowledge graph:', error);
+    log.error('fetch_knowledge_graph_failed', { error: error as Error });
     throw error;
   }
   return data as KnowledgeGraphEntry[];
@@ -561,7 +564,7 @@ export async function getKnowledgeGraphForTask(taskId: string) {
     .single();
   
   if (error && error.code !== 'PGRST116') { // PGRST116 = no rows found
-    console.error('Error fetching knowledge graph for task:', error);
+    log.error('fetch_knowledge_graph_for_task_failed', { error: error as Error });
     throw error;
   }
   return data as KnowledgeGraphEntry | null;
@@ -577,7 +580,7 @@ export async function deleteKnowledgeGraph(taskId: string) {
     .eq('user_id', userId);
   
   if (error) {
-    console.error('Error deleting knowledge graph:', error);
+    log.error('delete_knowledge_graph_failed', { error: error as Error });
     throw error;
   }
 }
@@ -634,7 +637,7 @@ export async function saveChatMessage(message: ChatMessage) {
     .single();
   
   if (error) {
-    console.error('Error saving chat message:', error);
+    log.error('save_chat_message_failed', { error: error as Error });
     throw error;
   }
   return data as ChatMessage;
@@ -660,7 +663,7 @@ export async function saveChatMessages(messages: ChatMessage[]) {
     .select();
   
   if (error) {
-    console.error('Error saving chat messages:', error);
+    log.error('save_chat_messages_failed', { error: error as Error });
     throw error;
   }
   return data as ChatMessage[];
@@ -677,7 +680,7 @@ export async function getChatHistory(taskId: string) {
     .order('created_at', { ascending: true });
   
   if (error) {
-    console.error('Error fetching chat history:', error);
+    log.error('fetch_chat_history_failed', { error: error as Error });
     throw error;
   }
   return data as ChatMessage[];
@@ -694,7 +697,7 @@ export async function getChatHistoryByThread(threadId: string) {
     .order('created_at', { ascending: true });
 
   if (error) {
-    console.error('Error fetching chat history by thread:', error);
+    log.error('fetch_chat_history_by_thread_failed', { error: error as Error });
     throw error;
   }
   return data as ChatMessage[];
@@ -710,7 +713,7 @@ export async function deleteChatHistory(taskId: string) {
     .eq('user_id', userId);
   
   if (error) {
-    console.error('Error deleting chat history:', error);
+    log.error('delete_chat_history_failed', { error: error as Error });
     throw error;
   }
 }

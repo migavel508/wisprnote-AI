@@ -1,4 +1,7 @@
 import { useState, useRef, useEffect, useCallback, useMemo } from 'react';
+import { logger } from '../lib/logger';
+
+const log = logger.scope('KnowledgePage');
 import { motion, AnimatePresence } from 'framer-motion';
 import ForceGraph2D from 'react-force-graph-2d';
 import { 
@@ -131,7 +134,7 @@ export default function KnowledgePage({
           lastBuildKeyRef.current = kgDataKey;
         }
       } catch (err) {
-        console.error('Embedding pipeline failed:', err);
+        log.error('embedding_pipeline_failed', { error: err instanceof Error ? err : undefined });
       } finally {
         if (!cancelled) setIsEmbedding(false);
       }
@@ -379,7 +382,7 @@ export default function KnowledgePage({
       
       setChatMessages(prev => [...prev, { role: 'assistant', content: assistantMessage }]);
     } catch (error) {
-      console.error('Chat error:', error);
+      log.error('chat_failed', { error: error instanceof Error ? error : undefined });
       setChatMessages(prev => [...prev, { role: 'assistant', content: 'Sorry, there was an error processing your question.' }]);
     } finally {
       setIsChatting(false);

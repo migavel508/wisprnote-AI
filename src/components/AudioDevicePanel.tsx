@@ -1,5 +1,8 @@
 import React, { useState, useEffect, useCallback } from 'react';
 import { motion, AnimatePresence } from 'motion/react';
+import { logger } from '../lib/logger';
+
+const log = logger.scope('AudioDevicePanel');
 import {
   Mic,
   Volume2,
@@ -109,7 +112,7 @@ export default function AudioDevicePanel({ isOpen, onClose, isRecording }: Audio
       setDefaultInput(defInput);
       setDefaultOutput(defOutput);
     } catch (e) {
-      console.error('[AudioDevicePanel] Failed to refresh devices:', e);
+      log.error('refresh_devices_failed', { error: e instanceof Error ? e : undefined });
     } finally {
       setIsLoading(false);
     }
