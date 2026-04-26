@@ -666,6 +666,7 @@ export default function App() {
 
     let unlistenChange: (() => void) | null = null;
     let unlistenRestart: (() => void) | null = null;
+    let unlistenError: (() => void) | null = null;
 
     (async () => {
       // Fetch initial default input device
@@ -688,11 +689,23 @@ export default function App() {
         setDeviceRestartNotice(true);
         setTimeout(() => setDeviceRestartNotice(false), 3000);
       });
+
+      // Listen for fatal recording errors from the Rust backend
+      const { listen } = await import('@tauri-apps/api/event');
+      unlistenError = await listen<string>('recording-error', (event) => {
+        log.error('recording_fatal_error', { message: event.payload });
+        setError(event.payload || 'Recording failed. Please try again.');
+        setIsRecording(false);
+        setIsPaused(false);
+        if (timerRef.current) clearInterval(timerRef.current);
+        realtimeEngineActiveRef.current = false;
+      });
     })();
 
     return () => {
       unlistenChange?.();
       unlistenRestart?.();
+      unlistenError?.();
     };
   }, []);
 
@@ -2873,7 +2886,7 @@ export default function App() {
   }
 
   return (
-    <div className="h-screen bg-[#f5f0eb] text-[#1a1a1a] font-[system-ui] selection:bg-[#1a1a1a] selection:text-white flex overflow-hidden">
+    <div className="h-screen bg-[#e5ddd4] text-[#1a1a1a] font-[system-ui] selection:bg-[#1a1a1a] selection:text-white flex overflow-hidden">
       {/* Network Status — floating pill toast (Apple-style) */}
       <AnimatePresence>
         {!isOnline && (
@@ -3002,7 +3015,7 @@ export default function App() {
         {/* Top drag region — enables double-click to zoom (macOS native behavior) */}
         <div data-tauri-drag-region className="w-full h-10 flex-shrink-0 cursor-default" style={{ WebkitUserSelect: 'none', userSelect: 'none' }} />
         <div className="flex-1 flex overflow-hidden pr-2.5 pl-1.5 pb-2.5 pt-0">
-        <main className="flex-1 bg-white w-full relative overflow-y-auto rounded-tl-2xl rounded-tr-2xl rounded-bl-2xl rounded-br-2xl shadow-sm border border-[#e8e0d8]/50">
+        <main className="flex-1 bg-white w-full relative overflow-y-auto rounded-tl-2xl rounded-tr-2xl rounded-bl-2xl rounded-br-2xl shadow-sm border border-[#d8cec3]/60">
           <AnimatePresence mode="wait">
             {currentView === 'process' && (
               <motion.div 

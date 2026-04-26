@@ -44,7 +44,7 @@ pub mod macos {
         }
     }
 
-    const DEBOUNCE_DELAY: Duration = Duration::from_millis(1000);
+    const DEBOUNCE_DELAY: Duration = Duration::from_millis(2000);
 
     const SELECTORS: [ca::PropSelector; 3] = [
         ca::PropSelector::HW_DEFAULT_INPUT_DEVICE,

@@ -215,12 +215,30 @@ pub mod macos {
         let (dev_tx, dev_rx) = std::sync::mpsc::channel();
         let _dev_monitor = device_monitor::spawn_monitor(dev_tx);
 
+        const MAX_ERROR_RETRIES: u32 = 3;
+        let mut error_count: u32 = 0;
+
         // Outer loop: restarts capture when device changes
         while is_recording.load(Ordering::Relaxed) {
+            // Drain residual device events before starting a new session
+            while dev_rx.try_recv().is_ok() {}
+
             if let Err(e) = record_audio_session(&is_recording, &audio_data, &dev_rx) {
-                if is_recording.load(Ordering::Relaxed) {
-                    eprintln!("Recording session error (will retry): {}", e);
-                    std::thread::sleep(std::time::Duration::from_millis(500));
+                let msg = format!("{}", e);
+                if msg == "device_change" && is_recording.load(Ordering::Relaxed) {
+                    error_count = 0;
+                    std::thread::sleep(std::time::Duration::from_millis(2000));
+                    continue;
+                } else if is_recording.load(Ordering::Relaxed) {
+                    error_count += 1;
+                    eprintln!("Recording session error (attempt {}/{}): {}", error_count, MAX_ERROR_RETRIES, e);
+                    if error_count >= MAX_ERROR_RETRIES {
+                        eprintln!("Recording failed permanently after {} attempts", MAX_ERROR_RETRIES);
+                        is_recording.store(false, Ordering::Relaxed);
+                        return Err(e);
+                    }
+                    let backoff = std::time::Duration::from_millis(2000 * (error_count as u64));
+                    std::thread::sleep(backoff);
                     continue;
                 } else {
                     return Err(e);
@@ -293,15 +311,20 @@ pub mod macos {
 
         eprintln!("System audio recording started (device session)");
 
+        // Drain any stale device-change events that fired during setup
+        // (creating the aggregate device itself triggers HW_DEVICES changes)
+        std::thread::sleep(std::time::Duration::from_millis(500));
+        while dev_rx.try_recv().is_ok() {}
+
         // Record loop — also checks for device changes
         while is_recording.load(Ordering::Relaxed) {
             use ringbuf::traits::Consumer;
 
-            // Check for device changes — if input changed, break to restart
+            // Only react to actual input device changes, NOT device-list changes
+            // (we trigger DeviceListChanged ourselves when creating/destroying aggregate devices)
             if let Ok(change) = dev_rx.try_recv() {
                 match change {
-                    crate::device_monitor::DeviceChange::DefaultInputChanged
-                    | crate::device_monitor::DeviceChange::DeviceListChanged => {
+                    crate::device_monitor::DeviceChange::DefaultInputChanged => {
                         eprintln!("Batch recording: input device changed, restarting capture...");
                         return Err(anyhow::anyhow!("device_change"));
                     }
@@ -438,8 +461,14 @@ pub mod macos {
         let (dev_tx, dev_rx) = std::sync::mpsc::channel();
         let _dev_monitor = device_monitor::spawn_monitor(dev_tx);
 
+        const MAX_ERROR_RETRIES: u32 = 3;
+        let mut error_count: u32 = 0;
+
         // Outer loop: restarts capture when device changes
         while is_recording.load(Ordering::Relaxed) {
+            // Drain any residual device events before starting a new session
+            while dev_rx.try_recv().is_ok() {}
+
             match record_realtime_session(
                 &is_recording,
                 &transcripts,
@@ -455,11 +484,20 @@ pub mod macos {
                         eprintln!("Realtime recording: device changed, restarting capture...");
                         use tauri::Emitter;
                         let _ = app_handle.emit("audio-device-restart", "restarting");
-                        std::thread::sleep(std::time::Duration::from_millis(500));
+                        error_count = 0;
+                        std::thread::sleep(std::time::Duration::from_millis(2000));
                         continue;
                     } else if is_recording.load(Ordering::Relaxed) {
-                        eprintln!("Realtime recording error (will retry): {}", e);
-                        std::thread::sleep(std::time::Duration::from_millis(500));
+                        error_count += 1;
+                        eprintln!("Realtime recording error (attempt {}/{}): {}", error_count, MAX_ERROR_RETRIES, e);
+                        if error_count >= MAX_ERROR_RETRIES {
+                            use tauri::Emitter;
+                            let _ = app_handle.emit("recording-error", format!("Recording failed after {} attempts: {}", MAX_ERROR_RETRIES, e));
+                            is_recording.store(false, Ordering::Relaxed);
+                            return Err(e);
+                        }
+                        let backoff = std::time::Duration::from_millis(2000 * (error_count as u64));
+                        std::thread::sleep(backoff);
                         continue;
                     } else {
                         return Err(e);
@@ -542,6 +580,11 @@ pub mod macos {
 
         eprintln!("Realtime recording started - streaming to Deepgram");
 
+        // Drain stale device-change events from setup phase
+        // (creating the aggregate device fires HW_DEVICES notifications)
+        std::thread::sleep(std::time::Duration::from_millis(500));
+        while dev_rx.try_recv().is_ok() {}
+
         // Create a dedicated tokio runtime for Deepgram WebSocket communication
         let rt = tokio::runtime::Runtime::new()
             .map_err(|e| anyhow::anyhow!("Failed to create tokio runtime: {}", e))?;
@@ -556,11 +599,11 @@ pub mod macos {
             while is_recording.load(Ordering::Relaxed) {
                 use ringbuf::traits::Consumer;
 
-                // Check for device changes
+                // Only react to actual input device changes (e.g. Bluetooth headset connected).
+                // Ignore DeviceListChanged — we trigger those ourselves when creating aggregate devices.
                 if let Ok(change) = dev_rx.try_recv() {
                     match change {
-                        crate::device_monitor::DeviceChange::DefaultInputChanged
-                        | crate::device_monitor::DeviceChange::DeviceListChanged => {
+                        crate::device_monitor::DeviceChange::DefaultInputChanged => {
                             eprintln!("Realtime: input device changed, signaling restart...");
                             device_changed_clone.store(true, Ordering::Relaxed);
                             break;
