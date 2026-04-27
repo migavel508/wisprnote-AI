@@ -22,7 +22,11 @@ import {
   Filter,
   ZoomIn,
   ZoomOut,
-  Maximize2
+  Maximize2,
+  LayoutGrid,
+  List,
+  Crosshair,
+  PanelLeftClose,
 } from 'lucide-react';
 import { KnowledgeGraphSkeleton } from '../components/Skeleton';
 import {
@@ -67,8 +71,16 @@ export default function KnowledgePage({
   const [isChatting, setIsChatting] = useState(false);
   const [showChat, setShowChat] = useState(false);
   const [filterType, setFilterType] = useState<string | null>(null);
+  /** meetings-only graph vs full detail (topics, people, …) */
+  const [graphViewMode, setGraphViewMode] = useState<'overview' | 'full'>('overview');
+  /** show 1-hop neighborhood of selected node */
+  const [egoFocus, setEgoFocus] = useState(false);
+  const [hoveredNode, setHoveredNode] = useState<any>(null);
+  const [browsePanelOpen, setBrowsePanelOpen] = useState(false);
   const [kgDimensions, setKgDimensions] = useState({ width: 800, height: 600 });
-  
+  const shouldAutoFitRef = useRef(true);
+  const pendingFocusIdRef = useRef<string | null>(null);
+
   const kgContainerRef = useRef<HTMLDivElement>(null);
   const graphRef = useRef<any>(null);
   const chatEndRef = useRef<HTMLDivElement>(null);
@@ -194,6 +206,85 @@ export default function KnowledgePage({
     );
   }, [kgDataKey, filterType, isEmbedding]);
 
+  /** Subset / mode passed to ForceGraph — reduces clutter (overview) and optional ego network */
+  const displayGraphData = useMemo(() => {
+    let g = graphData;
+
+    if (graphViewMode === 'overview') {
+      const meetingNodes = g.nodes.filter((n: any) => n.type === 'meeting');
+      const mIds = new Set(meetingNodes.map((n: any) => n.id));
+      const meetingLinks = g.links.filter((l: any) => {
+        if (l.type !== 'meeting-sibling') return false;
+        const s = typeof l.source === 'object' ? (l.source as any).id : l.source;
+        const t = typeof l.target === 'object' ? (l.target as any).id : l.target;
+        return mIds.has(s) && mIds.has(t);
+      });
+      g = { nodes: meetingNodes, links: meetingLinks };
+    }
+
+    if (egoFocus && selectedNode?.id) {
+      const selId = selectedNode.id as string;
+      const keep = new Set<string>([selId]);
+      g.links.forEach((l: any) => {
+        const s = typeof l.source === 'object' ? (l.source as any).id : l.source;
+        const t = typeof l.target === 'object' ? (l.target as any).id : l.target;
+        if (s === selId || t === selId) {
+          keep.add(s);
+          keep.add(t);
+        }
+      });
+      g = {
+        nodes: g.nodes.filter((n: any) => keep.has(n.id)),
+        links: g.links.filter((l: any) => {
+          const s = typeof l.source === 'object' ? (l.source as any).id : l.source;
+          const t = typeof l.target === 'object' ? (l.target as any).id : l.target;
+          return keep.has(s) && keep.has(t);
+        }),
+      };
+    }
+
+    return g;
+  }, [graphData, graphViewMode, egoFocus, selectedNode?.id]);
+
+  const meetingNodesSorted = useMemo(() => {
+    return graphData.nodes
+      .filter((n: any) => n.type === 'meeting')
+      .slice()
+      .sort((a: any, b: any) => {
+        const dateA = a.data?.meetingDate ? new Date(a.data.meetingDate).getTime() : 0;
+        const dateB = b.data?.meetingDate ? new Date(b.data.meetingDate).getTime() : 0;
+        if (dateB !== dateA) return dateB - dateA; // newest first
+        return (a.label || '').localeCompare(b.label || '');
+      });
+  }, [graphData]);
+
+  useEffect(() => {
+    shouldAutoFitRef.current = true;
+  }, [kgDataKey, filterType, graphViewMode, egoFocus, selectedNode?.id, isEmbedding]);
+
+  useEffect(() => {
+    const raf0 = requestAnimationFrame(() => {
+      requestAnimationFrame(() => {
+        const g = graphRef.current;
+        if (!g) return;
+        const charge = g.d3Force('charge');
+        if (charge) charge.strength(-200);
+        const linkF = g.d3Force('link');
+        if (linkF) {
+          linkF.strength(0.35);
+          linkF.distance((link: any) => {
+            if (link.type === 'meeting-sibling') return 140;
+            if (link.type === 'meeting-topic') return 65;
+            if (link.type?.startsWith?.('meeting-')) return 55;
+            return 42;
+          });
+        }
+        g.d3ReheatSimulation?.();
+      });
+    });
+    return () => cancelAnimationFrame(raf0);
+  }, [displayGraphData]);
+
   // Search functionality
   const handleSearch = useCallback((query: string) => {
     setSearchQuery(query);
@@ -206,18 +297,16 @@ export default function KnowledgePage({
     setIsSearching(false);
   }, [graphData]);
 
-  // Focus on a node from search
+  // Focus on a node from search (center after sim settles in onEngineStop)
   const focusOnNode = (node: any) => {
+    if (node.type !== 'meeting') {
+      setGraphViewMode('full');
+    }
     setSelectedNode(node);
     setSearchQuery('');
     setSearchResults([]);
-    
-    if (graphRef.current) {
-      const graphNode = graphData.nodes.find((n: any) => n.id === node.id);
-      if (graphNode && graphNode.x !== undefined && graphNode.y !== undefined) {
-        graphRef.current.centerAt(graphNode.x, graphNode.y, 1000);
-      }
-    }
+    setBrowsePanelOpen(false);
+    pendingFocusIdRef.current = node.id;
   };
 
   // O(1) related meetings lookup from pre-built edge matrix
@@ -600,150 +689,376 @@ export default function KnowledgePage({
             </div>
           ) : (
             <>
-              {/* Filter Bar */}
-              <div className="flex-none px-4 py-2 bg-[#FAFAFA] border-b border-gray-100 flex items-center gap-2">
-                <Filter className="w-3 h-3 opacity-40" />
-                <span className="text-[10px] font-mono uppercase opacity-40">Filter:</span>
-                <button
-                  onClick={() => setFilterType(null)}
-                  className={`px-2 py-1 text-[10px] rounded-md transition-colors ${
-                    !filterType ? 'bg-[#141414] text-white' : 'bg-white border border-gray-200 hover:bg-gray-50'
-                  }`}
-                >
-                  All
-                </button>
-                {nodeTypes.map(nt => (
-                  <button
-                    key={nt.type}
-                    onClick={() => setFilterType(filterType === nt.type ? null : nt.type)}
-                    className={`px-2 py-1 text-[10px] rounded-md transition-colors flex items-center gap-1 ${
-                      filterType === nt.type ? 'bg-[#141414] text-white' : 'bg-white border border-gray-200 hover:bg-gray-50'
-                    }`}
-                  >
-                    <span className="w-1.5 h-1.5 rounded-full" style={{ backgroundColor: nt.color }} />
-                    {nt.label}
-                  </button>
-                ))}
-              </div>
+              <div className="flex-1 flex flex-col min-h-0 overflow-hidden">
+                <div className="flex-1 flex flex-col min-w-0 min-h-0">
+                  {/* View controls */}
+                  <div className="flex-none flex flex-wrap items-center gap-2 px-3 py-2 bg-white border-b border-gray-100">
+                    <button
+                      type="button"
+                      onClick={() => setBrowsePanelOpen((v) => !v)}
+                      className={`px-2.5 py-1.5 text-[10px] font-mono uppercase tracking-wide rounded-md border flex items-center gap-1.5 transition-colors ${
+                        browsePanelOpen
+                          ? 'bg-[#141414] text-white border-[#141414]'
+                          : 'border-gray-200 text-gray-700 bg-white hover:bg-gray-50'
+                      }`}
+                      title="Open or close the meeting list"
+                    >
+                      <List className="w-3.5 h-3.5" />
+                      <span className="hidden sm:inline">Meeting index</span>
+                    </button>
+                    <div className="h-4 w-px bg-gray-200" />
+                    <div className="flex items-center rounded-lg border border-gray-200/90 p-0.5 bg-[#FAFAFA]">
+                      <button
+                        type="button"
+                        onClick={() => {
+                          setGraphViewMode('overview');
+                          setEgoFocus(false);
+                          setSelectedNode(null);
+                        }}
+                        className={`px-2.5 py-1.5 text-[10px] font-mono uppercase tracking-wide rounded-md flex items-center gap-1.5 transition-colors ${
+                          graphViewMode === 'overview' ? 'bg-white shadow-sm text-[#141414]' : 'text-gray-500 hover:text-gray-800'
+                        }`}
+                        title="Only meetings and cross-meeting links — clearest map"
+                      >
+                        <LayoutGrid className="w-3.5 h-3.5" />
+                        Overview
+                      </button>
+                      <button
+                        type="button"
+                        onClick={() => setGraphViewMode('full')}
+                        className={`px-2.5 py-1.5 text-[10px] font-mono uppercase tracking-wide rounded-md flex items-center gap-1.5 transition-colors ${
+                          graphViewMode === 'full' ? 'bg-white shadow-sm text-[#141414]' : 'text-gray-500 hover:text-gray-800'
+                        }`}
+                        title="Topics, people, decisions, and actions"
+                      >
+                        <Network className="w-3.5 h-3.5" />
+                        Full
+                      </button>
+                    </div>
+                    <button
+                      type="button"
+                      disabled={graphViewMode === 'overview' || !selectedNode}
+                      onClick={() => setEgoFocus(f => !f)}
+                      className={`px-2.5 py-1.5 text-[10px] font-mono uppercase tracking-wide rounded-md border flex items-center gap-1.5 transition-colors ${
+                        egoFocus && selectedNode
+                          ? 'bg-violet-50 border-violet-200 text-violet-900'
+                          : 'border-gray-200 text-gray-600 hover:bg-gray-50'
+                      } ${graphViewMode === 'overview' || !selectedNode ? 'opacity-40 pointer-events-none' : ''}`}
+                      title={!selectedNode ? 'Select a node on the graph first' : 'Show only this node and its direct connections'}
+                    >
+                      <Crosshair className="w-3.5 h-3.5" />
+                      Neighborhood
+                    </button>
+                    <div className="h-4 w-px bg-gray-200 hidden sm:block" />
+                    <span className="text-[10px] text-gray-400 tabular-nums hidden sm:inline">
+                      {displayGraphData.nodes.length} nodes · {displayGraphData.links.length} links
+                    </span>
+                    {graphViewMode === 'overview' && (
+                      <span className="text-[10px] text-gray-400 ml-auto hidden sm:inline">Cross-meeting links only</span>
+                    )}
+                    <button
+                      type="button"
+                      onClick={() => graphRef.current?.zoomToFit(450, 70)}
+                      className="ml-auto sm:ml-0 px-2 py-1 text-[9px] font-mono uppercase text-gray-500 hover:text-[#141414] sm:hidden"
+                    >
+                      Fit
+                    </button>
+                  </div>
 
-              {/* Graph Canvas */}
-              <div ref={kgContainerRef} className="flex-1 bg-[#FAFAFA] relative min-h-0">
-                {/* Graph Controls */}
-                <div className="absolute bottom-4 right-4 z-10 flex flex-col gap-2">
-                  <button 
-                    onClick={() => graphRef.current?.zoom(graphRef.current.zoom() * 1.3, 300)}
-                    className="bg-white border border-gray-200 p-2 rounded-lg shadow-sm hover:bg-gray-50 transition-colors"
-                    title="Zoom In"
-                  >
-                    <ZoomIn className="w-4 h-4" />
-                  </button>
-                  <button 
-                    onClick={() => graphRef.current?.zoom(graphRef.current.zoom() / 1.3, 300)}
-                    className="bg-white border border-gray-200 p-2 rounded-lg shadow-sm hover:bg-gray-50 transition-colors"
-                    title="Zoom Out"
-                  >
-                    <ZoomOut className="w-4 h-4" />
-                  </button>
-                  <button 
-                    onClick={() => graphRef.current?.zoomToFit(400, 50)}
-                    className="bg-white border border-gray-200 p-2 rounded-lg shadow-sm hover:bg-gray-50 transition-colors"
-                    title="Fit View"
-                  >
-                    <Maximize2 className="w-4 h-4" />
-                  </button>
-                </div>
+                  {graphViewMode === 'full' && (
+                    <div className="flex-none px-3 py-2 bg-[#FAFAFA] border-b border-gray-100 flex items-center gap-1.5 flex-wrap">
+                      <Filter className="w-3 h-3 opacity-40 flex-shrink-0" />
+                      <span className="text-[9px] font-mono uppercase opacity-40 flex-shrink-0">Show:</span>
+                      <button
+                        onClick={() => setFilterType(null)}
+                        className={`px-2 py-0.5 text-[9px] rounded-md transition-colors ${
+                          !filterType ? 'bg-[#141414] text-white' : 'bg-white border border-gray-200 hover:bg-gray-50'
+                        }`}
+                      >
+                        All types
+                      </button>
+                      {nodeTypes.map(nt => (
+                        <button
+                          key={nt.type}
+                          onClick={() => setFilterType(filterType === nt.type ? null : nt.type)}
+                          className={`px-2 py-0.5 text-[9px] rounded-md transition-colors flex items-center gap-1 ${
+                            filterType === nt.type ? 'bg-[#141414] text-white' : 'bg-white border border-gray-200 hover:bg-gray-50'
+                          }`}
+                        >
+                          <span className="w-1.5 h-1.5 rounded-full" style={{ backgroundColor: nt.color }} />
+                          {nt.label}
+                        </button>
+                      ))}
+                    </div>
+                  )}
 
-                {/* Legend - Hidden on mobile */}
-                <div className="absolute top-4 left-4 z-10 bg-white/95 backdrop-blur-sm border border-gray-200 rounded-lg p-2 sm:p-3 shadow-sm hidden sm:block">
-                  <h4 className="text-[10px] font-mono uppercase tracking-widest opacity-50 mb-2">Legend</h4>
-                  <div className="space-y-1.5">
-                    {nodeTypes.map(item => (
-                      <div key={item.label} className="flex items-center gap-2">
-                        <span 
-                          className={`rounded-full ${item.shape === 'large' ? 'w-3 h-3' : item.shape === 'medium' ? 'w-2.5 h-2.5' : 'w-2 h-2'}`} 
-                          style={{ backgroundColor: item.color }} 
-                        />
-                        <span className="text-[10px] text-gray-600">{item.label}</span>
+                  <div ref={kgContainerRef} className="flex-1 bg-[#F4F4F3] relative min-h-0 overflow-hidden">
+                    {/* Meeting index drawer — scoped to this canvas */}
+                    <AnimatePresence>
+                      {browsePanelOpen && (
+                        <>
+                          <motion.div
+                            initial={{ opacity: 0 }}
+                            animate={{ opacity: 1 }}
+                            exit={{ opacity: 0 }}
+                            transition={{ duration: 0.18 }}
+                            className="absolute inset-0 z-20 bg-black/30"
+                            onClick={() => setBrowsePanelOpen(false)}
+                          />
+                          <motion.aside
+                            initial={{ x: '-100%' }}
+                            animate={{ x: 0 }}
+                            exit={{ x: '-100%' }}
+                            transition={{ type: 'spring', damping: 30, stiffness: 340 }}
+                            className="absolute left-0 top-0 bottom-0 w-72 z-30 flex flex-col bg-white border-r border-gray-200/90 shadow-2xl"
+                          >
+                            <div className="px-3 py-2.5 border-b border-gray-100 bg-white">
+                              <div className="flex items-center justify-between">
+                                <div className="flex items-center gap-2 text-[10px] font-mono uppercase tracking-wider text-gray-500">
+                                  <List className="w-3.5 h-3.5 flex-shrink-0" />
+                                  Meeting index
+                                  <span className="text-[9px] text-gray-400 tabular-nums">{meetingNodesSorted.length}</span>
+                                </div>
+                                <button
+                                  type="button"
+                                  onClick={() => setBrowsePanelOpen(false)}
+                                  className="p-1.5 rounded-lg hover:bg-gray-100 text-gray-500"
+                                  aria-label="Close"
+                                >
+                                  <PanelLeftClose className="w-4 h-4" />
+                                </button>
+                              </div>
+                            </div>
+                            <div className="flex-1 min-h-0 overflow-y-auto p-2 space-y-0.5">
+                              {(() => {
+                                let lastMonth = '';
+                                return meetingNodesSorted.map((m: any) => {
+                                  const raw = m.data?.meetingDate;
+                                  const dateObj = raw ? new Date(raw) : null;
+                                  const monthLabel = dateObj
+                                    ? dateObj.toLocaleDateString('en-US', { month: 'long', year: 'numeric' })
+                                    : 'Unknown date';
+                                  const dayLabel = dateObj
+                                    ? dateObj.toLocaleDateString('en-US', { weekday: 'short', month: 'short', day: 'numeric' })
+                                    : null;
+                                  const isNewMonth = monthLabel !== lastMonth;
+                                  lastMonth = monthLabel;
+                                  const isSel = selectedNode?.id === m.id;
+                                  return (
+                                    <div key={m.id}>
+                                      {isNewMonth && (
+                                        <p className="text-[9px] font-mono uppercase tracking-widest text-gray-400 px-1 pt-3 pb-1 first:pt-1">
+                                          {monthLabel}
+                                        </p>
+                                      )}
+                                      <button
+                                        type="button"
+                                        onClick={() => {
+                                          setGraphViewMode('overview');
+                                          focusOnNode(m);
+                                        }}
+                                        className={`w-full text-left px-2.5 py-2 rounded-lg border transition-colors ${
+                                          isSel
+                                            ? 'bg-[#141414] text-white border-[#141414]'
+                                            : 'bg-white border-gray-200/70 text-gray-800 hover:border-gray-300 hover:bg-gray-50'
+                                        }`}
+                                      >
+                                        <span className="block text-[11px] leading-snug line-clamp-2 break-words">
+                                          {m.label || 'Meeting'}
+                                        </span>
+                                        {dayLabel && (
+                                          <span className={`block text-[9px] mt-0.5 tabular-nums ${isSel ? 'text-white/60' : 'text-gray-400'}`}>
+                                            {dayLabel}
+                                          </span>
+                                        )}
+                                      </button>
+                                    </div>
+                                  );
+                                });
+                              })()}
+                            </div>
+                          </motion.aside>
+                        </>
+                      )}
+                    </AnimatePresence>
+
+                    <div className="absolute bottom-4 right-4 z-10 flex flex-col gap-1.5">
+                      <button
+                        onClick={() => graphRef.current?.zoom(graphRef.current.zoom() * 1.3, 300)}
+                        className="bg-white border border-gray-200/90 p-2 rounded-lg shadow-sm hover:bg-gray-50 transition-colors"
+                        title="Zoom In"
+                        type="button"
+                      >
+                        <ZoomIn className="w-4 h-4" />
+                      </button>
+                      <button
+                        onClick={() => graphRef.current?.zoom(graphRef.current.zoom() / 1.3, 300)}
+                        className="bg-white border border-gray-200/90 p-2 rounded-lg shadow-sm hover:bg-gray-50 transition-colors"
+                        title="Zoom Out"
+                        type="button"
+                      >
+                        <ZoomOut className="w-4 h-4" />
+                      </button>
+                      <button
+                        onClick={() => { shouldAutoFitRef.current = false; graphRef.current?.zoomToFit(450, 70); }}
+                        className="bg-white border border-gray-200/90 p-2 rounded-lg shadow-sm hover:bg-gray-50 transition-colors"
+                        title="Fit everything in view"
+                        type="button"
+                      >
+                        <Maximize2 className="w-4 h-4" />
+                      </button>
+                    </div>
+
+                    <div className="absolute top-3 left-3 z-10 max-w-[200px] sm:max-w-[220px] bg-white/95 backdrop-blur-sm border border-gray-200/80 rounded-lg px-2.5 py-2 shadow-sm hidden sm:block">
+                      <h4 className="text-[9px] font-mono uppercase tracking-widest text-gray-400 mb-1.5">Key</h4>
+                      <div className="flex flex-wrap gap-x-2 gap-y-1">
+                        {nodeTypes.map(item => (
+                          <span key={item.label} className="inline-flex items-center gap-1 text-[9px] text-gray-600">
+                            <span
+                              className={`rounded-full ${item.shape === 'large' ? 'w-2.5 h-2.5' : item.shape === 'medium' ? 'w-2 h-2' : 'w-1.5 h-1.5'}`}
+                              style={{ backgroundColor: item.color }}
+                            />
+                            {item.label}
+                          </span>
+                        ))}
                       </div>
-                    ))}
+                      <p className="text-[8px] text-gray-400 mt-2 leading-tight">Zoom in for more labels, or use the meeting list.</p>
+                    </div>
+
+                    <ForceGraph2D
+                      ref={graphRef}
+                      graphData={displayGraphData}
+                      width={kgDimensions.width}
+                      height={kgDimensions.height}
+                      nodeLabel={(node: any) => `${node.type.toUpperCase()}: ${node.label}`}
+                      nodeColor={(node: any) => node.color}
+                      nodeVal={(node: any) => node.size}
+                      linkColor={(link: any) => link.type === 'meeting-sibling' ? (link.color || '#9ca3af') : 'rgba(200,200,200,0.7)'}
+                      linkWidth={(link: any) => (link.type === 'meeting-sibling' ? Math.min(0.6 + (link.weight || 0) / 8, 2.2) : 1)}
+                      linkLineDash={(link: any) => link.type === 'meeting-sibling' ? [5, 4] : [2, 4]}
+                      linkLabel={(link: any) =>
+                        link.type === 'meeting-sibling' && graphViewMode === 'full' && link.label ? link.label : ''
+                      }
+                      minZoom={0.15}
+                      maxZoom={12}
+                      onNodeHover={(n: any) => setHoveredNode(n || null)}
+                      onBackgroundClick={() => setSelectedNode(null)}
+                      onNodeClick={(node: any) => {
+                        setSelectedNode(node);
+                        pendingFocusIdRef.current = null;
+                        if (graphRef.current && node.x != null && node.y != null) {
+                          const z = graphRef.current.zoom();
+                          if (z < 0.85) {
+                            graphRef.current.zoom(1, 500);
+                          }
+                          graphRef.current.centerAt(node.x, node.y, 600);
+                        }
+                      }}
+                      onNodeDragEnd={(node: any) => {
+                        const bounds = 2000;
+                        node.fx = Math.max(-bounds, Math.min(bounds, node.x));
+                        node.fy = Math.max(-bounds, Math.min(bounds, node.y));
+                      }}
+                      onEngineStop={() => {
+                        const g = graphRef.current;
+                        if (!g) return;
+                        const pending = pendingFocusIdRef.current;
+                        if (pending) {
+                          const n = graphData.nodes.find((x: any) => x.id === pending) as
+                            | { x?: number; y?: number }
+                            | undefined;
+                          if (n && n.x !== undefined && n.y !== undefined) {
+                            g.centerAt(n.x, n.y, 500);
+                            const z = g.zoom();
+                            if (z < 1.1) g.zoom(1.45, 500);
+                          }
+                          pendingFocusIdRef.current = null;
+                          shouldAutoFitRef.current = false;
+                          return;
+                        }
+                        if (shouldAutoFitRef.current) {
+                          g.zoomToFit(500, 70);
+                          shouldAutoFitRef.current = false;
+                        }
+                      }}
+                      nodePointerAreaPaint={(node: any, color: string, ctx: CanvasRenderingContext2D) => {
+                        const r = node.type === 'meeting' ? 14 : node.type === 'topic' ? 10 : 8;
+                        ctx.beginPath();
+                        ctx.arc(node.x, node.y, r, 0, 2 * Math.PI, false);
+                        ctx.fillStyle = color;
+                        ctx.fill();
+                      }}
+                      nodeCanvasObject={(node: any, ctx: CanvasRenderingContext2D, globalScale: number) => {
+                        const isSel = selectedNode && node.id === selectedNode.id;
+                        const isHover = hoveredNode && node.id === hoveredNode.id;
+                        const label = node.label || '';
+                        const showLabel = globalScale >= 0.5 || isSel || isHover;
+                        const fontSize = node.type === 'meeting' ? 11 / globalScale : 9 / globalScale;
+                        ctx.font = `${node.type === 'meeting' ? '600 ' : ''}${fontSize}px Inter, system-ui, sans-serif`;
+
+                        const r = node.type === 'meeting' ? 10 : node.type === 'topic' ? 7 : 5;
+
+                        if (node.type === 'meeting') {
+                          ctx.beginPath();
+                          ctx.arc((node as any).x + 1, (node as any).y + 1, r, 0, 2 * Math.PI, false);
+                          ctx.fillStyle = 'rgba(0,0,0,0.08)';
+                          ctx.fill();
+                        }
+
+                        if (isSel) {
+                          ctx.beginPath();
+                          ctx.arc(node.x, node.y, r + 4 / globalScale, 0, 2 * Math.PI, false);
+                          ctx.strokeStyle = 'rgba(20, 20, 20, 0.45)';
+                          ctx.lineWidth = 2.5 / globalScale;
+                          ctx.stroke();
+                        } else if (isHover) {
+                          ctx.beginPath();
+                          ctx.arc(node.x, node.y, r + 3 / globalScale, 0, 2 * Math.PI, false);
+                          ctx.strokeStyle = 'rgba(20, 20, 20, 0.2)';
+                          ctx.lineWidth = 1.5 / globalScale;
+                          ctx.stroke();
+                        }
+
+                        ctx.beginPath();
+                        ctx.arc(node.x, node.y, r, 0, 2 * Math.PI, false);
+                        ctx.fillStyle = node.color || '#888';
+                        ctx.fill();
+
+                        if (node.type === 'meeting') {
+                          ctx.strokeStyle = '#000';
+                          ctx.lineWidth = 1.5 / globalScale;
+                          ctx.stroke();
+                        }
+
+                        if (!showLabel) return;
+
+                        const maxLen = node.type === 'meeting' ? 22 : 16;
+                        const displayLabel = label.length > maxLen ? label.substring(0, maxLen) + '…' : label;
+                        const textWidth = ctx.measureText(displayLabel).width;
+
+                        ctx.fillStyle = 'rgba(255,255,255,0.94)';
+                        const pad = 3;
+                        const boxW = textWidth + pad * 2;
+                        const boxH = fontSize + pad;
+                        const rx = node.x - boxW / 2;
+                        const ry = node.y + r + 2 / globalScale;
+                        ctx.fillRect(rx, ry, boxW, boxH);
+
+                        ctx.textAlign = 'center';
+                        ctx.textBaseline = 'top';
+                        ctx.fillStyle = '#1a1a1a';
+                        ctx.fillText(displayLabel, node.x, ry + 2);
+                      }}
+                      cooldownTicks={180}
+                      d3AlphaDecay={0.02}
+                      d3VelocityDecay={0.32}
+                      d3AlphaMin={0.01}
+                      warmupTicks={60}
+                    />
                   </div>
                 </div>
-
-                <ForceGraph2D
-                  ref={graphRef}
-                  graphData={graphData}
-                  width={kgDimensions.width}
-                  height={kgDimensions.height}
-                  nodeLabel={(node: any) => `${node.type.toUpperCase()}: ${node.label}`}
-                  nodeColor={(node: any) => node.color}
-                  nodeVal={(node: any) => node.size}
-                  linkColor={(link: any) => link.type === 'meeting-sibling' ? (link.color || '#9ca3af') : '#e5e5e5'}
-                  linkWidth={(link: any) => link.type === 'meeting-sibling' ? Math.min(1 + (link.weight || 0) / 5, 2) : 1.5}
-                  linkLineDash={(link: any) => link.type === 'meeting-sibling' ? [4, 3] : undefined}
-                  linkLabel={(link: any) => link.type === 'meeting-sibling' && link.label ? link.label : ''}
-                  minZoom={0.3}
-                  maxZoom={10}
-                  onNodeClick={(node: any) => {
-                    setSelectedNode(node);
-                    if (graphRef.current) {
-                      graphRef.current.centerAt(node.x, node.y, 800);
-                    }
-                  }}
-                  onNodeDragEnd={(node: any) => {
-                    const bounds = 2000;
-                    node.fx = Math.max(-bounds, Math.min(bounds, node.x));
-                    node.fy = Math.max(-bounds, Math.min(bounds, node.y));
-                  }}
-                  nodeCanvasObject={(node: any, ctx: CanvasRenderingContext2D, globalScale: number) => {
-                    const label = node.label || '';
-                    const fontSize = node.type === 'meeting' ? 12 / globalScale : 10 / globalScale;
-                    ctx.font = `${node.type === 'meeting' ? 'bold ' : ''}${fontSize}px Inter, system-ui, sans-serif`;
-                    
-                    // Draw node circle with better sizing
-                    const r = node.type === 'meeting' ? 10 : node.type === 'topic' ? 7 : 5;
-                    
-                    // Draw shadow for meetings
-                    if (node.type === 'meeting') {
-                      ctx.beginPath();
-                      ctx.arc(node.x + 1, node.y + 1, r, 0, 2 * Math.PI, false);
-                      ctx.fillStyle = 'rgba(0,0,0,0.1)';
-                      ctx.fill();
-                    }
-                    
-                    ctx.beginPath();
-                    ctx.arc(node.x, node.y, r, 0, 2 * Math.PI, false);
-                    ctx.fillStyle = node.color || '#888';
-                    ctx.fill();
-                    
-                    // Draw border for meeting nodes
-                    if (node.type === 'meeting') {
-                      ctx.strokeStyle = '#000';
-                      ctx.lineWidth = 2 / globalScale;
-                      ctx.stroke();
-                    }
-                    
-                    // Draw label with background for better readability
-                    const maxLen = node.type === 'meeting' ? 18 : 14;
-                    const displayLabel = label.length > maxLen ? label.substring(0, maxLen) + '...' : label;
-                    const textWidth = ctx.measureText(displayLabel).width;
-                    
-                    // Label background
-                    ctx.fillStyle = 'rgba(255,255,255,0.85)';
-                    ctx.fillRect(node.x - textWidth / 2 - 2, node.y + r + 1, textWidth + 4, fontSize + 2);
-                    
-                    // Label text
-                    ctx.textAlign = 'center';
-                    ctx.textBaseline = 'top';
-                    ctx.fillStyle = '#333';
-                    ctx.fillText(displayLabel, node.x, node.y + r + 2);
-                  }}
-                  cooldownTicks={150}
-                  d3AlphaDecay={0.015}
-                  d3VelocityDecay={0.25}
-                  d3AlphaMin={0.001}
-                  warmupTicks={50}
-                />
               </div>
+
             </>
           )}
         </div>

@@ -1275,6 +1275,7 @@ export default function App() {
         setIsExtractingNewKG(true);
         extractKnowledgeGraph(savedTask.id, savedTask.filename, savedTask.transcription)
           .then(async (result) => {
+            if (!result.meetingDate && savedTask.created_at) result.meetingDate = savedTask.created_at;
             const entryToSave: KnowledgeGraphEntry = {
               task_id: result.meetingId,
               meeting_title: result.meetingTitle,
@@ -1338,6 +1339,7 @@ export default function App() {
         const transformed = data.map(entry => ({
           meetingId: entry.task_id,
           meetingTitle: entry.meeting_title,
+          meetingDate: entry.created_at,
           topics: entry.topics || [],
           decisions: entry.decisions || [],
           people: entry.people || [],
@@ -1412,6 +1414,7 @@ export default function App() {
               
               await saveKnowledgeGraphBatch([entryToSave]);
               markKGExtracted(task.id!);
+              if (!result.meetingDate && task.created_at) result.meetingDate = task.created_at;
               setKgData(prevData => [...prevData, result]);
               
               if (i < missingTasks.length - 1) {
@@ -1459,6 +1462,7 @@ export default function App() {
         latestKgData = fresh.map(entry => ({
           meetingId: entry.task_id,
           meetingTitle: entry.meeting_title,
+          meetingDate: entry.created_at,
           topics: entry.topics || [],
           decisions: entry.decisions || [],
           people: entry.people || [],
@@ -1511,10 +1515,15 @@ export default function App() {
             result = await extractKnowledgeGraph(task.id!, task.filename, task.transcription);
           } catch (err) {
             log.error('kg_extraction_failed', { filename: task.filename, error: err instanceof Error ? err : undefined });
-            result = { meetingId: task.id!, meetingTitle: task.filename, topics: [], decisions: [], people: [], actionItems: [], references: [] };
+            result = { meetingId: task.id!, meetingTitle: task.filename, meetingDate: task.created_at, topics: [], decisions: [], people: [], actionItems: [], references: [] };
           }
         } else {
-          result = { meetingId: task.id!, meetingTitle: task.filename, topics: [], decisions: [], people: [], actionItems: [], references: [] };
+          result = { meetingId: task.id!, meetingTitle: task.filename, meetingDate: task.created_at, topics: [], decisions: [], people: [], actionItems: [], references: [] };
+        }
+
+        // Attach the task creation date so sorting works immediately
+        if (!result.meetingDate && task.created_at) {
+          result.meetingDate = task.created_at;
         }
 
         // Checkpoint-save immediately — progress is durable even if interrupted
@@ -2805,6 +2814,7 @@ export default function App() {
               refs: result.references || [],
             };
             await saveKnowledgeGraphBatch([entryToSave]);
+            if (!result.meetingDate && savedTask.created_at) result.meetingDate = savedTask.created_at;
             setKgData(prevData => {
               if (prevData.length === 0) return prevData;
               const filtered = prevData.filter(d => d.meetingId !== result.meetingId);
