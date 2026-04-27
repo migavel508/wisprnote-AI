@@ -129,6 +129,7 @@ import { logger } from './lib/logger';
 import { readKGLedger, markKGExtracted, markKGExtractedBatch, clearKGLedger, reconcileKGLedger } from './lib/kgLedger';
 import { clearArtifactCache } from './lib/kgArtifactCache';
 import { clearAllEmbedCaches } from './lib/knowledgeGraph.utils';
+import { loadUserLedgerState, resetUserLedgers } from './services/userLedgerService';
 
 const log = logger.scope('App');
 
@@ -422,6 +423,7 @@ export default function App() {
     setProcessingSubtext('Hang tight, almost there 😄');
     setAwaitingNetworkResume(false);
     autoSyncRanRef.current = false;
+    resetUserLedgers();
   }, []);
 
   useEffect(() => {
@@ -1327,6 +1329,9 @@ export default function App() {
   // Load persisted knowledge graph from Supabase
   const fetchKnowledgeGraph = async () => {
     try {
+      const { data: { session: s } } = await supabase.auth.getSession();
+      if (s?.user?.id) await loadUserLedgerState(s.user.id);
+
       const data = await getKnowledgeGraph();
       if (data && data.length > 0) {
         // Transform DB format to app format
@@ -2420,6 +2425,9 @@ export default function App() {
   const fetchHistory = async () => {
     try {
       setIsLoadingHistory(true);
+      const { data: { session: s } } = await supabase.auth.getSession();
+      if (s?.user?.id) await loadUserLedgerState(s.user.id);
+
       const data = await getTasks();
       setHistory(data);
 

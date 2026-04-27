@@ -6,8 +6,167 @@ const log = logger.scope('Gemini');
 
 const ai = new GoogleGenAI({ apiKey: process.env.GEMINI_API_KEY || "" });
 
+// ─── AI Provider Configuration ───────────────────────────────────────────────
+type AIProvider = 'gemini' | 'openrouter';
+
+function getProvider(): AIProvider {
+  const p = (import.meta as any).env?.VITE_AI_PROVIDER ||
+    process.env.VITE_AI_PROVIDER || 'gemini';
+  return p === 'openrouter' ? 'openrouter' : 'gemini';
+}
+
+function getOpenRouterKey(): string {
+  return (import.meta as any).env?.VITE_OPENROUTER_API_KEY ||
+    process.env.VITE_OPENROUTER_API_KEY || '';
+}
+
+function toOpenRouterModel(model: string): string {
+  if (model.startsWith('google/')) return model;
+  return `google/${model}`;
+}
+
+// Convert Google GenAI content format → OpenAI-compatible messages
+function convertToOpenAIMessages(
+  contents: any,
+  config?: any
+): Array<{ role: string; content: any }> {
+  const msgs: Array<{ role: string; content: any }> = [];
+
+  if (config?.systemInstruction) {
+    let sys = config.systemInstruction;
+    if (config?.responseSchema) {
+      sys += `\n\nYou MUST respond with valid JSON matching this schema:\n${JSON.stringify(config.responseSchema, null, 2)}`;
+    }
+    msgs.push({ role: 'system', content: sys });
+  } else if (config?.responseSchema) {
+    msgs.push({
+      role: 'system',
+      content: `You MUST respond with valid JSON matching this schema:\n${JSON.stringify(config.responseSchema, null, 2)}`,
+    });
+  }
+
+  if (typeof contents === 'string') {
+    msgs.push({ role: 'user', content: contents });
+    return msgs;
+  }
+
+  if (contents && !Array.isArray(contents) && contents.parts) {
+    msgs.push({ role: 'user', content: convertParts(contents.parts) });
+    return msgs;
+  }
+
+  if (Array.isArray(contents)) {
+    for (const msg of contents) {
+      const role = msg.role === 'model' ? 'assistant' : (msg.role || 'user');
+      if (msg.parts) {
+        msgs.push({ role, content: convertParts(msg.parts) });
+      }
+    }
+  }
+
+  return msgs;
+}
+
+const AUDIO_MIMES = new Set([
+  'audio/wav', 'audio/x-wav', 'audio/mpeg', 'audio/mp3', 'audio/mp4',
+  'audio/aac', 'audio/ogg', 'audio/flac', 'audio/aiff', 'audio/m4a',
+  'audio/webm',
+]);
+
+function mimeToAudioFormat(mime: string): string {
+  const map: Record<string, string> = {
+    'audio/wav': 'wav', 'audio/x-wav': 'wav',
+    'audio/mpeg': 'mp3', 'audio/mp3': 'mp3',
+    'audio/mp4': 'm4a', 'audio/m4a': 'm4a',
+    'audio/aac': 'aac', 'audio/ogg': 'ogg',
+    'audio/flac': 'flac', 'audio/aiff': 'aiff',
+    'audio/webm': 'wav',
+  };
+  return map[mime] || 'wav';
+}
+
+function convertParts(parts: any[]): any {
+  const hasMultimodal = parts.some((p: any) => p.inlineData);
+  if (!hasMultimodal) {
+    return parts.filter((p: any) => p.text).map((p: any) => p.text).join('\n');
+  }
+  return parts.map((p: any) => {
+    if (p.text) return { type: 'text' as const, text: p.text };
+    if (p.inlineData) {
+      const mime = p.inlineData.mimeType || '';
+      if (AUDIO_MIMES.has(mime)) {
+        return {
+          type: 'input_audio' as const,
+          input_audio: {
+            data: p.inlineData.data,
+            format: mimeToAudioFormat(mime),
+          },
+        };
+      }
+      return {
+        type: 'image_url' as const,
+        image_url: {
+          url: `data:${mime};base64,${p.inlineData.data}`,
+        },
+      };
+    }
+    if (p.fileData) {
+      return { type: 'text' as const, text: `[File reference: ${p.fileData.fileUri}]` };
+    }
+    return { type: 'text' as const, text: '' };
+  });
+}
+
+async function callOpenRouter(requestOptions: any): Promise<GenerateContentResponse> {
+  const apiKey = getOpenRouterKey();
+  if (!apiKey) throw new Error('VITE_OPENROUTER_API_KEY is not configured');
+
+  const model = toOpenRouterModel(requestOptions.model);
+  const messages = convertToOpenAIMessages(requestOptions.contents, requestOptions.config);
+
+  const body: any = { model, messages };
+  if (requestOptions.config?.maxOutputTokens) body.max_tokens = requestOptions.config.maxOutputTokens;
+  if (requestOptions.config?.temperature !== undefined) body.temperature = requestOptions.config.temperature;
+  if (requestOptions.config?.responseMimeType === 'application/json') {
+    body.response_format = { type: 'json_object' };
+  }
+
+  const response = await fetch('https://openrouter.ai/api/v1/chat/completions', {
+    method: 'POST',
+    headers: {
+      'Authorization': `Bearer ${apiKey}`,
+      'Content-Type': 'application/json',
+      'HTTP-Referer': typeof window !== 'undefined' ? window.location.origin : 'https://lumina-ai.app',
+      'X-Title': 'Lumina AI',
+    },
+    body: JSON.stringify(body),
+  });
+
+  if (!response.ok) {
+    const errText = await response.text();
+    const error: any = new Error(`OpenRouter error (${response.status}): ${errText}`);
+    error.status = response.status;
+    throw error;
+  }
+
+  const data = await response.json();
+  const text = data.choices?.[0]?.message?.content || '';
+
+  return {
+    text,
+    candidates: [{ content: { parts: [{ text }] } }],
+  } as any;
+}
+
+// Unified content generation — routes to OpenRouter or Gemini based on provider
+async function generateContent(requestOptions: any): Promise<GenerateContentResponse> {
+  if (getProvider() === 'openrouter') {
+    return callOpenRouter(requestOptions);
+  }
+  return ai.models.generateContent(requestOptions);
+}
+
 // ─── Retry Utility ───────────────────────────────────────────────────────────
-// Retryable HTTP status codes and message patterns
 const RETRYABLE_STATUSES = new Set([429, 500, 502, 503, 504]);
 const RETRYABLE_MSGS = ['rate limit', 'quota', 'overloaded', 'fetch failed', 'network error', 'etimedout', 'econnreset'];
 
@@ -20,13 +179,12 @@ async function withRetry<T>(fn: () => Promise<T>, maxRetries = 5, baseDelayMs = 
       lastError = error;
       if (attempt === maxRetries) break;
       
-      // The Google Gen AI SDK can nest the status in different ways
       const status: number = error.status ?? error.statusCode ?? error?.error?.code ?? error?.code ?? 0;
       const msg = (error.message ?? '').toLowerCase();
       
       const retryable = RETRYABLE_STATUSES.has(status) ||
         RETRYABLE_MSGS.some(m => msg.includes(m)) ||
-        status === 0; // network-level failures have no status
+        status === 0;
         
       if (!retryable) throw error;
       
@@ -48,23 +206,24 @@ async function generateWithFallback(
   requestOptions: any,
   fallbackModels: string[] = ["gemini-3.1-flash-lite-preview", "gemini-3-flash-preview"]
 ): Promise<GenerateContentResponse> {
+  const provider = getProvider();
   let lastError;
   const modelsToTry = [requestOptions.model, ...fallbackModels];
 
   for (let mi = 0; mi < modelsToTry.length; mi++) {
     const model = modelsToTry[mi];
-    const retries = mi === 0 ? 4 : 2; // more patience for the primary model
+    const retries = mi === 0 ? 4 : 2;
     try {
       return await withRetry(
-        () => ai.models.generateContent({ ...requestOptions, model }),
+        () => provider === 'openrouter'
+          ? callOpenRouter({ ...requestOptions, model })
+          : ai.models.generateContent({ ...requestOptions, model }),
         retries
       );
     } catch (error: any) {
-      log.warn('model_retries_exhausted', { model, message: error.message });
+      log.warn('model_retries_exhausted', { model, provider, message: error.message });
       lastError = error;
-      // The Google Gen AI SDK can nest the status in different ways
       const status: number = error.status ?? error.statusCode ?? error?.error?.code ?? error?.code ?? 0;
-      // Only advance to next model on quota/availability errors
       if (status !== 503 && status !== 429) {
         throw error;
       }
@@ -168,6 +327,9 @@ export async function uploadAudioToFileAPI(
   mimeType: string,
   displayName: string
 ): Promise<{ uri: string; name: string }> {
+  if (getProvider() === 'openrouter') {
+    throw new Error('File API not available with OpenRouter — falling back to batch processing');
+  }
   const apiKey = getApiKey();
   if (!apiKey) throw new Error('GEMINI_API_KEY is not configured');
 
@@ -253,6 +415,9 @@ export async function transcribeViaFileAPI(
   mimeType: string,
   prompt: string
 ): Promise<string> {
+  if (getProvider() === 'openrouter') {
+    throw new Error('File API not available with OpenRouter — falling back to batch processing');
+  }
   // ─── Fetch User Identity ──────────────────────────────────────────────────
   let userName = "the user";
   try {
@@ -816,7 +981,7 @@ ${notes}`;
 }
 
 export async function generateEmailContent(text: string): Promise<any> {
-  const response: GenerateContentResponse = await ai.models.generateContent({
+  const response: GenerateContentResponse = await generateContent({
     model: "gemini-3-flash-preview",
     contents: `You are an expert executive assistant. Based on the following meeting transcription, generate a highly detailed, professional follow-up email.
     DO NOT MISS ANY DETAILS. Capture every single decision, discussion point, and task mentioned in the meeting.
@@ -904,10 +1069,16 @@ function cleanTranscriptionForKG(raw: string, maxChars = 8000): string {
 }
 
 export async function extractKnowledgeGraph(meetingId: string, meetingTitle: string, text: string): Promise<any> {
+  const provider = getProvider();
   const geminiApiKey = (import.meta as any).env?.VITE_GEMINI_API_KEY || (import.meta as any).env?.GEMINI_API_KEY || process.env.GEMINI_API_KEY;
+  const openRouterKey = getOpenRouterKey();
   
-  if (!geminiApiKey) {
+  if (provider === 'gemini' && !geminiApiKey) {
     log.error('api_key_missing');
+    return { meetingId, meetingTitle, topics: [], decisions: [], people: [], actionItems: [], references: [] };
+  }
+  if (provider === 'openrouter' && !openRouterKey) {
+    log.error('openrouter_key_missing');
     return { meetingId, meetingTitle, topics: [], decisions: [], people: [], actionItems: [], references: [] };
   }
   
@@ -939,42 +1110,54 @@ Transcription: ${cleanTranscriptionForKG(text)}`;
     for (const model of modelsToTry) {
       let succeeded = false;
       for (let attempt = 0; attempt <= MAX_RETRIES; attempt++) {
-        response = await fetch(`https://generativelanguage.googleapis.com/v1beta/models/${model}:generateContent?key=${geminiApiKey}`, {
-          method: 'POST',
-          headers: {
-            'Content-Type': 'application/json',
-          },
-          body: JSON.stringify({
-            contents: [
-              { role: 'user', parts: [{ text: combinedPrompt }] }
-            ],
-            generationConfig: {
+        if (provider === 'openrouter') {
+          response = await fetch('https://openrouter.ai/api/v1/chat/completions', {
+            method: 'POST',
+            headers: {
+              'Authorization': `Bearer ${openRouterKey}`,
+              'Content-Type': 'application/json',
+              'HTTP-Referer': typeof window !== 'undefined' ? window.location.origin : 'https://lumina-ai.app',
+              'X-Title': 'Lumina AI',
+            },
+            body: JSON.stringify({
+              model: toOpenRouterModel(model),
+              messages: [{ role: 'user', content: combinedPrompt }],
               temperature: 0.1,
-              responseMimeType: "application/json"
-            }
-          })
-        });
+              response_format: { type: 'json_object' },
+            })
+          });
+        } else {
+          response = await fetch(`https://generativelanguage.googleapis.com/v1beta/models/${model}:generateContent?key=${geminiApiKey}`, {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({
+              contents: [{ role: 'user', parts: [{ text: combinedPrompt }] }],
+              generationConfig: { temperature: 0.1, responseMimeType: "application/json" }
+            })
+          });
+        }
 
         if (response.ok) { succeeded = true; break; }
-        // Only retry on 503 (overloaded) or 429 (rate limited)
         if (response.status !== 503 && response.status !== 429) break;
         if (attempt < MAX_RETRIES) {
           const delay = BASE_DELAY * Math.pow(2, attempt) + Math.random() * 1000;
-          log.warn('kg_extraction_retry', { model, status: response.status, delayMs: Math.round(delay), attempt: attempt + 1 });
+          log.warn('kg_extraction_retry', { model, provider, status: response.status, delayMs: Math.round(delay), attempt: attempt + 1 });
           await new Promise(r => setTimeout(r, delay));
         }
       }
       if (succeeded) break;
       const errorText = await response!.text();
-      log.warn('kg_extraction_model_failed', { model, status: response!.status, body: errorText.slice(0, 200) });
+      log.warn('kg_extraction_model_failed', { model, provider, status: response!.status, body: errorText.slice(0, 200) });
     }
 
     if (!response || !response.ok) {
-      throw new Error(`All KG extraction models failed`);
+      throw new Error(`All KG extraction models failed (provider: ${provider})`);
     }
 
     const data = await response.json();
-    const content = data.candidates?.[0]?.content?.parts?.[0]?.text || '{}';
+    const content = provider === 'openrouter'
+      ? data.choices?.[0]?.message?.content || '{}'
+      : data.candidates?.[0]?.content?.parts?.[0]?.text || '{}';
     
     // Extract and repair JSON from response
     let cleanContent = content.trim();
@@ -1057,7 +1240,7 @@ export async function generateWikiContent(text: string, style: 'MECE' | 'PRD'): 
     ? `Generate a detailed end-to-end report using the MECE (Mutually Exclusive, Collectively Exhaustive) framework. Ensure all points are logically grouped and exhaustive.`
     : `Generate a comprehensive Product Requirements Document (PRD). Include detailed sections for UI/UX Requirements, User Stories, Developer Team Tasks, and Competitor Analysis.`;
 
-  const response: GenerateContentResponse = await ai.models.generateContent({
+  const response: GenerateContentResponse = await generateContent({
     model: "gemini-3-flash-preview",
     contents: `Based on the following meeting transcription, ${prompt}
     
@@ -1102,7 +1285,7 @@ export async function generateWikiContent(text: string, style: 'MECE' | 'PRD'): 
 }
 
 export async function generatePodcastScript(text: string): Promise<any> {
-  const response: GenerateContentResponse = await ai.models.generateContent({
+  const response: GenerateContentResponse = await generateContent({
     model: "gemini-3-flash-preview",
     contents: `You are two engaging podcast hosts, Alex and Sarah. Based on the following meeting transcription or notes, create an engaging, dynamic podcast script.
     - Alex is the lead host, energetic and curious.
@@ -1145,10 +1328,9 @@ export async function generatePodcastScript(text: string): Promise<any> {
 }
 
 export async function chatWithPodcast(context: string, currentDialogue: any[], userMessage: string): Promise<any> {
-  // Format the history for the model
   const dialogueHistory = currentDialogue.map(d => `${d.speaker}: ${d.text}`).join('\n');
   
-  const response: GenerateContentResponse = await ai.models.generateContent({
+  const response: GenerateContentResponse = await generateContent({
     model: "gemini-3-flash-preview",
     contents: `You are two engaging podcast hosts, Alex and Sarah, currently mid-recording. 
     A special guest (the User) has just joined the studio live and said something.

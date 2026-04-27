@@ -10,6 +10,9 @@ export default defineConfig(({mode}) => {
     define: {
       'process.env.GEMINI_API_KEY': JSON.stringify(env.GEMINI_API_KEY),
       'process.env.TURBOPUFFER_API_KEY': JSON.stringify(env.VITE_TURBOPUFFER_API_KEY || ''),
+      'process.env.VITE_AI_PROVIDER': JSON.stringify(env.VITE_AI_PROVIDER || 'gemini'),
+      'process.env.VITE_OPENROUTER_API_KEY': JSON.stringify(env.VITE_OPENROUTER_API_KEY || ''),
+      'process.env.VITE_OPENROUTER_EMBED_MODEL': JSON.stringify(env.VITE_OPENROUTER_EMBED_MODEL || ''),
     },
     resolve: {
       alias: {

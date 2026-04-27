@@ -1,6 +1,12 @@
 import { Turbopuffer } from '@turbopuffer/turbopuffer';
 import { fetch as tauriFetch } from '@tauri-apps/plugin-http';
 import { logger } from '../lib/logger';
+import {
+  getTurbopufferIndexedSet,
+  markTurbopufferIndexed,
+  isTurbopufferIndexed,
+  clearTurbopufferLedgerState,
+} from './userLedgerService';
 
 const log = logger.scope('Turbopuffer');
 
@@ -218,38 +224,7 @@ export async function embedQuery(text: string): Promise<number[]> {
   return entry.vector;
 }
 
-// ─── Index ledger (localStorage) ─────────────────────────────────────────────
-
-const LEDGER_KEY = 'tpuf_indexed_meetings';
-
-function readLedger(): Set<string> {
-  try {
-    const raw = localStorage.getItem(LEDGER_KEY);
-    return raw ? new Set(JSON.parse(raw) as string[]) : new Set();
-  } catch {
-    return new Set();
-  }
-}
-
-function writeLedger(ids: Set<string>): void {
-  try {
-    localStorage.setItem(LEDGER_KEY, JSON.stringify(Array.from(ids)));
-  } catch { /* storage full — non-critical */ }
-}
-
-function markIndexed(meetingId: string): void {
-  const ids = readLedger();
-  ids.add(meetingId);
-  writeLedger(ids);
-}
-
-export function isAlreadyIndexed(meetingId: string): boolean {
-  return readLedger().has(meetingId);
-}
-
-export function clearIndexLedger(): void {
-  localStorage.removeItem(LEDGER_KEY);
-}
+// ─── Index ledger (Supabase per user — see userLedgerService) ──────────────
 
 // ─── Full pipeline: chunk + embed + upsert ───────────────────────────────────
 
@@ -287,7 +262,15 @@ export async function indexMeetingTranscription(
     .filter((c): c is ChunkForIndexing => c !== null);
 
   await upsertMeetingChunks(meetingId, meetingTitle, chunksForIndexing);
-  markIndexed(meetingId);
+  markTurbopufferIndexed(meetingId);
+}
+
+export function isAlreadyIndexed(meetingId: string): boolean {
+  return isTurbopufferIndexed(meetingId);
+}
+
+export function clearIndexLedger(): void {
+  clearTurbopufferLedgerState();
 }
 
 // ─── Backfill: index only un-indexed meetings ───────────────────────────────
@@ -297,7 +280,7 @@ export async function backfillExistingMeetings(
 ): Promise<void> {
   if (!isTurbopufferConfigured()) return;
 
-  const ledger = readLedger();
+  const ledger = getTurbopufferIndexedSet();
   const eligible = meetings.filter(
     m => m.id && m.transcription?.trim() && !ledger.has(m.id),
   );
@@ -306,7 +289,7 @@ export async function backfillExistingMeetings(
     return;
   }
 
-  log.info('backfill_started', { eligible: eligible.length, alreadyIndexed: meetings.length - eligible.length });
+  log.info('backfill_started', { eligible: eligible.length, alreadyIndexed: meetings.length - eligible.length, ledger: ledger.size });
 
   let indexed = 0;
   for (const meeting of eligible) {
