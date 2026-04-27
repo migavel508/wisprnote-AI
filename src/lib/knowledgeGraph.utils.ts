@@ -84,14 +84,51 @@ const EMBED_MODEL = 'gemini-embedding-001';
 const EMBED_FALLBACKS = ['gemini-embedding-001', 'text-embedding-004'];
 const EXTRACT_MODEL = 'gemini-3-flash-preview';
 
+// ─── AI Provider Helpers ─────────────────────────────────────────────────────
+type AIProvider = 'gemini' | 'openrouter';
+
+function getProvider(): AIProvider {
+  const p = import.meta.env.VITE_AI_PROVIDER ||
+    process.env.VITE_AI_PROVIDER || 'gemini';
+  return p === 'openrouter' ? 'openrouter' : 'gemini';
+}
+
+function getOpenRouterKey(): string {
+  return import.meta.env.VITE_OPENROUTER_API_KEY ||
+    process.env.VITE_OPENROUTER_API_KEY || '';
+}
+
+function toOpenRouterModel(model: string): string {
+  return model.startsWith('google/') ? model : `google/${model}`;
+}
+
+/** OpenRouter /v1/embeddings model — same ID family as EMBED_MODEL (gemini-embedding-001) so vector dim matches Turbopuffer + KG caches. */
+function getOpenRouterEmbedModel(): string {
+  return import.meta.env.VITE_OPENROUTER_EMBED_MODEL ||
+    process.env.VITE_OPENROUTER_EMBED_MODEL ||
+    'google/gemini-embedding-001';
+}
+
+/** 3072-dim only — must match existing `lumina-meetings` index (Google pipeline). Do not add smaller models. */
+const OR_EMBED_FALLBACKS = ['openai/text-embedding-3-large'];
+
+function getLsEmbedKey(): string {
+  if (getProvider() === 'openrouter') {
+    const m = getOpenRouterEmbedModel().replace(/[^a-zA-Z0-9._-]/g, '_');
+    return `kg_embed_cache_or_${m}`;
+  }
+  return 'kg_embed_cache';
+}
+
 function getApiKey(): string {
-  // Try Vite's import.meta.env first, then the define'd process.env fallback
   const key =
     import.meta.env.VITE_GEMINI_API_KEY ||
     import.meta.env.GEMINI_API_KEY ||
     process.env.GEMINI_API_KEY;
-  if (!key) throw new Error('Missing GEMINI_API_KEY — set VITE_GEMINI_API_KEY or GEMINI_API_KEY in your .env');
-  return key;
+  if (!key && getProvider() === 'gemini') {
+    throw new Error('Missing GEMINI_API_KEY — set VITE_GEMINI_API_KEY or GEMINI_API_KEY in your .env');
+  }
+  return key || '';
 }
 
 // ============================================================
@@ -158,15 +195,16 @@ export function buildMeetingEmbedText(meeting: MeetingRecord): string {
 // ============================================================
 
 let currentEmbedModel = EMBED_MODEL;
+let currentOrEmbedModel = getOpenRouterEmbedModel();
 
 // ── Persistent cache helpers (localStorage) ─────────────────────────────────
 // Two-tier: in-memory Map (hot) + localStorage (cold, survives reloads).
-const LS_EMBED_KEY = 'kg_embed_cache';
+// Storage key is namespaced by provider + embed model so Gemini vs OpenRouter vectors are never mixed.
 const LS_REL_KEY = 'kg_rel_cache';
 
 function loadEmbedCacheFromStorage(): Map<string, number[]> {
   try {
-    const raw = localStorage.getItem(LS_EMBED_KEY);
+    const raw = localStorage.getItem(getLsEmbedKey());
     if (!raw) return new Map();
     const entries: [string, number[]][] = JSON.parse(raw);
     return new Map(entries);
@@ -179,7 +217,7 @@ function saveEmbedCacheToStorage(cache: Map<string, number[]>) {
   try {
     // Keep max 2000 entries (~4 MB) to avoid localStorage quota issues
     const entries = [...cache.entries()].slice(-2000);
-    localStorage.setItem(LS_EMBED_KEY, JSON.stringify(entries));
+    localStorage.setItem(getLsEmbedKey(), JSON.stringify(entries));
   } catch {
     // Quota exceeded — silently fail, in-memory cache still works
   }
@@ -205,7 +243,7 @@ function saveRelCacheToStorage(key: string, value: ExtractedRelationship[]) {
 // Key: the exact text being embedded → Value: embedding vector.
 // L1: in-memory Map (instant). Hydrated from localStorage on module load.
 // L2: IndexedDB (durable, unlimited). Hydrated lazily on first batchEmbed call.
-// L3: Gemini API (only for genuinely new items).
+// L3: Remote embedding API (Gemini batchEmbed or OpenRouter /v1/embeddings).
 const _embedCache = loadEmbedCacheFromStorage();
 let _idbHydrated = false;
 
@@ -241,7 +279,12 @@ async function fetchWithRetry(
 export async function batchEmbed(
   items: Array<{ id: string; text: string }>
 ): Promise<Map<string, EmbeddingVector>> {
-  const apiKey = getApiKey();
+  const useOpenRouter = getProvider() === 'openrouter';
+  const apiKey = useOpenRouter ? '' : getApiKey();
+  const orKey = useOpenRouter ? getOpenRouterKey() : '';
+  if (useOpenRouter && !orKey) {
+    throw new Error('Missing VITE_OPENROUTER_API_KEY — required for embeddings when VITE_AI_PROVIDER=openrouter');
+  }
   const result = new Map<string, EmbeddingVector>();
 
   // Hydrate L1 from L2 (IndexedDB) on first call — one-time async load
@@ -280,9 +323,64 @@ export async function batchEmbed(
   for (let start = 0; start < uncached.length; start += EMBED_BATCH_SIZE) {
     const batch = uncached.slice(start, start + EMBED_BATCH_SIZE);
 
-    // Try the currently-known-good model first, then any other known fallbacks
-    // on 404. Race-safe: parallel callers each independently find a working model
-    // and converge on the shared `currentEmbedModel`.
+    if (useOpenRouter) {
+      const orCandidates = [
+        currentOrEmbedModel,
+        getOpenRouterEmbedModel(),
+        ...OR_EMBED_FALLBACKS,
+      ].filter((m, i, a) => a.indexOf(m) === i);
+
+      let response: Response | null = null;
+      let lastErrorBody = '';
+      for (const model of orCandidates) {
+        response = await fetchWithRetry(
+          'https://openrouter.ai/api/v1/embeddings',
+          {
+            method: 'POST',
+            headers: {
+              'Authorization': `Bearer ${orKey}`,
+              'Content-Type': 'application/json',
+              'HTTP-Referer': typeof window !== 'undefined' ? window.location.origin : 'https://lumina-ai.app',
+              'X-Title': 'Lumina AI',
+            },
+            body: JSON.stringify({
+              model,
+              input: batch.map(b => b.text),
+            }),
+          }
+        );
+
+        if (response.ok) {
+          if (currentOrEmbedModel !== model) {
+            log.warn('or_embedding_model_switched', { from: currentOrEmbedModel, to: model });
+            currentOrEmbedModel = model;
+          }
+          break;
+        }
+        if (response.status !== 404) break;
+        lastErrorBody = await response.clone().text();
+      }
+
+      if (!response || !response.ok) {
+        const body = response ? await response.text() : lastErrorBody;
+        throw new Error(`OpenRouter embedding error ${response?.status ?? 'unknown'}: ${body}`);
+      }
+
+      const data = await response.json();
+      const rows: Array<{ embedding: number[]; index: number }> = data.data || [];
+      const sorted = [...rows].sort((a, b) => a.index - b.index);
+      for (let i = 0; i < batch.length; i++) {
+        const vector = sorted[i]?.embedding;
+        if (!vector?.length) {
+          throw new Error(`OpenRouter embedding missing for batch index ${i}`);
+        }
+        _embedCache.set(batch[i].text, vector);
+        result.set(batch[i].id, { id: batch[i].id, text: batch[i].text, vector });
+      }
+      continue;
+    }
+
+    // ─── Google Generative Language batch embed ───────────────────────────
     const candidates = [
       currentEmbedModel,
       ...EMBED_FALLBACKS.filter(m => m !== currentEmbedModel),
@@ -317,8 +415,6 @@ export async function batchEmbed(
         break;
       }
 
-      // Only fall through to next candidate on 404 (model not available).
-      // Other errors (auth, quota, server) should bubble up immediately.
       if (response.status !== 404) break;
       lastErrorBody = await response.clone().text();
     }
@@ -333,7 +429,7 @@ export async function batchEmbed(
 
     for (let i = 0; i < batch.length; i++) {
       const vector = embeddings[i].values;
-      _embedCache.set(batch[i].text, vector); // populate cache
+      _embedCache.set(batch[i].text, vector);
       result.set(batch[i].id, {
         id: batch[i].id,
         text: batch[i].text,
@@ -572,31 +668,60 @@ If no relationships are found, return an empty array [].`;
   }
 
   try {
-    const response = await fetchWithRetry(
-      `https://generativelanguage.googleapis.com/v1beta/models/${EXTRACT_MODEL}:generateContent?key=${apiKey}`,
-      {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({
-          contents: [{ role: 'user', parts: [{ text: prompt }] }],
-          generationConfig: {
-            temperature: 0.1,
-            maxOutputTokens: 4096,
-            responseMimeType: 'application/json',
+    const provider = getProvider();
+    let response: Response;
+
+    if (provider === 'openrouter') {
+      const orKey = getOpenRouterKey();
+      if (!orKey) { log.warn('openrouter_key_missing'); return []; }
+
+      response = await fetchWithRetry(
+        'https://openrouter.ai/api/v1/chat/completions',
+        {
+          method: 'POST',
+          headers: {
+            'Authorization': `Bearer ${orKey}`,
+            'Content-Type': 'application/json',
+            'HTTP-Referer': typeof window !== 'undefined' ? window.location.origin : 'https://lumina-ai.app',
+            'X-Title': 'Lumina AI',
           },
-        }),
-      }
-    );
+          body: JSON.stringify({
+            model: toOpenRouterModel(EXTRACT_MODEL),
+            messages: [{ role: 'user', content: prompt }],
+            temperature: 0.1,
+            max_tokens: 4096,
+            response_format: { type: 'json_object' },
+          }),
+        }
+      );
+    } else {
+      response = await fetchWithRetry(
+        `https://generativelanguage.googleapis.com/v1beta/models/${EXTRACT_MODEL}:generateContent?key=${apiKey}`,
+        {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({
+            contents: [{ role: 'user', parts: [{ text: prompt }] }],
+            generationConfig: {
+              temperature: 0.1,
+              maxOutputTokens: 4096,
+              responseMimeType: 'application/json',
+            },
+          }),
+        }
+      );
+    }
 
     if (!response.ok) {
       const body = await response.text();
-      log.warn('relationship_extraction_api_error', { status: response.status, body: body.slice(0, 200) });
+      log.warn('relationship_extraction_api_error', { status: response.status, provider, body: body.slice(0, 200) });
       return [];
     }
 
     const data = await response.json();
-    const rawText =
-      data.candidates?.[0]?.content?.parts?.[0]?.text || '[]';
+    const rawText = provider === 'openrouter'
+      ? data.choices?.[0]?.message?.content || '[]'
+      : data.candidates?.[0]?.content?.parts?.[0]?.text || '[]';
 
     const parsed: ExtractedRelationship[] = JSON.parse(rawText);
 
@@ -1175,7 +1300,8 @@ export async function clearAllEmbedCaches(): Promise<void> {
   _idbHydrated = false;
   _relCacheKey = '';
   _relCacheValue = [];
-  try { localStorage.removeItem(LS_EMBED_KEY); } catch { /* ok */ }
+  try { localStorage.removeItem(getLsEmbedKey()); } catch { /* ok */ }
+  try { localStorage.removeItem('kg_embed_cache'); } catch { /* ok */ } // legacy Gemini key
   try { localStorage.removeItem(LS_REL_KEY); } catch { /* ok */ }
   await clearEmbedCacheIDB();
 }

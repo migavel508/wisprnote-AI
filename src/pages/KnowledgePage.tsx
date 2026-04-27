@@ -376,27 +376,57 @@ export default function KnowledgePage({
           )
         : `You are a helpful assistant that answers questions about the user's meeting knowledge graph.\n${kgData.map((m: any, i: number) => `Meeting ${i + 1}: ${m.meetingTitle}\n- Topics: ${(m.topics || []).map((t: any) => `${t.name} (${t.status}): ${t.summary}`).join('; ') || 'None'}\n- Decisions: ${(m.decisions || []).map((d: any) => d.decision).join('; ') || 'None'}\n- People: ${(m.people || []).join(', ') || 'None'}\n- Actions: ${(m.actionItems || []).map((a: any) => `${a.owner}: ${a.task}`).join('; ') || 'None'}`).join('\n\n')}\n\nAnswer the user's question based on this data. Be concise and helpful.`;
 
-      const geminiApiKey = import.meta.env.VITE_GEMINI_API_KEY || import.meta.env.GEMINI_API_KEY || process.env.GEMINI_API_KEY;
-      if (!geminiApiKey) throw new Error('Missing Gemini API key');
+      const aiProvider = import.meta.env.VITE_AI_PROVIDER || process.env.VITE_AI_PROVIDER || 'gemini';
+      let assistantMessage: string;
 
-      const response = await fetch(
-        `https://generativelanguage.googleapis.com/v1beta/models/gemini-3-flash-preview:generateContent?key=${geminiApiKey}`,
-        {
+      if (aiProvider === 'openrouter') {
+        const openRouterKey = import.meta.env.VITE_OPENROUTER_API_KEY || process.env.VITE_OPENROUTER_API_KEY;
+        if (!openRouterKey) throw new Error('Missing OpenRouter API key');
+
+        const response = await fetch('https://openrouter.ai/api/v1/chat/completions', {
           method: 'POST',
-          headers: { 'Content-Type': 'application/json' },
+          headers: {
+            'Authorization': `Bearer ${openRouterKey}`,
+            'Content-Type': 'application/json',
+            'HTTP-Referer': window.location.origin,
+            'X-Title': 'Lumina AI',
+          },
           body: JSON.stringify({
-            contents: [
-              { role: 'user', parts: [{ text: systemPrompt }] },
-              { role: 'model', parts: [{ text: 'I understand. I will help answer questions about your meeting knowledge graph based on the data provided.' }] },
-              { role: 'user', parts: [{ text: userMessage }] }
+            model: 'google/gemini-3-flash-preview',
+            messages: [
+              { role: 'system', content: systemPrompt },
+              { role: 'user', content: userMessage },
             ],
-            generationConfig: { temperature: 0.7, maxOutputTokens: 1024 }
+            temperature: 0.7,
+            max_tokens: 1024,
           })
-        }
-      );
+        });
 
-      const data = await response.json();
-      const assistantMessage = data.candidates?.[0]?.content?.parts?.[0]?.text || 'Sorry, I could not generate a response.';
+        const data = await response.json();
+        assistantMessage = data.choices?.[0]?.message?.content || 'Sorry, I could not generate a response.';
+      } else {
+        const geminiApiKey = import.meta.env.VITE_GEMINI_API_KEY || import.meta.env.GEMINI_API_KEY || process.env.GEMINI_API_KEY;
+        if (!geminiApiKey) throw new Error('Missing Gemini API key');
+
+        const response = await fetch(
+          `https://generativelanguage.googleapis.com/v1beta/models/gemini-3-flash-preview:generateContent?key=${geminiApiKey}`,
+          {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({
+              contents: [
+                { role: 'user', parts: [{ text: systemPrompt }] },
+                { role: 'model', parts: [{ text: 'I understand. I will help answer questions about your meeting knowledge graph based on the data provided.' }] },
+                { role: 'user', parts: [{ text: userMessage }] }
+              ],
+              generationConfig: { temperature: 0.7, maxOutputTokens: 1024 }
+            })
+          }
+        );
+
+        const data = await response.json();
+        assistantMessage = data.candidates?.[0]?.content?.parts?.[0]?.text || 'Sorry, I could not generate a response.';
+      }
       
       setChatMessages(prev => [...prev, { role: 'assistant', content: assistantMessage }]);
     } catch (error) {

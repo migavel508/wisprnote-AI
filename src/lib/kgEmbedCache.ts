@@ -14,13 +14,24 @@ import { logger } from './logger';
 
 const log = logger.scope('KGEmbedCache');
 
-const DB_NAME = 'kg_embed_cache';
+function getEmbedCacheDbName(): string {
+  const p = (import.meta as any).env?.VITE_AI_PROVIDER || 'gemini';
+  if (p === 'openrouter') {
+    const m = String(
+      (import.meta as any).env?.VITE_OPENROUTER_EMBED_MODEL ||
+        'google/gemini-embedding-001',
+    ).replace(/[^a-zA-Z0-9._-]/g, '_');
+    return `kg_embed_cache_or_${m}`;
+  }
+  return 'kg_embed_cache';
+}
+
 const DB_VERSION = 1;
 const STORE_NAME = 'embeddings';
 
 function openDB(): Promise<IDBDatabase> {
   return new Promise((resolve, reject) => {
-    const req = indexedDB.open(DB_NAME, DB_VERSION);
+    const req = indexedDB.open(getEmbedCacheDbName(), DB_VERSION);
     req.onupgradeneeded = () => {
       const db = req.result;
       if (!db.objectStoreNames.contains(STORE_NAME)) {

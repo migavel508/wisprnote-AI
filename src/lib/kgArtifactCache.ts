@@ -15,6 +15,7 @@
 
 import type { KGBuildArtifact, ExtractedRelationship } from './knowledgeGraph.utils';
 import { logger } from './logger';
+import { loadKgArtifactFromSupabase, saveKgArtifactToSupabase, clearKgArtifactInSupabase } from '../services/userLedgerService';
 
 const log = logger.scope('KGArtifactCache');
 
@@ -60,8 +61,24 @@ export function buildFingerprint(meetingIds: string[]): string {
   return [...meetingIds].sort().join(',');
 }
 
-/** Try to load a cached artifact matching the given fingerprint. */
+function fromSerialized(data: SerializedArtifact): KGBuildArtifact {
+  return {
+    nodes: data.nodes,
+    links: data.links,
+    relationships: data.relationships,
+    meetingEdgeMatrix: new Map(data.meetingEdgeMatrix),
+    embeddings: new Map(data.embeddings),
+  };
+}
+
+/** Try to load a cached artifact: Supabase (same user, any device) then IndexedDB. */
 export async function loadCachedArtifact(fingerprint: string): Promise<KGBuildArtifact | null> {
+  const fromCloud = await loadKgArtifactFromSupabase(fingerprint);
+  if (fromCloud) {
+    log.info('artifact_cache_hit', { source: 'supabase', meetings: fromCloud.meetingEdgeMatrix.size, embeddings: fromCloud.embeddings.size });
+    return fromCloud;
+  }
+
   try {
     const db = await openDB();
     return new Promise((resolve) => {
@@ -71,15 +88,9 @@ export async function loadCachedArtifact(fingerprint: string): Promise<KGBuildAr
       req.onsuccess = () => {
         const data = req.result as SerializedArtifact | undefined;
         if (!data) { resolve(null); return; }
-        // Rehydrate Maps
-        const artifact: KGBuildArtifact = {
-          nodes: data.nodes,
-          links: data.links,
-          relationships: data.relationships,
-          meetingEdgeMatrix: new Map(data.meetingEdgeMatrix),
-          embeddings: new Map(data.embeddings),
-        };
+        const artifact = fromSerialized(data);
         log.info('artifact_cache_hit', {
+          source: 'indexeddb',
           meetings: data.meetingEdgeMatrix.length,
           embeddings: data.embeddings.length,
           ageMs: Date.now() - data.savedAt,
@@ -116,6 +127,7 @@ export async function saveCachedArtifact(fingerprint: string, artifact: KGBuildA
       store.put(serialized);
       tx.oncomplete = () => {
         log.info('artifact_cache_saved', {
+          source: 'indexeddb',
           meetings: serialized.meetingEdgeMatrix.length,
           embeddings: serialized.embeddings.length,
         });
@@ -123,6 +135,7 @@ export async function saveCachedArtifact(fingerprint: string, artifact: KGBuildA
       };
       tx.onerror = () => reject(tx.error);
     });
+    void saveKgArtifactToSupabase(fingerprint, artifact);
   } catch (err) {
     log.warn('artifact_cache_save_failed', { error: err instanceof Error ? err : undefined });
   }
@@ -130,13 +143,14 @@ export async function saveCachedArtifact(fingerprint: string, artifact: KGBuildA
 
 /** Clear the artifact cache (used when rebuild is forced). */
 export async function clearArtifactCache(): Promise<void> {
+  void clearKgArtifactInSupabase();
   try {
     const db = await openDB();
     return new Promise((resolve) => {
       const tx = db.transaction(STORE_NAME, 'readwrite');
       tx.objectStore(STORE_NAME).clear();
       tx.oncomplete = () => resolve();
-      tx.onerror = () => resolve(); // non-critical
+      tx.onerror = () => resolve();
     });
   } catch {
     // non-critical
