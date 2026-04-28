@@ -1,5 +1,5 @@
 import { GoogleGenAI, GenerateContentResponse, Type } from "@google/genai";
-import { AudioBatch, blobToBase64 } from "./audioService";
+import { AudioBatch, blobToBase64, BlobReadError } from "./audioService";
 import { logger } from '../lib/logger';
 
 const log = logger.scope('Gemini');
@@ -187,9 +187,15 @@ async function withRetry<T>(fn: () => Promise<T>, maxRetries = 5, baseDelayMs = 
         status === 0;
         
       if (!retryable) throw error;
-      
-      const delay = baseDelayMs * Math.pow(2, attempt) + Math.random() * 1000;
-      log.warn('retry_attempt', { attempt: attempt + 1, maxRetries, delayMs: Math.round(delay), status, message: error.message });
+
+      // Rate-limit (429) and quota errors need a much longer cooldown than
+      // transient 5xx errors — the API typically enforces a 30-60s window.
+      const isRateLimit = status === 429 || msg.includes('rate limit') || msg.includes('quota') || msg.includes('resource exhausted');
+      const delay = isRateLimit
+        ? Math.min(20000 * Math.pow(1.5, attempt), 120000) + Math.random() * 5000
+        : baseDelayMs * Math.pow(2, attempt) + Math.random() * 1000;
+
+      log.warn('retry_attempt', { attempt: attempt + 1, maxRetries, delayMs: Math.round(delay), status, isRateLimit, message: error.message });
       await new Promise(r => setTimeout(r, delay));
     }
   }
@@ -212,7 +218,8 @@ async function generateWithFallback(
 
   for (let mi = 0; mi < modelsToTry.length; mi++) {
     const model = modelsToTry[mi];
-    const retries = mi === 0 ? 4 : 2;
+    // Give the primary model more attempts; fallbacks are safety nets.
+    const retries = mi === 0 ? 8 : 4;
     try {
       return await withRetry(
         () => provider === 'openrouter'
@@ -240,7 +247,15 @@ export interface ProcessResult {
 }
 
 export async function processAudioBatch(batch: AudioBatch, prompt: string): Promise<ProcessResult> {
-  const base64Data = await blobToBase64(batch.blob);
+  let base64Data: string;
+  try {
+    base64Data = await blobToBase64(batch.blob);
+  } catch (blobErr) {
+    // Propagate BlobReadError directly — callers must NOT treat this as a
+    // transient network issue (it means the audio data is gone from memory).
+    if (blobErr instanceof BlobReadError) throw blobErr;
+    throw new BlobReadError(`Unexpected blob read failure: ${(blobErr as Error).message}`);
+  }
   
   // ─── Fetch User Identity ──────────────────────────────────────────────────
   let userName = "the user";
@@ -320,6 +335,20 @@ Now transcribe the spoken audio verbatim. If no speech is present, return empty 
 }
 
 // ─── Gemini File API ──────────────────────────────────────────────────────────
+
+// Track consecutive File API failures so we stop wasting time + memory on an
+// upload path that clearly doesn't work in this environment (common in Tauri/WebKit).
+let _fileApiConsecutiveFailures = 0;
+const FILE_API_MAX_CONSECUTIVE_FAILURES = 2;
+
+export function isFileApiDisabledByFailures(): boolean {
+  return _fileApiConsecutiveFailures >= FILE_API_MAX_CONSECUTIVE_FAILURES;
+}
+
+export function resetFileApiFailures(): void {
+  _fileApiConsecutiveFailures = 0;
+}
+
 // Uploads an audio Blob to the Gemini File API via resumable upload.
 // Returns the file URI and internal name needed for subsequent calls.
 export async function uploadAudioToFileAPI(
@@ -330,55 +359,67 @@ export async function uploadAudioToFileAPI(
   if (getProvider() === 'openrouter') {
     throw new Error('File API not available with OpenRouter — falling back to batch processing');
   }
+  if (isFileApiDisabledByFailures()) {
+    throw new Error('File API skipped — too many consecutive failures in this session');
+  }
   const apiKey = getApiKey();
   if (!apiKey) throw new Error('GEMINI_API_KEY is not configured');
 
-  // Step 1 — initiate resumable upload session
-  const initRes = await withRetry(() => fetch(
-    `https://generativelanguage.googleapis.com/upload/v1beta/files?uploadType=resumable&key=${apiKey}`,
-    {
-      method: 'POST',
-      headers: {
-        'X-Goog-Upload-Protocol': 'resumable',
-        'X-Goog-Upload-Command': 'start',
-        'X-Goog-Upload-Header-Content-Length': String(blob.size),
-        'X-Goog-Upload-Header-Content-Type': mimeType,
-        'Content-Type': 'application/json',
-      },
-      body: JSON.stringify({ file: { displayName } }),
+  try {
+    // Step 1 — initiate resumable upload session (lightweight, no blob data)
+    const initRes = await withRetry(() => fetch(
+      `https://generativelanguage.googleapis.com/upload/v1beta/files?uploadType=resumable&key=${apiKey}`,
+      {
+        method: 'POST',
+        headers: {
+          'X-Goog-Upload-Protocol': 'resumable',
+          'X-Goog-Upload-Command': 'start',
+          'X-Goog-Upload-Header-Content-Length': String(blob.size),
+          'X-Goog-Upload-Header-Content-Type': mimeType,
+          'Content-Type': 'application/json',
+        },
+        body: JSON.stringify({ file: { displayName } }),
+      }
+    ), 2); // reduced retries: init is fast — if it fails twice, something is wrong
+
+    if (!initRes.ok) {
+      const err = await initRes.text();
+      throw new Error(`File API init failed (${initRes.status}): ${err}`);
     }
-  ), 3);
 
-  if (!initRes.ok) {
-    const err = await initRes.text();
-    throw new Error(`File API init failed (${initRes.status}): ${err}`);
+    const uploadUrl = initRes.headers.get('X-Goog-Upload-URL');
+    if (!uploadUrl) throw new Error('File API did not return an upload URL');
+
+    // Step 2 — upload the binary data.
+    // Pass the blob directly as the fetch body instead of converting to
+    // ArrayBuffer first.  This avoids doubling the file's memory footprint
+    // and prevents WebKit from creating orphaned internal blob resources
+    // that trigger WebKitBlobResource errors on failure/retry.
+    const uploadRes = await withRetry(() => fetch(uploadUrl, {
+      method: 'PUT',
+      headers: {
+        'Content-Length': String(blob.size),
+        'X-Goog-Upload-Offset': '0',
+        'X-Goog-Upload-Command': 'upload, finalize',
+      },
+      body: blob,
+    }), 1); // only 1 retry — each attempt creates WebKit blob resources
+
+    if (!uploadRes.ok) {
+      const err = await uploadRes.text();
+      throw new Error(`File API upload failed (${uploadRes.status}): ${err}`);
+    }
+
+    const data = await uploadRes.json();
+    _fileApiConsecutiveFailures = 0; // success resets the counter
+    return {
+      uri: data.file?.uri ?? data.uri,
+      name: data.file?.name ?? data.name,
+    };
+  } catch (err) {
+    _fileApiConsecutiveFailures++;
+    throw err;
   }
-
-  const uploadUrl = initRes.headers.get('X-Goog-Upload-URL');
-  if (!uploadUrl) throw new Error('File API did not return an upload URL');
-
-  // Step 2 — stream the binary data
-  const arrayBuffer = await blob.arrayBuffer();
-  const uploadRes = await withRetry(() => fetch(uploadUrl, {
-    method: 'PUT',
-    headers: {
-      'Content-Length': String(blob.size),
-      'X-Goog-Upload-Offset': '0',
-      'X-Goog-Upload-Command': 'upload, finalize',
-    },
-    body: arrayBuffer,
-  }), 3);
-
-  if (!uploadRes.ok) {
-    const err = await uploadRes.text();
-    throw new Error(`File API upload failed (${uploadRes.status}): ${err}`);
-  }
-
-  const data = await uploadRes.json();
-  return {
-    uri: data.file?.uri ?? data.uri,
-    name: data.file?.name ?? data.name,
-  };
 }
 
 // Polls until the uploaded file reaches ACTIVE state (ready to use).

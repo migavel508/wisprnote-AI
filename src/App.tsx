@@ -57,6 +57,7 @@ import {
   waitForFileActive,
   deleteFromFileAPI,
   transcribeViaFileAPI,
+  isFileApiDisabledByFailures,
 } from './services/geminiService';
 import {
   retrieveForSingleMeeting,
@@ -89,7 +90,7 @@ import {
   updateTaskNotes,
 } from './services/supabaseService';
 import { Session } from '@supabase/supabase-js';
-import { splitAudio, AudioBatch, shouldUseFileAPI, FILE_API_THRESHOLD_MB } from './services/audioService';
+import { splitAudio, AudioBatch, shouldUseFileAPI, FILE_API_THRESHOLD_MB, BlobReadError } from './services/audioService';
 import { 
   progressStorage, 
   generateProgressId, 
@@ -366,8 +367,19 @@ export default function App() {
 
   const isNetworkRelatedError = (err: any): boolean => {
     if (!err) return !navigator.onLine;
+
+    // Blob-read failures are NOT network issues — they mean the audio data
+    // was evicted from memory.  Treating them as "network" errors would
+    // trigger the offline-resume flow, which can never succeed because the
+    // blob is gone.  Callers handle BlobReadError separately.
+    if (err instanceof BlobReadError || err?.isBlobError) return false;
+
     const status = err.status ?? err.statusCode ?? err?.error?.code ?? err?.code ?? 0;
     const msg = String(err.message ?? err).toLowerCase();
+
+    // Exclude WebKit blob-resource errors that masquerade as fetch failures
+    if (msg.includes('webkitblobresource') || msg.includes('blob resource')) return false;
+
     const networkMarkers = [
       'network',
       'offline',
@@ -382,8 +394,22 @@ export default function App() {
       '503',
       '502',
       '504',
+      // Rate-limit and quota errors are transient — treat as retryable, not fatal
+      '429',
+      'rate limit',
+      'quota',
+      'overloaded',
+      'resource exhausted',
     ];
-    return !navigator.onLine || status === 0 || status === 502 || status === 503 || status === 504 || networkMarkers.some(marker => msg.includes(marker));
+    return (
+      !navigator.onLine ||
+      status === 0 ||
+      status === 429 ||
+      status === 502 ||
+      status === 503 ||
+      status === 504 ||
+      networkMarkers.some(marker => msg.includes(marker))
+    );
   };
 
   const persistTaskWithOfflineQueue = async (task: TaskHistory): Promise<TaskHistory> => {
@@ -2534,7 +2560,9 @@ export default function App() {
       let fullTranscription: string = '';
       
       // ─── Large File Path: Use Gemini File API ───────────────────────────────
-      if (shouldUseFileAPI(currentFile) && !resumeFromProgress) {
+      // Skip if the File API has failed multiple times in this session — avoids
+      // wasting time and creating WebKit memory pressure from repeated large uploads.
+      if (shouldUseFileAPI(currentFile) && !resumeFromProgress && !isFileApiDisabledByFailures()) {
         setStatus('processing');
         setError(null);
         setProcessingHeadline('Sending audio upstairs ☁️');
@@ -2579,6 +2607,9 @@ export default function App() {
 
         } catch (fileApiError: any) {
           log.warn('file_api_fallback', { error: fileApiError instanceof Error ? fileApiError : undefined });
+          // Give WebKit time to release internal blob resources from the
+          // failed upload before we start batch processing.
+          await new Promise(r => setTimeout(r, 1500));
           // Fall through to batch processing
           fullTranscription = '';
         }
@@ -2671,6 +2702,19 @@ export default function App() {
         setProcessingHeadline('Listening with big ears 👂');
         setProcessingSubtext('Turning talk into gold 🪄');
         const CONCURRENCY = 3;
+        // Max times we'll retry a wave of chunks due to transient failures before
+        // handing off to the offline-resume flow.
+        const MAX_WAVE_RETRIES = 8;
+
+        // Rate-limiter: stagger individual API calls within a wave so they don't
+        // all fire simultaneously and collectively trigger Gemini rate limits.
+        const STAGGER_MS = 2500;
+        let nextBatchSlotAt = 0;
+        const acquireBatchSlot = async () => {
+          const wait = nextBatchSlotAt - Date.now();
+          if (wait > 0) await new Promise(r => setTimeout(r, wait));
+          nextBatchSlotAt = Date.now() + STAGGER_MS;
+        };
 
         // Process only pending/error batches
         const batchesToProcess = results
@@ -2685,56 +2729,142 @@ export default function App() {
           const chunkEnd = Math.min(i + CONCURRENCY, batchesToProcess.length);
           const chunk = batchesToProcess.slice(i, chunkEnd);
 
-          // Mark as processing
-          chunk.forEach(({ originalIndex }) => {
-            results[originalIndex] = { ...results[originalIndex], status: 'processing' };
-          });
-          setBatches([...results]);
+          let waveRetry = 0;
 
-          // Process in parallel
-          await Promise.allSettled(
-            chunk.map(async ({ batch, originalIndex }) => {
-              try {
-                const result = await processAudioBatch(batch, prompt);
-                results[originalIndex] = { ...results[originalIndex], status: 'completed', result: result.text };
-              } catch (err: any) {
-                if (isNetworkRelatedError(err)) {
-                  // Keep retryable network failures pending so reconnect resumes seamlessly.
-                  results[originalIndex] = { ...results[originalIndex], status: 'pending', error: err.message || 'Network interruption' };
-                } else {
-                  results[originalIndex] = { ...results[originalIndex], status: 'error', error: err.message || 'Unknown error' };
+          // Inner retry loop: keeps retrying this wave until every chunk in it
+          // completes, the device goes offline, or we exhaust MAX_WAVE_RETRIES.
+          while (true) {
+            // Only (re)process chunks in this wave that aren't completed yet.
+            // Include both 'pending' (network error) and 'error' (e.g. exhausted
+            // per-call retries) so no batch is silently abandoned.
+            const toProcess = chunk.filter(({ originalIndex }) =>
+              results[originalIndex].status !== 'completed'
+            );
+
+            if (toProcess.length === 0) break; // whole wave done — advance outer loop
+
+            if (!navigator.onLine) {
+              throw new Error('NETWORK_RESUME_REQUIRED');
+            }
+
+            // Mark as processing
+            toProcess.forEach(({ originalIndex }) => {
+              results[originalIndex] = { ...results[originalIndex], status: 'processing' };
+            });
+            setBatches([...results]);
+
+            // Process in parallel but staggered: each request acquires a slot
+            // before firing so they never all hit the API at the exact same moment.
+            let blobEvicted = false;
+            await Promise.allSettled(
+              toProcess.map(async ({ batch, originalIndex }) => {
+                await acquireBatchSlot();
+                try {
+                  const result = await processAudioBatch(batch, prompt);
+                  results[originalIndex] = { ...results[originalIndex], status: 'completed', result: result.text };
+                } catch (err: any) {
+                  if (err instanceof BlobReadError || err?.isBlobError) {
+                    // Blob backing data was evicted — flag for re-split.
+                    blobEvicted = true;
+                    results[originalIndex] = { ...results[originalIndex], status: 'pending', error: 'Audio data evicted — will re-split' };
+                  } else if (isNetworkRelatedError(err)) {
+                    // Keep retryable failures as pending so the wave-retry loop picks them up.
+                    results[originalIndex] = { ...results[originalIndex], status: 'pending', error: err.message || 'Network interruption' };
+                  } else {
+                    results[originalIndex] = { ...results[originalIndex], status: 'error', error: err.message || 'Unknown error' };
+                  }
                 }
-              }
-              
-              // Save progress after each batch completes
-              const completedCount = results.filter(r => r.status === 'completed').length;
-              await progressStorage.saveProgress({
-                id: progressId,
-                filename: currentFile.name,
-                prompt,
-                mode: 'batch',
-                stage: 'batch-transcription',
-                totalBatches: results.length,
-                completedBatches: completedCount,
-                batches: results.map(b => ({
-                  index: b.index,
-                  status: b.status,
-                  result: b.result,
-                  error: b.error,
-                  startTime: b.startTime,
-                  endTime: b.endTime,
-                })),
-                audioBlob: currentFile,
-                createdAt: resumeFromProgress?.createdAt || Date.now(),
-                updatedAt: Date.now(),
-              });
-              
-              setBatches([...results]);
-            })
-          );
 
-          if (results.some(r => r.status === 'pending')) {
-            throw new Error('NETWORK_RESUME_REQUIRED');
+                // Save progress after each batch completes (blob is stored
+                // separately by progressStorage — no re-serialization here).
+                const completedCount = results.filter(r => r.status === 'completed').length;
+                await progressStorage.saveProgress({
+                  id: progressId,
+                  filename: currentFile.name,
+                  prompt,
+                  mode: 'batch',
+                  stage: 'batch-transcription',
+                  totalBatches: results.length,
+                  completedBatches: completedCount,
+                  batches: results.map(b => ({
+                    index: b.index,
+                    status: b.status,
+                    result: b.result,
+                    error: b.error,
+                    startTime: b.startTime,
+                    endTime: b.endTime,
+                  })),
+                  audioBlob: currentFile,
+                  createdAt: resumeFromProgress?.createdAt || Date.now(),
+                  updatedAt: Date.now(),
+                });
+
+                setBatches([...results]);
+              })
+            );
+
+            // If blob data was evicted, re-split the audio to regenerate
+            // fresh blob references for the remaining batches.
+            if (blobEvicted) {
+              log.warn('blob_evicted_resplitting');
+              setProcessingSubtext('Regenerating audio chunks…');
+              try {
+                const freshBatches = await splitAudio(currentFile, 15);
+                // Patch blob data back into all unfinished results
+                for (const item of batchesToProcess) {
+                  if (results[item.originalIndex].status !== 'completed') {
+                    const fb = freshBatches[item.batch.index];
+                    if (fb) {
+                      results[item.originalIndex] = {
+                        ...results[item.originalIndex],
+                        blob: fb.blob,
+                        mimeType: fb.mimeType,
+                      };
+                      item.batch = results[item.originalIndex];
+                    }
+                  }
+                }
+                // Also update the current wave's chunk references
+                for (const c of chunk) {
+                  if (results[c.originalIndex].status !== 'completed') {
+                    c.batch = results[c.originalIndex];
+                  }
+                }
+              } catch (resplitErr) {
+                log.error('resplit_failed', { error: resplitErr instanceof Error ? resplitErr : undefined });
+                throw new Error('Audio data was lost from memory and could not be regenerated. Please re-upload the file.');
+              }
+            }
+
+            // Check how many chunks in this wave still need work.
+            // Catch BOTH 'pending' (recognised network error) and 'error'
+            // (any other failure that slipped through isNetworkRelatedError).
+            const stillFailed = chunk.filter(({ originalIndex }) =>
+              results[originalIndex].status === 'pending' ||
+              results[originalIndex].status === 'error'
+            );
+
+            if (stillFailed.length === 0) break; // wave complete
+
+            // If we've genuinely lost the connection, hand off to resume flow.
+            if (!navigator.onLine) {
+              throw new Error('NETWORK_RESUME_REQUIRED');
+            }
+
+            // If we've exhausted per-wave retries, hand off to resume flow so
+            // the user isn't stuck forever on a stubborn wave.
+            if (waveRetry >= MAX_WAVE_RETRIES) {
+              throw new Error('NETWORK_RESUME_REQUIRED');
+            }
+
+            // Transient API failure (rate-limit, 503, brief drop) — back off and
+            // retry just the failing chunks without abandoning the whole job.
+            waveRetry++;
+            const backoffMs = Math.min(5000 * Math.pow(1.8, waveRetry - 1), 90000);
+            setProcessingSubtext(
+              `Retrying ${stillFailed.length} chunk(s)… (attempt ${waveRetry}/${MAX_WAVE_RETRIES})`
+            );
+            await new Promise(r => setTimeout(r, backoffMs));
           }
         }
 
