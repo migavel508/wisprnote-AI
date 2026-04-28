@@ -375,15 +375,42 @@ export async function splitAudio(
 
 /**
  * Converts a Blob to a base64 string.
+ * Validates the blob is still readable before attempting conversion —
+ * WebKit can silently evict blob backing data under memory pressure.
  */
 export function blobToBase64(blob: Blob): Promise<string> {
   return new Promise((resolve, reject) => {
+    if (!blob || blob.size === 0) {
+      return reject(new BlobReadError('Blob is empty or invalid (size=0)'));
+    }
     const reader = new FileReader();
     reader.onloadend = () => {
+      if (!reader.result || typeof reader.result !== 'string') {
+        return reject(new BlobReadError('FileReader returned empty result — blob data may have been evicted'));
+      }
       const base64String = (reader.result as string).split(',')[1];
+      if (!base64String) {
+        return reject(new BlobReadError('Base64 conversion produced empty output'));
+      }
       resolve(base64String);
     };
-    reader.onerror = reject;
+    reader.onerror = () => {
+      reject(new BlobReadError(
+        `FileReader failed: ${reader.error?.message || 'blob data unavailable (WebKitBlobResource eviction)'}`
+      ));
+    };
     reader.readAsDataURL(blob);
   });
+}
+
+/**
+ * Distinguishable error class for blob-read failures so they aren't
+ * confused with network errors in the caller's catch blocks.
+ */
+export class BlobReadError extends Error {
+  readonly isBlobError = true;
+  constructor(message: string) {
+    super(message);
+    this.name = 'BlobReadError';
+  }
 }
