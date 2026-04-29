@@ -120,6 +120,7 @@ import Auth from './components/Auth';
 import ChatPage from './pages/ChatPage';
 import NotesPage from './pages/NotesPage';
 import HistoryPage from './pages/HistoryPage';
+import SharedMeetingPage from './pages/SharedMeetingPage';
 import KnowledgePage from './pages/KnowledgePage';
 import ProcessPage from './pages/ProcessPage';
 import AudioDevicesPage from './pages/AudioDevicesPage';
@@ -143,7 +144,7 @@ declare global {
   }
 }
 
-type View = 'process' | 'history' | 'notes' | 'chat' | 'knowledge' | 'notebooks' | 'audio-devices';
+type View = 'process' | 'history' | 'notes' | 'chat' | 'knowledge' | 'notebooks' | 'audio-devices' | 'shared';
 type Status = 'idle' | 'splitting' | 'processing' | 'finalizing' | 'completed' | 'error';
 type NoteTab = 'transcription' | 'summary' | 'notes';
 
@@ -191,6 +192,7 @@ export default function App() {
   // Derive currentView from URL path
   const getCurrentView = (): View => {
     const path = location.pathname;
+    if (path.startsWith('/shared/')) return 'shared';
     if (path === '/' || path === '/process') return 'process';
     if (path === '/history') return 'history';
     if (path.startsWith('/notes')) return 'notes';
@@ -3028,6 +3030,10 @@ export default function App() {
     .filter(b => b.status === 'completed')
     .map(b => b.result)
     .join('\n\n---\n\n');
+
+  if (currentView === 'shared') {
+    return <SharedMeetingPage />;
+  }
 
   if (!session) {
     return <Auth />;
