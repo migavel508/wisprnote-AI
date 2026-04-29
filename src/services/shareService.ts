@@ -275,7 +275,7 @@ export async function verifyShareAccess(
     .from('task_history')
     .select(selectFields.join(','))
     .eq('id', share.task_id)
-    .single();
+    .single<{ filename: string; summary?: string; notes?: string; created_at?: string; duration?: number }>();
 
   if (taskErr || !task) {
     return { denied: true, reason: 'The shared meeting could not be found.' };
@@ -299,7 +299,7 @@ export async function verifyShareAccess(
 // ---------------------------------------------------------------------------
 
 export function getShareUrl(shareToken: string): string {
-  return `${window.location.origin}/shared/${shareToken}`;
+  return `https://www.wisprnote.com/shared/${shareToken}`;
 }
 
 export function copyShareUrl(shareToken: string): void {
