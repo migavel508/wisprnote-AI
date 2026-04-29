@@ -1,10 +1,13 @@
 import { createClient } from '@supabase/supabase-js';
+import { fetch as tauriFetch } from '@tauri-apps/plugin-http';
 import { logger } from '../lib/logger';
 
 const log = logger.scope('Supabase');
 
 const supabaseUrl = import.meta.env.VITE_SUPABASE_URL || '';
 const supabaseAnonKey = import.meta.env.VITE_SUPABASE_ANON_KEY || '';
+
+const isTauri = !!(window as any).__TAURI_INTERNALS__;
 
 export const supabase = createClient(supabaseUrl, supabaseAnonKey, {
   auth: {
@@ -14,6 +17,9 @@ export const supabase = createClient(supabaseUrl, supabaseAnonKey, {
     // eslint-disable-next-line @typescript-eslint/no-explicit-any
     lock: (_name: string, _acquireTimeout: number, fn: () => Promise<any>) => fn(),
   },
+  global: isTauri
+    ? { fetch: tauriFetch as unknown as typeof globalThis.fetch }
+    : undefined,
 });
 
 /**
