@@ -3,13 +3,14 @@ import { logger } from '../lib/logger';
 
 const log = logger.scope('NotesPage');
 import { motion, AnimatePresence } from 'framer-motion';
-import { BookOpen, Sparkles, Loader2, Check, RefreshCw, Image as ImageIcon } from 'lucide-react';
+import { BookOpen, Sparkles, Loader2, Check, RefreshCw, Image as ImageIcon, Share2 } from 'lucide-react';
 import Markdown from 'react-markdown';
 import remarkGfm from 'remark-gfm';
 import { TaskHistory, updateTaskTitle, updateTaskSummary, updateTaskNotes, updateTaskVisualization } from '../services/supabaseService';
 import { generateMeetingTitle, generateSummary, generateNotes, generateNotesVisualization } from '../services/geminiService';
 import { NotesPageSkeleton } from '../components/Skeleton';
 import { MeetingNoteTab } from '../components/ManualNotes/MeetingNoteTab';
+import ShareModal from '../components/ShareModal';
 
 interface NotesPageProps {
   selectedTask: TaskHistory | null;
@@ -41,6 +42,7 @@ export default function NotesPage({ selectedTask, onNavigateToAssets, isLoading 
   const [notesRegenerated, setNotesRegenerated] = useState(false);
   const [isVisualizing, setIsVisualizing] = useState(false);
   const [visualizationImage, setVisualizationImage] = useState<string | null>(selectedTask?.visualization_image || null);
+  const [isShareOpen, setIsShareOpen] = useState(false);
 
   useEffect(() => {
     setVisualizationImage(selectedTask?.visualization_image || null);
@@ -190,6 +192,14 @@ export default function NotesPage({ selectedTask, onNavigateToAssets, isLoading 
                 <Sparkles className="w-3 h-3" />
               )}
               <span className="hidden sm:inline">{titleGenerated ? 'Done' : 'AI Title'}</span>
+            </button>
+            <button
+              onClick={() => setIsShareOpen(true)}
+              className="flex-shrink-0 flex items-center gap-1.5 px-2.5 py-1 text-[10.5px] font-semibold text-[#a89888] hover:text-[#5c5147] bg-[#e8e2da]/40 hover:bg-[#e8e2da]/80 rounded-md transition-all"
+              title="Share meeting notes"
+            >
+              <Share2 className="w-3 h-3" />
+              <span className="hidden sm:inline">Share</span>
             </button>
           </div>
 
@@ -346,6 +356,15 @@ export default function NotesPage({ selectedTask, onNavigateToAssets, isLoading 
           </AnimatePresence>
         </div>
       </div>
+
+      {selectedTask.id && (
+        <ShareModal
+          taskId={selectedTask.id}
+          taskName={selectedTask.filename}
+          isOpen={isShareOpen}
+          onClose={() => setIsShareOpen(false)}
+        />
+      )}
     </div>
   );
 }
