@@ -48,7 +48,7 @@ export function ManualNoteEditor({ note, onSave, onBack }: ManualNoteEditorProps
   return (
     <div className="flex flex-col h-full bg-[#faf9f7]">
       {/* Header */}
-      <div className="flex-none flex items-center justify-between px-8 py-3 border-b border-[#e5e5e5] bg-[#faf9f7]/90 backdrop-blur sticky top-0 z-10">
+      <div className="flex-none flex items-center justify-between px-3 sm:px-6 md:px-8 py-3 border-b border-[#e5e5e5] bg-[#faf9f7]/90 backdrop-blur sticky top-0 z-10">
         <button
           onClick={onBack}
           className="flex items-center gap-1.5 text-[13px] text-[#595959] hover:text-[#1a1a1a] transition-colors"
@@ -67,14 +67,14 @@ export function ManualNoteEditor({ note, onSave, onBack }: ManualNoteEditorProps
 
       {/* Scrollable editor area */}
       <div className="flex-1 overflow-y-auto">
-        <div className="max-w-3xl mx-auto px-8 sm:px-12 py-14">
+        <div className="max-w-3xl mx-auto px-3 sm:px-8 md:px-12 py-6 sm:py-14">
           {/* Title */}
           <input
             type="text"
             value={title}
             onChange={(e) => setTitle(e.target.value)}
             placeholder="Untitled"
-            className="w-full text-[2.5rem] font-bold leading-tight border-none outline-none placeholder:text-[#d8d8d8] mb-6 bg-transparent"
+            className="w-full text-[1.5rem] sm:text-[2.5rem] font-bold leading-tight border-none outline-none placeholder:text-[#d8d8d8] mb-4 sm:mb-6 bg-transparent"
           />
 
           {/* Notion-like slash editor */}

@@ -57,21 +57,22 @@ export function ManualNotesList({ onSelectNote, onCreateNote }: ManualNotesListP
 
   return (
     <div className="h-full flex flex-col bg-[#FAFAFA] animate-in fade-in duration-500">
-      <div className="flex items-center justify-between p-8">
+      <div className="flex items-center justify-between px-3 sm:px-6 md:px-8 py-5 sm:py-8">
         <div>
-          <h1 className="text-2xl font-bold tracking-tight text-[#141414]">Notebooks</h1>
-          <p className="text-sm text-gray-500 mt-1">Your manual notes, thoughts, and drafts.</p>
+          <h1 className="text-xl sm:text-2xl font-bold tracking-tight text-[#141414]">Notebooks</h1>
+          <p className="text-xs sm:text-sm text-gray-500 mt-0.5 sm:mt-1">Your manual notes and drafts.</p>
         </div>
         <button
           onClick={onCreateNote}
-          className="flex items-center gap-2 bg-[#141414] text-[#E4E3E0] px-4 py-2.5 rounded-xl hover:bg-black transition-all shadow-[2px_2px_0px_0px_rgba(20,20,20,1)] hover:translate-x-[2px] hover:translate-y-[2px] hover:shadow-none font-medium text-sm"
+          className="flex items-center gap-1.5 sm:gap-2 bg-[#141414] text-[#E4E3E0] px-3 sm:px-4 py-2 sm:py-2.5 rounded-xl hover:bg-black transition-all shadow-[2px_2px_0px_0px_rgba(20,20,20,1)] hover:translate-x-[2px] hover:translate-y-[2px] hover:shadow-none font-medium text-xs sm:text-sm"
         >
           <Plus className="w-4 h-4" />
-          New Note
+          <span className="hidden sm:inline">New Note</span>
+          <span className="sm:hidden">New</span>
         </button>
       </div>
 
-      <div className="px-8 pb-4">
+      <div className="px-3 sm:px-6 md:px-8 pb-3 sm:pb-4">
         <div className="relative max-w-md">
           <Search className="absolute left-3 top-1/2 -translate-y-1/2 w-4 h-4 text-gray-400" />
           <input
@@ -79,12 +80,12 @@ export function ManualNotesList({ onSelectNote, onCreateNote }: ManualNotesListP
             placeholder="Search notes..."
             value={searchQuery}
             onChange={(e) => setSearchQuery(e.target.value)}
-            className="w-full pl-10 pr-4 py-2.5 bg-white border border-gray-200 rounded-xl text-sm focus:outline-none focus:ring-2 focus:ring-black/5"
+            className="w-full pl-10 pr-4 py-2 sm:py-2.5 bg-white border border-gray-200 rounded-xl text-sm focus:outline-none focus:ring-2 focus:ring-black/5"
           />
         </div>
       </div>
 
-      <div className="flex-1 overflow-y-auto px-8 pb-8">
+      <div className="flex-1 overflow-y-auto px-3 sm:px-6 md:px-8 pb-4 sm:pb-8">
         {isLoading ? (
           <div className="flex items-center justify-center h-64">
             <Loader2 className="w-8 h-8 animate-spin text-gray-400" />
@@ -101,7 +102,7 @@ export function ManualNotesList({ onSelectNote, onCreateNote }: ManualNotesListP
             </button>
           </div>
         ) : (
-          <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-4">
+          <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-3 gap-3 sm:gap-4">
             {filteredNotes.map((note, idx) => (
               <motion.div
                 initial={{ opacity: 0, y: 20 }}
@@ -109,7 +110,7 @@ export function ManualNotesList({ onSelectNote, onCreateNote }: ManualNotesListP
                 transition={{ delay: idx * 0.05 }}
                 key={note.id}
                 onClick={() => onSelectNote(note)}
-                className="bg-white p-6 rounded-2xl border border-gray-200 hover:border-[#141414] hover:shadow-[4px_4px_0px_0px_rgba(20,20,20,1)] transition-all cursor-pointer group flex flex-col h-48"
+                className="bg-white p-4 sm:p-6 rounded-xl sm:rounded-2xl border border-gray-200 hover:border-[#141414] hover:shadow-[4px_4px_0px_0px_rgba(20,20,20,1)] transition-all cursor-pointer group flex flex-col h-40 sm:h-48"
               >
                 <div className="flex items-start justify-between mb-4">
                   <div className="p-2 bg-gray-50 rounded-xl text-gray-500 group-hover:text-[#141414] group-hover:bg-gray-100 transition-colors">
