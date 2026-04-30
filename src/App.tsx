@@ -36,6 +36,8 @@ import {
   StopCircle,
   PauseCircle,
   PlayCircle,
+  AudioLines,
+  PenLine,
 } from 'lucide-react';
 import { motion, AnimatePresence } from 'motion/react';
 import Markdown from 'react-markdown';
@@ -184,6 +186,54 @@ interface BatchStatus extends AudioBatch {
 }
 
 log.info('app_loaded', { timestamp: new Date().toISOString() });
+
+type MobileView = 'process' | 'history' | 'notes' | 'chat' | 'knowledge' | 'notebooks' | 'audio-devices';
+
+function MobileBottomNav({ currentView, onViewChange, status }: {
+  currentView: View;
+  onViewChange: (view: MobileView) => void;
+  status: string;
+}) {
+  const tabs: { id: MobileView; label: string; icon: typeof AudioLines }[] = [
+    { id: 'process', label: 'Record', icon: AudioLines },
+    { id: 'notes', label: 'Notes', icon: PenLine },
+    { id: 'chat', label: 'Chat', icon: MessageSquare },
+    { id: 'history', label: 'History', icon: Clock },
+    { id: 'knowledge', label: 'Graph', icon: Network },
+  ];
+
+  return (
+    <nav className="md:hidden flex-shrink-0 bg-[#e5ddd4] border-t border-[#d5cbc0] px-1 pb-[env(safe-area-inset-bottom)] z-50">
+      <div className="flex items-center justify-around h-14">
+        {tabs.map((tab) => {
+          const Icon = tab.icon;
+          const isActive = currentView === tab.id;
+          return (
+            <button
+              key={tab.id}
+              onClick={() => onViewChange(tab.id)}
+              className={`flex flex-col items-center justify-center gap-0.5 flex-1 py-1.5 rounded-lg transition-colors ${
+                isActive
+                  ? 'text-[#1a1a1a]'
+                  : 'text-[#9a918a]'
+              }`}
+            >
+              <div className="relative">
+                <Icon size={20} strokeWidth={isActive ? 2 : 1.5} />
+                {tab.id === 'process' && status !== 'idle' && (
+                  <span className="absolute -top-0.5 -right-0.5 w-2 h-2 rounded-full bg-amber-500 animate-pulse" />
+                )}
+              </div>
+              <span className={`text-[10px] leading-tight ${isActive ? 'font-semibold' : 'font-medium'}`}>
+                {tab.label}
+              </span>
+            </button>
+          );
+        })}
+      </div>
+    </nav>
+  );
+}
 
 export default function App() {
   const navigate = useNavigate();
@@ -3040,7 +3090,7 @@ export default function App() {
   }
 
   return (
-    <div className="h-screen bg-[#e5ddd4] text-[#1a1a1a] font-[system-ui] selection:bg-[#1a1a1a] selection:text-white flex overflow-hidden">
+    <div className="h-screen bg-[#e5ddd4] text-[#1a1a1a] font-[system-ui] selection:bg-[#1a1a1a] selection:text-white flex flex-col md:flex-row overflow-hidden">
       {/* Network Status — floating pill toast (Apple-style) */}
       <AnimatePresence>
         {!isOnline && (
@@ -3145,31 +3195,33 @@ export default function App() {
         )}
       </AnimatePresence>
 
-      {/* Sidebar — always visible (collapsed icon-rail or expanded) */}
-      <MainSidebar
-        currentView={currentView}
-        onViewChange={(view) => {
-          if (view === 'notes' && selectedTask) {
-            setCurrentView('notes', selectedTask.id);
-          } else if (view === 'chat') {
-            setCurrentView('chat', selectedTask?.id);
-          } else {
-            setCurrentView(view);
-          }
-        }}
-        isOpen={isSidebarOpen}
-        onToggle={() => setIsSidebarOpen(!isSidebarOpen)}
-        session={session}
-        onSignOut={() => { clearUserState(); supabase.auth.signOut(); }}
-        status={status}
-      />
+      {/* Sidebar — hidden on mobile, icon-rail or expanded on desktop */}
+      <div className="hidden md:block">
+        <MainSidebar
+          currentView={currentView}
+          onViewChange={(view) => {
+            if (view === 'notes' && selectedTask) {
+              setCurrentView('notes', selectedTask.id);
+            } else if (view === 'chat') {
+              setCurrentView('chat', selectedTask?.id);
+            } else {
+              setCurrentView(view);
+            }
+          }}
+          isOpen={isSidebarOpen}
+          onToggle={() => setIsSidebarOpen(!isSidebarOpen)}
+          session={session}
+          onSignOut={() => { clearUserState(); supabase.auth.signOut(); }}
+          status={status}
+        />
+      </div>
 
       {/* Main Content Area — white rounded container */}
-      <div className="flex-1 flex flex-col overflow-hidden relative">
-        {/* Top drag region — enables double-click to zoom (macOS native behavior) */}
-        <div data-tauri-drag-region className="w-full h-10 flex-shrink-0 cursor-default" style={{ WebkitUserSelect: 'none', userSelect: 'none' }} />
-        <div className="flex-1 flex overflow-hidden pr-2.5 pl-1.5 pb-2.5 pt-0">
-        <main className="flex-1 bg-white w-full relative overflow-y-auto rounded-tl-2xl rounded-tr-2xl rounded-bl-2xl rounded-br-2xl shadow-sm border border-[#d8cec3]/60">
+      <div className="flex-1 flex flex-col overflow-hidden relative min-h-0">
+        {/* Top drag region — enables double-click to zoom (macOS native behavior), hidden on mobile */}
+        <div data-tauri-drag-region className="w-full h-0 md:h-10 flex-shrink-0 cursor-default" style={{ WebkitUserSelect: 'none', userSelect: 'none' }} />
+        <div className="flex-1 flex overflow-hidden p-0 md:pr-2.5 md:pl-1.5 md:pb-2.5 md:pt-0">
+        <main className="flex-1 bg-white w-full relative overflow-y-auto rounded-none md:rounded-2xl shadow-sm md:border md:border-[#d8cec3]/60">
           <AnimatePresence mode="wait">
             {currentView === 'process' && (
               <motion.div 
@@ -3335,6 +3387,21 @@ export default function App() {
         </main>
         </div>
       </div>
+
+      {/* Mobile Bottom Navigation — visible only on mobile */}
+      <MobileBottomNav
+        currentView={currentView}
+        onViewChange={(view) => {
+          if (view === 'notes' && selectedTask) {
+            setCurrentView('notes', selectedTask.id);
+          } else if (view === 'chat') {
+            setCurrentView('chat', selectedTask?.id);
+          } else {
+            setCurrentView(view);
+          }
+        }}
+        status={status}
+      />
     </div>
   );
 }

@@ -143,13 +143,13 @@ export default function AudioDevicesPage({ isRecording, currentInputDevice, devi
 
   return (
     <div className="flex flex-col h-full bg-white font-[system-ui] overflow-y-auto">
-      <div className="w-full max-w-[760px] mx-auto px-4 sm:px-8 pt-8 sm:pt-12 pb-12">
+      <div className="w-full max-w-[760px] mx-auto px-3 sm:px-6 md:px-8 pt-5 sm:pt-12 pb-8 sm:pb-12">
         {/* Page Title */}
-        <h1 className="text-[24px] sm:text-[32px] font-serif text-[#141414]/30 mb-2">
+        <h1 className="text-[20px] sm:text-[32px] font-serif text-[#141414]/30 mb-1 sm:mb-2">
           Audio Devices
         </h1>
-        <p className="text-[14px] text-[#141414]/40 mb-8">
-          Manage input & output devices. Changes are auto-detected and handled seamlessly during recording.
+        <p className="text-[12px] sm:text-[14px] text-[#141414]/40 mb-5 sm:mb-8">
+          Manage input & output devices. Changes are auto-detected.
         </p>
 
         {/* Status Cards Row */}

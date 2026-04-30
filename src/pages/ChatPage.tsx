@@ -181,7 +181,7 @@ export default function ChatPage({
   return (
     <div className="h-full w-full bg-white flex flex-col overflow-hidden font-[system-ui]">
       {/* Header */}
-      <div className="flex-none flex items-center gap-2.5 px-6 sm:px-8 py-4 overflow-x-auto no-scrollbar whitespace-nowrap z-10">
+      <div className="flex-none flex items-center gap-2 sm:gap-2.5 px-3 sm:px-6 md:px-8 py-3 sm:py-4 overflow-x-auto no-scrollbar whitespace-nowrap z-10">
         <MessageSquare className="w-4 h-4 flex-shrink-0 text-[#1a1a1a]/20" />
         
         {onSelectTask ? (
@@ -212,17 +212,17 @@ export default function ChatPage({
 
       {/* Scrollable messages area */}
       <div className="flex-1 overflow-y-auto">
-        <div className="max-w-3xl w-full mx-auto px-4 sm:px-8 py-6 space-y-6">
+        <div className="max-w-3xl w-full mx-auto px-3 sm:px-6 md:px-8 py-4 sm:py-6 space-y-4 sm:space-y-6">
 
           {/* Empty state */}
           {isEmpty && (
-            <div className="flex flex-col items-center justify-center text-center py-14">
-              <h1 className="text-[28px] sm:text-[32px] font-serif italic text-[#1a1a1a]/70 leading-tight mb-2">Chat</h1>
-              <p className="text-[14px] text-[#1a1a1a]/50 max-w-xl mb-10">
+            <div className="flex flex-col items-center justify-center text-center py-8 sm:py-14">
+              <h1 className="text-[22px] sm:text-[32px] font-serif italic text-[#1a1a1a]/70 leading-tight mb-2">Chat</h1>
+              <p className="text-[13px] sm:text-[14px] text-[#1a1a1a]/50 max-w-xl mb-6 sm:mb-10 px-2">
                 Ask anything about <span className="font-semibold text-[#1a1a1a]/80">{currentTaskLabel}</span>.
                 Type <kbd className="px-1.5 py-0.5 bg-[#1a1a1a]/[0.04] border border-[#1a1a1a]/[0.06] rounded-md text-[12px] font-medium">/</kbd> for AI commands.
               </p>
-              <div className="grid grid-cols-1 sm:grid-cols-2 gap-3 w-full max-w-2xl mb-8">
+              <div className="grid grid-cols-1 sm:grid-cols-2 gap-2 sm:gap-3 w-full max-w-2xl mb-6 sm:mb-8">
                 {[
                   { label: 'Summarize decisions', prompt: 'Summarize the key decisions made in this meeting.', icon: FileText, bg: 'bg-amber-50 text-amber-500' },
                   { label: 'List action items', prompt: 'What are my action items from this discussion?', icon: CheckCircle2, bg: 'bg-blue-50 text-blue-500' },
@@ -231,7 +231,7 @@ export default function ChatPage({
                 ].map((item, i) => (
                   <button key={i}
                     onClick={() => item.slash ? selectSlashCommand(item.slash) : setChatInput(item.prompt)}
-                    className="flex items-center justify-between p-4 bg-[#f5f2ef] hover:bg-[#eeebe7] rounded-2xl transition-all group text-left">
+                    className="flex items-center justify-between p-3 sm:p-4 bg-[#f5f2ef] hover:bg-[#eeebe7] rounded-xl sm:rounded-2xl transition-all group text-left">
                     <div className="flex items-center gap-3">
                       <div className={`w-9 h-9 rounded-xl flex items-center justify-center ${item.bg}`}>
                         <item.icon className="w-4 h-4" />
@@ -496,7 +496,7 @@ export default function ChatPage({
       </div>
 
       {/* Input area — fixed at bottom */}
-      <div className="flex-none px-4 sm:px-8 py-4">
+      <div className="flex-none px-2 sm:px-6 md:px-8 py-2 sm:py-4">
         <div className="max-w-3xl mx-auto relative">
 
           {/* Slash command dropdown */}
@@ -574,7 +574,7 @@ export default function ChatPage({
           </AnimatePresence>
 
           {/* Textarea */}
-          <div className="bg-[#f5f2ef] rounded-2xl focus-within:bg-white focus-within:ring-1 focus-within:ring-[#1a1a1a]/12 focus-within:shadow-[0_2px_16px_rgba(0,0,0,0.06)] transition-all overflow-hidden flex flex-col">
+          <div className="bg-[#f5f2ef] rounded-xl sm:rounded-2xl focus-within:bg-white focus-within:ring-1 focus-within:ring-[#1a1a1a]/12 focus-within:shadow-[0_2px_16px_rgba(0,0,0,0.06)] transition-all overflow-hidden flex flex-col">
             <textarea
               ref={textareaRef}
               value={chatInput}
@@ -592,15 +592,23 @@ export default function ChatPage({
                 }
               }}
               placeholder="Ask anything… or type / for commands"
-              className="w-full bg-transparent border-none outline-none px-5 py-4 text-[14px] text-[#1a1a1a] placeholder:text-[#1a1a1a]/40 resize-none max-h-40 min-h-[52px]"
+              className="w-full bg-transparent border-none outline-none px-3 sm:px-5 py-3 sm:py-4 text-[14px] text-[#1a1a1a] placeholder:text-[#1a1a1a]/40 resize-none max-h-40 min-h-[44px] sm:min-h-[52px]"
               rows={1}
             />
-            <div className="px-3 pb-3 pt-1 flex items-center justify-between">
-              <div className="flex items-center gap-1">
+            <div className="px-2 sm:px-3 pb-2 sm:pb-3 pt-0.5 sm:pt-1 flex items-center justify-between">
+              <div className="hidden sm:flex items-center gap-1">
                 {SLASH_COMMANDS.map(cmd => (
                   <button key={cmd.id} onClick={() => selectSlashCommand(cmd)}
                     className="flex items-center gap-1.5 px-2.5 py-1.5 rounded-lg text-[12px] font-medium text-[#1a1a1a]/40 hover:bg-[#1a1a1a]/[0.06] hover:text-[#1a1a1a]/70 transition-colors">
                     <cmd.icon className="w-3 h-3" />{cmd.label}
+                  </button>
+                ))}
+              </div>
+              <div className="flex sm:hidden items-center gap-1">
+                {SLASH_COMMANDS.map(cmd => (
+                  <button key={cmd.id} onClick={() => selectSlashCommand(cmd)}
+                    className="p-1.5 rounded-lg text-[#1a1a1a]/30 hover:bg-[#1a1a1a]/[0.06] hover:text-[#1a1a1a]/60 transition-colors">
+                    <cmd.icon className="w-4 h-4" />
                   </button>
                 ))}
               </div>

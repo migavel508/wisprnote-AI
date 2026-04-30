@@ -543,12 +543,12 @@ export default function KnowledgePage({
   return (
     <div className="absolute inset-0 flex flex-col bg-white overflow-hidden">
       {/* Header */}
-      <div className="flex-none bg-white border-b border-[#141414]/10 px-4 sm:px-6 py-3 sm:py-4">
-        <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-3 sm:gap-4">
-          <div>
-            <h2 className="text-lg sm:text-xl font-serif italic font-bold flex items-center gap-2">
-              <Network className="w-4 sm:w-5 h-4 sm:h-5" />
-              Knowledge Graph
+      <div className="flex-none bg-white border-b border-[#141414]/10 px-3 sm:px-6 py-2.5 sm:py-4">
+        <div className="flex items-center justify-between gap-2 sm:gap-4">
+          <div className="min-w-0">
+            <h2 className="text-base sm:text-xl font-serif italic font-bold flex items-center gap-1.5 sm:gap-2">
+              <Network className="w-4 sm:w-5 h-4 sm:h-5 flex-shrink-0" />
+              <span className="truncate">Knowledge Graph</span>
             </h2>
             <p className="text-[10px] sm:text-xs opacity-50 mt-0.5 hidden sm:block">Cross-meeting memory — see how topics, decisions, and people connect</p>
           </div>
@@ -692,7 +692,7 @@ export default function KnowledgePage({
               <div className="flex-1 flex flex-col min-h-0 overflow-hidden">
                 <div className="flex-1 flex flex-col min-w-0 min-h-0">
                   {/* View controls */}
-                  <div className="flex-none flex flex-wrap items-center gap-2 px-3 py-2 bg-white border-b border-gray-100">
+                  <div className="flex-none flex items-center gap-1.5 sm:gap-2 px-2 sm:px-3 py-1.5 sm:py-2 bg-white border-b border-gray-100 overflow-x-auto no-scrollbar">
                     <button
                       type="button"
                       onClick={() => setBrowsePanelOpen((v) => !v)}

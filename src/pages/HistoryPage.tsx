@@ -189,15 +189,15 @@ export default function HistoryPage({ history, onSelectTask, isLoading = false, 
   return (
     <div className="absolute inset-0 flex flex-col bg-white overflow-hidden font-[system-ui]">
       {/* Fixed Header */}
-      <div className="flex-none px-6 sm:px-10 pt-8 pb-5">
+      <div className="flex-none px-3 sm:px-6 md:px-10 pt-5 sm:pt-8 pb-3 sm:pb-5">
         <div className="max-w-5xl mx-auto">
-          <div className="flex flex-col sm:flex-row items-start sm:items-end justify-between gap-4 mb-6">
+          <div className="flex flex-col sm:flex-row items-start sm:items-end justify-between gap-3 sm:gap-4 mb-4 sm:mb-6">
             <div>
-              <h2 className="text-[28px] sm:text-[32px] font-serif italic text-[#1a1a1a]/70 leading-tight">
+              <h2 className="text-[22px] sm:text-[32px] font-serif italic text-[#1a1a1a]/70 leading-tight">
                 All Meetings
               </h2>
               {!isLoading && history.length > 0 && (
-                <p className="text-[12px] text-[#1a1a1a]/45 mt-1">
+                <p className="text-[11px] sm:text-[12px] text-[#1a1a1a]/45 mt-0.5 sm:mt-1">
                   {filteredHistory.length} meeting{filteredHistory.length !== 1 ? 's' : ''}
                   {hasSearchQuery && ` matching "${searchQuery}"`}
                 </p>
@@ -205,13 +205,13 @@ export default function HistoryPage({ history, onSelectTask, isLoading = false, 
             </div>
 
             {/* Search */}
-            <div className={`relative flex items-center gap-2 bg-[#1a1a1a]/[0.05] rounded-full px-4 py-2.5 w-full sm:w-auto transition-all duration-200 border border-[#1a1a1a]/[0.06] ${
+            <div className={`relative flex items-center gap-2 bg-[#1a1a1a]/[0.05] rounded-full px-3 sm:px-4 py-2 sm:py-2.5 w-full sm:w-auto transition-all duration-200 border border-[#1a1a1a]/[0.06] ${
               searchQuery ? 'ring-1 ring-[#1a1a1a]/10' : 'hover:bg-[#1a1a1a]/[0.05]'
             }`}>
               <Search className="w-[15px] h-[15px] text-[#1a1a1a]/20 flex-shrink-0" />
               <input 
                 type="text" 
-                placeholder="Search by title, topic, or content..." 
+                placeholder="Search meetings..." 
                 value={searchQuery}
                 onChange={(e) => setSearchQuery(e.target.value)}
                 className="bg-transparent border-none outline-none text-[13px] text-[#1a1a1a] placeholder:text-[#1a1a1a]/35 w-full sm:w-56" 
@@ -236,7 +236,7 @@ export default function HistoryPage({ history, onSelectTask, isLoading = false, 
 
       {/* Scrollable Content */}
       <div ref={scrollContainerRef} className="flex-1 overflow-y-auto min-h-0">
-        <div className="max-w-5xl mx-auto px-6 sm:px-10 pb-8">
+        <div className="max-w-5xl mx-auto px-3 sm:px-6 md:px-10 pb-4 sm:pb-8">
           {isLoading ? (
             <MeetingGridSkeleton count={6} />
           ) : history.length === 0 ? (
@@ -263,7 +263,7 @@ export default function HistoryPage({ history, onSelectTask, isLoading = false, 
             </div>
           ) : (
             <>
-              <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-4">
+              <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-3 gap-3 sm:gap-4">
                 {visibleHistory.map((task, index) => (
                 <motion.div 
                   key={task.id}
@@ -272,7 +272,7 @@ export default function HistoryPage({ history, onSelectTask, isLoading = false, 
                   transition={{ duration: 0.3, delay: Math.min(index * 0.04, 0.3), ease: [0.22, 1, 0.36, 1] }}
                   whileHover={{ y: -2 }}
                   onClick={() => handleSelectTask(task)}
-                  className="bg-[#f5f2ef] hover:bg-[#eeebe7] rounded-2xl p-5 cursor-pointer group relative transition-colors duration-200 border border-[#1a1a1a]/[0.04]"
+                  className="bg-[#f5f2ef] hover:bg-[#eeebe7] rounded-xl sm:rounded-2xl p-4 sm:p-5 cursor-pointer group relative transition-colors duration-200 border border-[#1a1a1a]/[0.04]"
                 >
                   {/* Loading overlay */}
                   {loadingTaskId === task.id && (
@@ -281,9 +281,9 @@ export default function HistoryPage({ history, onSelectTask, isLoading = false, 
                     </div>
                   )}
 
-                  <div className="flex justify-between items-start mb-4">
-                    <div className="w-9 h-9 rounded-xl bg-white shadow-[0_1px_4px_rgba(0,0,0,0.06)] flex items-center justify-center">
-                      <FileText className="w-4 h-4 text-[#1a1a1a]/50" />
+                  <div className="flex justify-between items-start mb-3 sm:mb-4">
+                    <div className="w-8 h-8 sm:w-9 sm:h-9 rounded-lg sm:rounded-xl bg-white shadow-[0_1px_4px_rgba(0,0,0,0.06)] flex items-center justify-center">
+                      <FileText className="w-3.5 h-3.5 sm:w-4 sm:h-4 text-[#1a1a1a]/50" />
                     </div>
                     <span className="text-[11px] text-[#1a1a1a]/40 font-medium">
                       {new Date(task.created_at!).toLocaleDateString('en-US', { month: 'numeric', day: 'numeric', year: 'numeric' })}
@@ -306,7 +306,7 @@ export default function HistoryPage({ history, onSelectTask, isLoading = false, 
                     </button>
                   </div>
 
-                  <p className="text-[12px] text-[#1a1a1a]/50 line-clamp-3 leading-relaxed mb-4">
+                  <p className="text-[12px] text-[#1a1a1a]/50 line-clamp-2 sm:line-clamp-3 leading-relaxed mb-3 sm:mb-4">
                     {task.summary || (task.transcription ? task.transcription.substring(0, 120) + '...' : 'No summary available')}
                   </p>
 

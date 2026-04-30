@@ -159,21 +159,21 @@ export default function NotesPage({ selectedTask, onNavigateToAssets, isLoading 
     <div className="absolute inset-0 flex flex-col bg-white overflow-hidden">
       {/* Header */}
       <div className="flex-none bg-white/95 backdrop-blur-xl sticky top-0 z-10">
-        <div className="max-w-3xl lg:max-w-4xl mx-auto w-full px-6 sm:px-8 pt-4 pb-3">
+        <div className="max-w-3xl lg:max-w-4xl mx-auto w-full px-3 sm:px-6 md:px-8 pt-3 sm:pt-4 pb-2 sm:pb-3">
           {/* Breadcrumb + date */}
-          <div className="flex items-center gap-1.5 mb-1.5 text-[10.5px] tracking-[0.04em] uppercase">
-            <BookOpen className="w-3 h-3 text-[#a89888]" />
-            <span className="truncate max-w-[180px] text-[#9a8d7f] font-semibold">{selectedTask.filename}</span>
+          <div className="flex items-center gap-1.5 mb-1 text-[10px] sm:text-[10.5px] tracking-[0.04em] uppercase">
+            <BookOpen className="w-3 h-3 text-[#a89888] flex-shrink-0" />
+            <span className="truncate max-w-[120px] sm:max-w-[180px] text-[#9a8d7f] font-semibold">{selectedTask.filename}</span>
             <span className="text-[#c4bab0]">·</span>
             <span className="flex-shrink-0 text-[#b5a99a] font-medium">
               {new Date(selectedTask.created_at!).toLocaleDateString('en-US', { month: 'short', day: 'numeric', year: 'numeric' })}
             </span>
           </div>
           
-          {/* Title row — tighter, warmer, editorial */}
-          <div className="flex items-center gap-2.5 mb-2.5">
+          {/* Title row */}
+          <div className="flex items-center gap-2 mb-2">
             <h1
-              className="text-[19px] sm:text-[22px] font-semibold tracking-[-0.02em] text-[#2c2520] truncate flex-1 leading-tight"
+              className="text-[17px] sm:text-[22px] font-semibold tracking-[-0.02em] text-[#2c2520] truncate flex-1 leading-tight"
               style={{ fontFamily: 'Georgia, "Times New Roman", serif', fontStyle: 'italic' }}
             >
               {selectedTask.filename}
@@ -181,7 +181,7 @@ export default function NotesPage({ selectedTask, onNavigateToAssets, isLoading 
             <button
               onClick={handleGenerateTitle}
               disabled={isGeneratingTitle}
-              className="flex-shrink-0 flex items-center gap-1.5 px-2.5 py-1 text-[10.5px] font-semibold text-[#a89888] hover:text-[#5c5147] bg-[#e8e2da]/40 hover:bg-[#e8e2da]/80 rounded-md transition-all disabled:opacity-30"
+              className="flex-shrink-0 flex items-center justify-center w-7 h-7 sm:w-auto sm:h-auto sm:gap-1.5 sm:px-2.5 sm:py-1 text-[10.5px] font-semibold text-[#a89888] hover:text-[#5c5147] bg-[#e8e2da]/40 hover:bg-[#e8e2da]/80 rounded-md transition-all disabled:opacity-30"
               title="Generate AI title based on content"
             >
               {isGeneratingTitle ? (
@@ -195,7 +195,7 @@ export default function NotesPage({ selectedTask, onNavigateToAssets, isLoading 
             </button>
             <button
               onClick={() => setIsShareOpen(true)}
-              className="flex-shrink-0 flex items-center gap-1.5 px-2.5 py-1 text-[10.5px] font-semibold text-[#a89888] hover:text-[#5c5147] bg-[#e8e2da]/40 hover:bg-[#e8e2da]/80 rounded-md transition-all"
+              className="flex-shrink-0 flex items-center justify-center w-7 h-7 sm:w-auto sm:h-auto sm:gap-1.5 sm:px-2.5 sm:py-1 text-[10.5px] font-semibold text-[#a89888] hover:text-[#5c5147] bg-[#e8e2da]/40 hover:bg-[#e8e2da]/80 rounded-md transition-all"
               title="Share meeting notes"
             >
               <Share2 className="w-3 h-3" />
@@ -203,21 +203,23 @@ export default function NotesPage({ selectedTask, onNavigateToAssets, isLoading 
             </button>
           </div>
 
-          {/* Tab Switcher — compact warm pills */}
-          <div className="flex gap-[3px] bg-[#e8e2da]/60 rounded-lg p-[3px] w-fit">
-            {(['transcription', 'summary', 'notes', 'note'] as NoteTab[]).map((tab) => (
-              <button
-                key={tab}
-                onClick={() => setNoteTab(tab)}
-                className={`px-3 py-[4px] rounded-md text-[11.5px] font-semibold transition-all ${
-                  noteTab === tab
-                    ? 'bg-white text-[#2c2520] shadow-sm shadow-[#c4bab0]/25'
-                    : 'text-[#9a8d7f] hover:text-[#5c5147]'
-                }`}
-              >
-                {tab === 'note' ? 'My Note' : tab.charAt(0).toUpperCase() + tab.slice(1)}
-              </button>
-            ))}
+          {/* Tab Switcher — horizontally scrollable on mobile */}
+          <div className="overflow-x-auto no-scrollbar -mx-3 sm:mx-0 px-3 sm:px-0">
+            <div className="flex gap-[3px] bg-[#e8e2da]/60 rounded-lg p-[3px] w-fit">
+              {(['transcription', 'summary', 'notes', 'note'] as NoteTab[]).map((tab) => (
+                <button
+                  key={tab}
+                  onClick={() => setNoteTab(tab)}
+                  className={`px-2.5 sm:px-3 py-[4px] rounded-md text-[11px] sm:text-[11.5px] font-semibold transition-all whitespace-nowrap ${
+                    noteTab === tab
+                      ? 'bg-white text-[#2c2520] shadow-sm shadow-[#c4bab0]/25'
+                      : 'text-[#9a8d7f] hover:text-[#5c5147]'
+                  }`}
+                >
+                  {tab === 'note' ? 'My Note' : tab.charAt(0).toUpperCase() + tab.slice(1)}
+                </button>
+              ))}
+            </div>
           </div>
         </div>
         {/* Thin warm accent line */}
@@ -226,7 +228,7 @@ export default function NotesPage({ selectedTask, onNavigateToAssets, isLoading 
 
       {/* Scrollable Content Area */}
       <div className="flex-1 overflow-y-auto min-h-0">
-        <div className="max-w-3xl lg:max-w-4xl mx-auto w-full px-6 sm:px-8 py-8">
+        <div className="max-w-3xl lg:max-w-4xl mx-auto w-full px-3 sm:px-6 md:px-8 py-4 sm:py-8">
           <AnimatePresence mode="wait">
             <motion.div
               key={noteTab}
@@ -242,7 +244,7 @@ export default function NotesPage({ selectedTask, onNavigateToAssets, isLoading 
               )}
 
               {noteTab === 'summary' && (
-                <div className="bg-[#faf8f6] p-6 sm:p-8 rounded-2xl border border-[#141414]/[0.05]">
+                <div className="bg-[#faf8f6] p-4 sm:p-6 md:p-8 rounded-xl sm:rounded-2xl border border-[#141414]/[0.05]">
                   <div className="flex items-center justify-between mb-5">
                     <h3 className="text-[17px] font-semibold tracking-[-0.01em] text-[#1a1a1a]">Key Summary</h3>
                     <button

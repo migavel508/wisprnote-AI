@@ -152,7 +152,7 @@ export default function ProcessPage({
   return (
     <div className="flex flex-col h-full bg-white font-[system-ui] overflow-hidden relative">
       {/* Main Content Area */}
-      <main className="flex-1 overflow-y-auto w-full flex flex-col pt-10 sm:pt-14 pb-40 sm:pb-48 px-6 sm:px-10 lg:px-16">
+      <main className="flex-1 overflow-y-auto w-full flex flex-col pt-6 sm:pt-14 pb-32 sm:pb-48 px-4 sm:px-10 lg:px-16">
         {/* Hero Section */}
         <motion.div 
           initial={{ opacity: 0, y: 12 }}
@@ -160,7 +160,7 @@ export default function ProcessPage({
           transition={{ duration: 0.5, ease: [0.22, 1, 0.36, 1] }}
           className="mb-8 max-w-3xl"
         >
-          <h1 className="text-[28px] sm:text-[36px] font-serif italic text-[#141414]/25 mb-3 leading-tight">
+          <h1 className="text-[22px] sm:text-[36px] font-serif italic text-[#141414]/25 mb-2 sm:mb-3 leading-tight">
             {file ? file.name.replace(/\.[^/.]+$/, '') : 'New Recording'}
           </h1>
           <p className="text-[13px] sm:text-[14px] text-[#141414]/25 leading-relaxed">
@@ -272,11 +272,11 @@ export default function ProcessPage({
             animate={{ opacity: 1, y: 0, scale: 1 }}
             exit={{ opacity: 0, y: 16, scale: 0.96 }}
             transition={{ type: 'spring', stiffness: 400, damping: 30 }}
-            className="absolute bottom-[88px] sm:bottom-[96px] left-1/2 -translate-x-1/2 z-40"
+            className="absolute bottom-[72px] sm:bottom-[96px] left-1/2 -translate-x-1/2 z-40"
           >
             <button 
               onClick={startProcessing}
-              className="flex items-center gap-2.5 px-6 py-3 bg-[#1a1a1a] hover:bg-[#333] text-white rounded-full shadow-lg shadow-black/10 transition-all hover:scale-[1.03] active:scale-[0.98]"
+              className="flex items-center gap-2 sm:gap-2.5 px-5 sm:px-6 py-2.5 sm:py-3 bg-[#1a1a1a] hover:bg-[#333] text-white rounded-full shadow-lg shadow-black/10 transition-all hover:scale-[1.03] active:scale-[0.98]"
             >
               <Sparkles className="w-4 h-4" />
               <span className="text-[13px] font-semibold">Start Processing</span>
@@ -293,9 +293,9 @@ export default function ProcessPage({
             animate={{ opacity: 1, y: 0, scale: 1 }}
             exit={{ opacity: 0, y: 16, scale: 0.96 }}
             transition={{ type: 'spring', stiffness: 400, damping: 30 }}
-            className="absolute bottom-[88px] sm:bottom-[96px] left-1/2 -translate-x-1/2 z-40"
+            className="absolute bottom-[72px] sm:bottom-[96px] left-1/2 -translate-x-1/2 z-40"
           >
-            <div className="bg-[#1a1a1a]/90 backdrop-blur-xl text-white/90 pl-4 pr-5 py-2.5 flex items-center gap-3 rounded-full shadow-lg shadow-black/10">
+            <div className="bg-[#1a1a1a]/90 backdrop-blur-xl text-white/90 pl-3 sm:pl-4 pr-4 sm:pr-5 py-2 sm:py-2.5 flex items-center gap-2 sm:gap-3 rounded-full shadow-lg shadow-black/10">
               <Loader2 className="w-3.5 h-3.5 animate-spin" />
               <span className="text-[12px] font-medium max-w-[280px] truncate">{processingHeadline} · {Math.round(totalProgress)}%</span>
               <div className="w-20 h-1.5 bg-white/15 rounded-full overflow-hidden">
@@ -330,7 +330,7 @@ export default function ProcessPage({
             animate={{ opacity: 1, y: 0 }}
             exit={{ opacity: 0, y: 8 }}
             transition={{ type: 'spring', damping: 28, stiffness: 380 }}
-            className="absolute bottom-5 sm:bottom-6 left-1/2 -translate-x-1/2 z-40 w-[calc(100%-40px)] sm:w-auto max-w-[580px]"
+            className="absolute bottom-3 sm:bottom-6 left-1/2 -translate-x-1/2 z-40 w-[calc(100%-24px)] sm:w-auto max-w-[580px]"
           >
             <div className="flex items-center gap-3" style={{ height: 52 }}>
               {/* Left icon pill */}
@@ -410,7 +410,7 @@ export default function ProcessPage({
             exit={{ opacity: 0, scale: 0.95, y: 8 }}
             transition={{ type: 'spring', damping: 28, stiffness: 350 }}
             style={{ transformOrigin: 'bottom center' }}
-            className="absolute bottom-5 sm:bottom-6 left-1/2 -translate-x-1/2 w-[calc(100%-32px)] sm:w-[600px] h-[420px] max-h-[60vh] bg-white rounded-[24px] shadow-[0_4px_40px_rgba(0,0,0,0.12)] border border-[#1a1a1a]/[0.06] flex flex-col z-40 overflow-hidden"
+            className="absolute bottom-2 sm:bottom-6 left-1/2 -translate-x-1/2 w-[calc(100%-16px)] sm:w-[600px] h-[380px] sm:h-[420px] max-h-[55vh] sm:max-h-[60vh] bg-white rounded-[20px] sm:rounded-[24px] shadow-[0_4px_40px_rgba(0,0,0,0.12)] border border-[#1a1a1a]/[0.06] flex flex-col z-40 overflow-hidden"
             onClick={(e) => e.stopPropagation()}
           >
             {/* Drag handle */}
