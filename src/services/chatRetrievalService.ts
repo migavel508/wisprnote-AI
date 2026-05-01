@@ -50,7 +50,7 @@ export interface RetrievalPlan {
 }
 
 const TOKENS_PER_CHAR = 0.25;
-const DEFAULT_TOKEN_BUDGET = 3200;
+const DEFAULT_TOKEN_BUDGET = 12000;
 
 function estimateTokens(text: string): number {
   return Math.ceil(text.length * TOKENS_PER_CHAR);
@@ -160,7 +160,7 @@ async function retrieveViaHybrid(
 
   try {
     const intent = detectQueryIntent(query);
-    const topK = intent === 'overview' ? 14 : 12;
+    const topK = intent === 'overview' ? 25 : 18;
     const queryVector = await embedQuery(query);
     const results = await queryHybrid(queryVector, query, topK, meetingIdFilter);
     if (!results.length) return null;
@@ -213,8 +213,8 @@ async function retrieveMeetingEvidenceBM25(
   maxEvidenceTokens: number,
 ): Promise<{ evidence: RetrievalEvidence[]; confidence: number }> {
   const intent = detectQueryIntent(query);
-  const initialTopK = intent === 'overview' ? 8 : 5;
-  const expandedTopK = intent === 'overview' ? 12 : 8;
+  const initialTopK = intent === 'overview' ? 14 : 8;
+  const expandedTopK = intent === 'overview' ? 20 : 14;
   const chunks = chunkTranscription(meeting.transcription || '');
   if (!chunks.length) return { evidence: [], confidence: 0 };
 
@@ -268,9 +268,9 @@ export async function retrieveForSingleMeeting(params: {
   totalTokenBudget?: number;
 }): Promise<RetrievalPlan> {
   const totalTokenBudget = params.totalTokenBudget ?? DEFAULT_TOKEN_BUDGET;
-  const summaryBudget = 240;
-  const notesBudget = 420;
-  const evidenceBudget = Math.max(700, totalTokenBudget - summaryBudget - notesBudget - 220);
+  const summaryBudget = 800;
+  const notesBudget = 1500;
+  const evidenceBudget = Math.max(2000, totalTokenBudget - summaryBudget - notesBudget - 300);
 
   const cleanSummary = truncateByTokens(params.meeting.summary || '', summaryBudget);
   const cleanNotes = truncateByTokens(stripHtml(params.meeting.notes), notesBudget);
@@ -325,7 +325,7 @@ export async function retrieveForManyMeetings(params: {
   // For targeted queries, use maxMeetings param or a reasonable default.
   const maxMeetings = broadIntent
     ? params.meetings.length
-    : (params.maxMeetings ?? 8);
+    : (params.maxMeetings ?? 12);
 
   // Try cross-meeting hybrid search first (single round-trip)
   if (isTurbopufferConfigured()) {
@@ -429,9 +429,9 @@ export async function retrieveForManyMeetings(params: {
     };
   }
 
-  const evidenceBudget = Math.max(900, totalTokenBudget - 420);
-  const perMeetingEvidenceBudget = Math.max(220, Math.floor(evidenceBudget / rankedMeetings.length));
-  const perMeetingSummaryBudget = 90;
+  const evidenceBudget = Math.max(3000, totalTokenBudget - 1200);
+  const perMeetingEvidenceBudget = Math.max(600, Math.floor(evidenceBudget / rankedMeetings.length));
+  const perMeetingSummaryBudget = 300;
 
   let allEvidence: RetrievalEvidence[] = [];
   let confidenceSum = 0;
@@ -513,7 +513,7 @@ function buildBroadSummaryContext(
   meetings: MeetingDocument[],
   totalTokenBudget: number,
 ): RetrievalPlan {
-  const perMeetingBudget = Math.max(40, Math.floor((totalTokenBudget * 0.85) / Math.max(1, meetings.length)));
+  const perMeetingBudget = Math.max(100, Math.floor((totalTokenBudget * 0.85) / Math.max(1, meetings.length)));
   const summaryBlocks: string[] = [];
   const coveredIds: string[] = [];
 

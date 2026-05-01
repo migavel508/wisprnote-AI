@@ -2274,7 +2274,7 @@ export default function App() {
         const retrievalPlan = await retrieveForSingleMeeting({
           query: userInput,
           meeting,
-          totalTokenBudget: 3000,
+          totalTokenBudget: 10000,
         });
         updateStep('retrieve', 'done', `${retrievalPlan.evidence.length} chunks`);
 
@@ -2319,7 +2319,7 @@ export default function App() {
         updateStep('search', 'running');
         log.debug('agent_multi_meeting_path', { isBroad: plan.isBroad, intent: plan.intent, meetingCount: allMeetings.length });
 
-        const topK = plan.isBroad ? 50 : 20;
+        const topK = plan.isBroad ? 60 : 30;
         const meetingTitleMap = new Map(allMeetings.map(m => [m.meetingId, m.title]));
         const meetingSummaryMap = new Map(
           allMeetings.filter(m => m.summary).map(m => [m.meetingId, m.summary || ''])
@@ -2366,7 +2366,7 @@ export default function App() {
           const fallbackResult = await retrieveForManyMeetings({
             query: userInput,
             meetings: allMeetings,
-            totalTokenBudget: plan.isBroad ? 6000 : 3200,
+            totalTokenBudget: plan.isBroad ? 16000 : 10000,
           });
 
           contextForSynthesis = fallbackResult.context;

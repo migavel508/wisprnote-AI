@@ -93,8 +93,7 @@ export function chunkTranscription(transcription: string): TextChunk[] {
     .map(s => s.trim())
     .filter(Boolean);
 
-  // Further split long turns at sentence boundaries (~700 chars max)
-  const MAX_CHUNK = 700;
+  const MAX_CHUNK = 1200;
   const sentences: string[] = [];
 
   for (const seg of rawSegments) {
@@ -116,12 +115,14 @@ export function chunkTranscription(transcription: string): TextChunk[] {
     }
   }
 
-  // Build overlapping chunks: 3-sentence windows with 2-sentence step (66% overlap)
+  const WINDOW_SIZE = 5;
+  const STEP = 2;
   const chunks: TextChunk[] = [];
-  for (let i = 0; i < sentences.length; i++) {
-    const window = [sentences[i]];
-    if (i + 1 < sentences.length) window.push(sentences[i + 1]);
-    if (i + 2 < sentences.length) window.push(sentences[i + 2]);
+  for (let i = 0; i < sentences.length; i += STEP) {
+    const window: string[] = [];
+    for (let j = i; j < Math.min(i + WINDOW_SIZE, sentences.length); j++) {
+      window.push(sentences[j]);
+    }
     const text = window.join('\n');
 
     // Extract speaker labels present in this chunk

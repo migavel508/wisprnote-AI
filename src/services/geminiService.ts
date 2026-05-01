@@ -25,6 +25,12 @@ function toOpenRouterModel(model: string): string {
   return `google/${model}`;
 }
 
+function getOpenRouterImageModel(): string {
+  return (import.meta as any).env?.VITE_OPENROUTER_IMAGE_MODEL ||
+    process.env.VITE_OPENROUTER_IMAGE_MODEL ||
+    'google/gemini-2.5-flash-image';
+}
+
 // Convert Google GenAI content format → OpenAI-compatible messages
 function convertToOpenAIMessages(
   contents: any,
@@ -170,6 +176,15 @@ async function generateContent(requestOptions: any): Promise<GenerateContentResp
 const RETRYABLE_STATUSES = new Set([429, 500, 502, 503, 504]);
 const RETRYABLE_MSGS = ['rate limit', 'quota', 'overloaded', 'fetch failed', 'network error', 'etimedout', 'econnreset'];
 
+function parseRetryDelayMs(error: any): number | null {
+  const msg = String(error?.message || '');
+  const secMatch = msg.match(/"retryDelay"\s*:\s*"(\d+)s"/i) || msg.match(/retryDelay[^0-9]*(\d+)s/i);
+  if (secMatch?.[1]) return Number(secMatch[1]) * 1000;
+  const msMatch = msg.match(/"retryDelay"\s*:\s*"(\d+)ms"/i) || msg.match(/retryDelay[^0-9]*(\d+)ms/i);
+  if (msMatch?.[1]) return Number(msMatch[1]);
+  return null;
+}
+
 async function withRetry<T>(fn: () => Promise<T>, maxRetries = 5, baseDelayMs = 2000): Promise<T> {
   let lastError: any;
   for (let attempt = 0; attempt <= maxRetries; attempt++) {
@@ -191,15 +206,88 @@ async function withRetry<T>(fn: () => Promise<T>, maxRetries = 5, baseDelayMs = 
       // Rate-limit (429) and quota errors need a much longer cooldown than
       // transient 5xx errors — the API typically enforces a 30-60s window.
       const isRateLimit = status === 429 || msg.includes('rate limit') || msg.includes('quota') || msg.includes('resource exhausted');
-      const delay = isRateLimit
+      const suggestedDelay = parseRetryDelayMs(error);
+      const computedDelay = isRateLimit
         ? Math.min(20000 * Math.pow(1.5, attempt), 120000) + Math.random() * 5000
         : baseDelayMs * Math.pow(2, attempt) + Math.random() * 1000;
+      const delay = suggestedDelay ? Math.max(computedDelay, suggestedDelay) : computedDelay;
 
-      log.warn('retry_attempt', { attempt: attempt + 1, maxRetries, delayMs: Math.round(delay), status, isRateLimit, message: error.message });
+      log.warn('retry_attempt', {
+        attempt: attempt + 1,
+        maxRetries,
+        delayMs: Math.round(delay),
+        status,
+        isRateLimit,
+        suggestedDelayMs: suggestedDelay,
+        message: error.message
+      });
       await new Promise(r => setTimeout(r, delay));
     }
   }
   throw lastError;
+}
+
+async function generateImageWithOpenRouter(prompt: string): Promise<string | null> {
+  const apiKey = getOpenRouterKey();
+  if (!apiKey) throw new Error('VITE_OPENROUTER_API_KEY is not configured');
+
+  const modelCandidates = [
+    getOpenRouterImageModel(),
+    'google/gemini-2.5-flash-image',
+    'google/gemini-2.0-flash-exp',
+  ].filter((m, i, arr) => arr.indexOf(m) === i);
+
+  let lastError: any = null;
+
+  for (const model of modelCandidates) {
+    try {
+      const response = await withRetry(async () => {
+        const res = await fetch('https://openrouter.ai/api/v1/chat/completions', {
+          method: 'POST',
+          headers: {
+            'Authorization': `Bearer ${apiKey}`,
+            'Content-Type': 'application/json',
+            'HTTP-Referer': typeof window !== 'undefined' ? window.location.origin : 'https://lumina-ai.app',
+            'X-Title': 'Lumina AI',
+          },
+          body: JSON.stringify({
+            model,
+            messages: [{ role: 'user', content: prompt }],
+            modalities: ['image', 'text'],
+            temperature: 0.2,
+          }),
+        });
+
+        if (!res.ok) {
+          const errText = await res.text();
+          const error: any = new Error(`OpenRouter image error (${res.status}) [${model}]: ${errText}`);
+          error.status = res.status;
+          throw error;
+        }
+        return res;
+      }, 8);
+
+      const data = await response.json();
+      const imageEntry = data?.choices?.[0]?.message?.images?.[0];
+      const imageUrl = imageEntry?.image_url?.url || imageEntry?.url;
+      if (typeof imageUrl === 'string' && imageUrl.length > 0) {
+        return imageUrl;
+      }
+
+      const assistantText = data?.choices?.[0]?.message?.content;
+      throw new Error(
+        `OpenRouter image response missing image payload [${model}]. Assistant content: ${String(assistantText || '').slice(0, 300)}`
+      );
+    } catch (error) {
+      lastError = error;
+      log.warn('openrouter_image_model_failed', {
+        model,
+        errorMessage: error instanceof Error ? error.message : String(error),
+      });
+    }
+  }
+
+  throw lastError || new Error('OpenRouter image generation failed for all model candidates');
 }
 
 function getApiKey(): string {
@@ -647,6 +735,62 @@ function sanitizeInlineCitations(text: string): string {
     .trim();
 }
 
+async function enforceGroundedAnswer(params: {
+  question: string;
+  answer: string;
+  context: string;
+}): Promise<string> {
+  if (!params.answer.trim() || !params.context.trim()) {
+    return params.answer;
+  }
+
+  const verifierPrompt = `You are a strict factual verifier.
+
+QUESTION:
+${params.question}
+
+CONTEXT:
+${params.context}
+
+DRAFT ANSWER:
+${params.answer}
+
+Task:
+1) Check whether every claim in DRAFT ANSWER is supported by CONTEXT.
+2) If fully supported, return the same answer.
+3) If not fully supported, rewrite answer to remove unsupported claims and keep only grounded facts.
+4) If context lacks required facts, explicitly say what is missing instead of guessing.
+
+Output ONLY valid JSON:
+{
+  "isGrounded": true or false,
+  "correctedAnswer": "final grounded answer"
+}`;
+
+  try {
+    const verification = await generateWithFallback({
+      model: 'gemini-3.1-flash-lite-preview',
+      contents: [{ role: 'user', parts: [{ text: verifierPrompt }] }],
+      config: {
+        temperature: 0.1,
+        maxOutputTokens: 1800,
+      },
+    });
+
+    const raw = (verification.text || '')
+      .replace(/```json\s*/gi, '')
+      .replace(/```\s*/gi, '')
+      .trim();
+    const parsed = JSON.parse(raw);
+    const corrected = typeof parsed?.correctedAnswer === 'string'
+      ? parsed.correctedAnswer
+      : params.answer;
+    return sanitizeInlineCitations(corrected);
+  } catch {
+    return sanitizeInlineCitations(params.answer);
+  }
+}
+
 export interface AgentPlan {
   intent: string;
   scope: 'single' | 'many';
@@ -771,53 +915,54 @@ export async function chatWithNotes(
   const fullContext = contextSections.join('\n\n');
   const meetingLabel = title ? `"${title}"` : 'this meeting';
 
-  // ── System prompt adapts to query intent ──────────────────────────────────
   const systemInstruction = isOverview
     ? `You are an expert meeting assistant with access to comprehensive data for ${meetingLabel}.
 
 Your task: Provide a thorough, detailed, well-structured answer to the user's question.
 
-GUIDELINES:
-- Use ALL provided context sources (summary, notes, transcription excerpts) to give the most complete answer.
-- Organise your response with clear headings, bullet points, or numbered lists as appropriate.
-- When the user asks for detail, provide FULL detail — do not truncate or over-summarise.
-- Cite specific speakers, decisions, or action items by name when present in the context.
-- If information from multiple sources agrees, synthesise it into one cohesive answer.
-- Only say information is unavailable if it is genuinely absent from ALL provided sources.
+STRICT GROUNDING RULES (most important):
+- ONLY state facts that appear verbatim or are directly supported by the context below.
+- If information is NOT in the context, say so explicitly — never guess or infer.
+- When multiple context sources agree, synthesise into one cohesive answer and note the agreement.
+- When sources conflict, present both viewpoints and flag the discrepancy.
+
+FORMATTING:
+- Use headings, bullet points, or numbered lists for clarity.
+- Name specific speakers, decisions, dates, or action items exactly as they appear in the context.
+- Provide FULL detail — do not truncate or over-summarise when the user asks for detail.
 
 MEETING CONTEXT:
 ${fullContext}
 
 RESPONSE QUALITY CONTRACT:
-- Ground all factual claims in provided evidence blocks.
-- Do NOT print bracketed citation markers in the answer body.
-- Do NOT output placeholders like [M1-E2], [2], [Summary], or [Source].
-- If evidence confidence appears weak, state uncertainty clearly and avoid speculation.`
+- Ground every factual claim in the provided evidence.
+- Do NOT print citation markers like [M1-E2], [2], [Summary], or [Source].
+- If evidence confidence is weak, state uncertainty clearly.`
 
     : `You are a precise meeting assistant for ${meetingLabel}.
 
-Your task: Answer the user's specific question accurately using the provided meeting context.
+Your task: Answer the user's specific question accurately using ONLY the provided meeting context.
 
-GUIDELINES:
+STRICT GROUNDING RULES (most important):
+- Answer ONLY from the evidence below — never fabricate or infer facts not present in context.
+- Quote or closely paraphrase the exact relevant section(s).
+- If the answer is genuinely absent from ALL provided sources, say: "I couldn't find that specific information in this meeting's records."
+- If you are uncertain, say so rather than guessing.
+
+FORMATTING:
 - Answer directly and specifically — do not pad with irrelevant details.
-- Quote or closely paraphrase the relevant section(s) from the context.
-- If multiple pieces of context are relevant, address each one.
 - If a speaker made the relevant statement, name them.
-- If the answer is genuinely not present in any of the provided context, say: "I couldn't find that specific information in this meeting's records."
-- Never fabricate or infer facts not present in the context.
+- If multiple pieces of context are relevant, address each one.
 
 MEETING CONTEXT:
 ${fullContext}
 
 RESPONSE QUALITY CONTRACT:
-- Answer only from supplied evidence.
-- Do NOT print bracketed citation markers in the answer body.
-- Do NOT output placeholders like [M1-E2], [2], [Summary], or [Source].
-- If evidence is insufficient, explicitly say what is missing instead of guessing.`;
+- Answer only from supplied evidence — zero fabrication tolerance.
+- Do NOT print citation markers like [M1-E2], [2], [Summary], or [Source].
+- If evidence is insufficient, state exactly what is missing.`;
 
-  // Token minimization with quality guardrails:
-  // keep most recent conversational turns within budget; do not drop the latest user turn.
-  const recentHistory = trimHistoryToTokenBudget(history, 1100);
+  const recentHistory = trimHistoryToTokenBudget(history, 2400);
 
   const response = await generateWithFallback({
     model: "gemini-3-flash-preview",
@@ -827,10 +972,15 @@ RESPONSE QUALITY CONTRACT:
     ],
     config: {
       systemInstruction,
-      maxOutputTokens: isOverview ? 1600 : 900,
+      temperature: 0.15,
+      maxOutputTokens: isOverview ? 4000 : 2400,
     }
   });
-  return sanitizeInlineCitations(response.text || "");
+  return enforceGroundedAnswer({
+    question: message,
+    answer: response.text || '',
+    context: fullContext,
+  });
 }
 
 export async function agentSynthesizeFromEvidence(params: {
@@ -847,27 +997,29 @@ USER'S EXACT REQUEST: "${params.userQuery}"
 INTERPRETED TASK: ${params.intent}
 Evidence was retrieved across ${params.meetingsVisited} out of ${params.totalMeetings} total meetings.
 
-STRICT ALIGNMENT RULES (most important):
+STRICT GROUNDING RULES (most important):
+- Answer ONLY from the evidence provided below — zero fabrication tolerance.
 - Answer EXACTLY what the user asked — nothing more, nothing less.
 - If the user asked for "key topics", deliver key topics. Do NOT add action items, next steps, or other extras unless asked.
-- If the user asked to cover "all meetings", your response MUST reference ALL meetings with evidence. State how many meetings you covered.
+- If the user asked to cover "all meetings", your response MUST reference ALL meetings with evidence. State how many you covered.
 - If the user asked about a specific aspect (decisions, topics, action items), focus ONLY on that aspect.
-- Do NOT fabricate information. If evidence doesn't support a claim, don't make it.
+- If evidence doesn't support a claim, do NOT make it. Say "no evidence found" for that meeting instead.
+- When you are uncertain, explicitly flag it rather than guessing.
 
 FORMATTING:
 - Use headings, bullet points, or numbered lists for clarity.
-- Reference specific speakers and meeting names when available.
+- Reference specific speakers and meeting names exactly as they appear in the evidence.
 - Cover findings from EVERY meeting that had relevant evidence — do not skip any.
-- State the total number of meetings covered at the beginning of your response.
+- State the total number of meetings covered at the beginning.
 
 RESPONSE QUALITY CONTRACT:
-- Ground all claims in the evidence provided.
-- Do NOT print bracketed citation markers like [1], [M1-E2], [Source], etc.
+- Every factual statement must trace back to the evidence below.
+- Do NOT print citation markers like [1], [M1-E2], [Source], etc.
 - If evidence is weak or missing for some meetings, state that clearly.
 
 ${params.context}`;
 
-  const recentHistory = trimHistoryToTokenBudget(params.history, 600);
+  const recentHistory = trimHistoryToTokenBudget(params.history, 1400);
 
   const response = await generateWithFallback({
     model: 'gemini-3-flash-preview',
@@ -877,33 +1029,49 @@ ${params.context}`;
     ],
     config: {
       systemInstruction,
-      maxOutputTokens: 3200,
+      temperature: 0.15,
+      maxOutputTokens: 4800,
     },
   });
-  return sanitizeInlineCitations(response.text || '');
+  return enforceGroundedAnswer({
+    question: params.userQuery,
+    answer: response.text || '',
+    context: params.context,
+  });
 }
 
 export async function generateConceptImage(description: string): Promise<string | null> {
-  const response: GenerateContentResponse = await ai.models.generateContent({
-    model: 'gemini-3.1-flash-image-preview',
-    contents: {
-      parts: [
-        {
-          text: `Create a highly detailed, professional, and accurate concept visualization for: "${description}". 
-          The visualization should be a clean, modern architecture diagram, flowchart, or technical map.
-          Style: Minimalist, tech-focused, high-contrast, suitable for an executive dashboard.
-          Ensure all elements are clearly defined and the layout is logically structured.`,
-        },
-      ],
-    }
-  });
+  const prompt = `Create a highly detailed, professional, and accurate concept visualization for: "${description}".
+The visualization should be a clean, modern architecture diagram, flowchart, or technical map.
+Style: Minimalist, tech-focused, high-contrast, suitable for an executive dashboard.
+Ensure all elements are clearly defined and the layout is logically structured.`;
 
-  for (const part of response.candidates?.[0]?.content?.parts || []) {
-    if (part.inlineData) {
-      return `data:image/png;base64,${part.inlineData.data}`;
+  try {
+    if (getProvider() === 'openrouter') {
+      return await generateImageWithOpenRouter(prompt);
     }
+
+    const response: GenerateContentResponse = await generateWithFallback({
+      model: 'gemini-3.1-flash-image-preview',
+      contents: { parts: [{ text: prompt }] },
+      // keep image fallback chain inside Gemini only
+    }, ['gemini-2.5-flash-image-preview']);
+
+    for (const part of response.candidates?.[0]?.content?.parts || []) {
+      if (part.inlineData) {
+        return `data:image/png;base64,${part.inlineData.data}`;
+      }
+    }
+    return null;
+  } catch (error) {
+    const err = error instanceof Error ? error : new Error(String(error));
+    log.error('generate_concept_image_failed', {
+      message: err.message,
+      stack: err.stack,
+      provider: getProvider(),
+    });
+    return null;
   }
-  return null;
 }
 
 export async function generateNotesVisualization(notes: string): Promise<string | null> {
@@ -1004,10 +1172,14 @@ CONTENT RULES:
 ═══ MEETING NOTES ═══
 ${notes}`;
 
-    const response = await ai.models.generateContent({
+    if (getProvider() === 'openrouter') {
+      return await generateImageWithOpenRouter(prompt);
+    }
+
+    const response = await generateWithFallback({
       model: 'gemini-3.1-flash-image-preview',
       contents: prompt,
-    });
+    }, ['gemini-2.5-flash-image-preview']);
 
     for (const part of response.candidates?.[0]?.content?.parts || []) {
       if (part.inlineData) {
@@ -1016,7 +1188,12 @@ ${notes}`;
     }
     return null;
   } catch (error) {
-    log.error('generate_visualization_failed', { error: error instanceof Error ? error : undefined });
+    const err = error instanceof Error ? error : new Error(String(error));
+    log.error('generate_visualization_failed', {
+      message: err.message,
+      stack: err.stack,
+      provider: getProvider(),
+    });
     return null;
   }
 }
