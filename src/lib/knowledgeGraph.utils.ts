@@ -87,16 +87,17 @@ const EXTRACT_MODEL = 'gemini-3-flash-preview';
 // ─── AI Provider Helpers ─────────────────────────────────────────────────────
 type AIProvider = 'gemini' | 'openrouter';
 const env = (import.meta as any).env || {};
+const processEnv = (globalThis as any)?.process?.env || {};
 
 function getProvider(): AIProvider {
   const p = env.VITE_AI_PROVIDER ||
-    process.env.VITE_AI_PROVIDER || 'gemini';
+    processEnv.VITE_AI_PROVIDER || 'gemini';
   return p === 'openrouter' ? 'openrouter' : 'gemini';
 }
 
 function getOpenRouterKey(): string {
   return env.VITE_OPENROUTER_API_KEY ||
-    process.env.VITE_OPENROUTER_API_KEY || '';
+    processEnv.VITE_OPENROUTER_API_KEY || '';
 }
 
 function toOpenRouterModel(model: string): string {
@@ -106,7 +107,7 @@ function toOpenRouterModel(model: string): string {
 /** OpenRouter /v1/embeddings model — same ID family as EMBED_MODEL (gemini-embedding-001) so vector dim matches Turbopuffer + KG caches. */
 function getOpenRouterEmbedModel(): string {
   return env.VITE_OPENROUTER_EMBED_MODEL ||
-    process.env.VITE_OPENROUTER_EMBED_MODEL ||
+    processEnv.VITE_OPENROUTER_EMBED_MODEL ||
     'google/gemini-embedding-001';
 }
 
@@ -125,7 +126,7 @@ function getApiKey(): string {
   const key =
     env.VITE_GEMINI_API_KEY ||
     env.GEMINI_API_KEY ||
-    process.env.GEMINI_API_KEY;
+    processEnv.GEMINI_API_KEY;
   if (!key && getProvider() === 'gemini') {
     throw new Error('Missing GEMINI_API_KEY — set VITE_GEMINI_API_KEY or GEMINI_API_KEY in your .env');
   }
@@ -431,10 +432,13 @@ export async function batchEmbed(
     }
 
     const data = await response.json();
-    const embeddings: Array<{ values: number[] }> = data.embeddings;
+    const embeddings: Array<{ values: number[] }> = Array.isArray(data.embeddings) ? data.embeddings : [];
 
     for (let i = 0; i < batch.length; i++) {
-      const vector = embeddings[i].values;
+      const vector = embeddings[i]?.values;
+      if (!vector?.length) {
+        throw new Error(`Embedding API returned invalid vector for batch index ${i}`);
+      }
       _embedCache.set(batch[i].text, vector);
       result.set(batch[i].id, {
         id: batch[i].id,

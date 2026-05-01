@@ -6,6 +6,8 @@
     "core:default",
     "core:event:default",
     "core:window:allow-start-dragging",
+    "deep-link:default",
+    "deep-link:allow-get-current",
     "shell:allow-open",
     "shell:default",
     {

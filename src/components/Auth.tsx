@@ -1,9 +1,14 @@
-import React, { useState } from 'react';
+import React, { useEffect, useState } from 'react';
 import { supabase } from '../services/supabaseService';
 import { motion, AnimatePresence } from 'motion/react';
 import { Mail, Lock, Loader2, ArrowRight, AlertCircle, CheckCircle2 } from 'lucide-react';
 
 export default function Auth() {
+  const isTauri = typeof window !== 'undefined' && (
+    !!(window as any).__TAURI_INTERNALS__ ||
+    !!(window as any).__TAURI__ ||
+    /tauri/i.test(navigator.userAgent)
+  );
   const [loading, setLoading] = useState(false);
   const [email, setEmail] = useState('');
   const [password, setPassword] = useState('');
@@ -11,6 +16,97 @@ export default function Auth() {
   const [error, setError] = useState<string | null>(null);
   const [message, setMessage] = useState<string | null>(null);
   const [focusedField, setFocusedField] = useState<'email' | 'password' | null>(null);
+  const desktopOAuthRedirect = 'wisprnote://auth-callback/';
+
+  useEffect(() => {
+    if (!isTauri) return;
+
+    let unlisten: (() => void) | undefined;
+
+    const consumeDeepLink = async (url: string) => {
+      try {
+        if (!url.startsWith('wisprnote://auth-callback')) return;
+        const parsed = new URL(url);
+        const code = parsed.searchParams.get('code');
+        const err = parsed.searchParams.get('error_description') || parsed.searchParams.get('error');
+
+        if (err) {
+          setError(decodeURIComponent(err));
+          return;
+        }
+
+        if (!code) return;
+        setLoading(true);
+        const { error } = await supabase.auth.exchangeCodeForSession(code);
+        if (error) throw error;
+        setMessage(null);
+      } catch (e: any) {
+        setError(e?.message || 'Google sign-in callback failed');
+      } finally {
+        setLoading(false);
+      }
+    };
+
+    (async () => {
+      const { onOpenUrl, getCurrent } = await import('@tauri-apps/plugin-deep-link');
+      const current = await getCurrent();
+      if (current?.length) {
+        for (const u of current) await consumeDeepLink(u);
+      }
+      unlisten = await onOpenUrl(async (urls) => {
+        for (const u of urls) await consumeDeepLink(u);
+      });
+    })().catch((e) => {
+      setError((e as Error)?.message || 'Unable to initialize deep link listener');
+    });
+
+    return () => {
+      if (unlisten) unlisten();
+    };
+  }, [isTauri]);
+
+  const handleGoogleAuth = async () => {
+    setLoading(true);
+    setError(null);
+    setMessage(null);
+
+    try {
+      if (isTauri) {
+        const { open } = await import('@tauri-apps/plugin-shell');
+        const { data, error } = await supabase.auth.signInWithOAuth({
+          provider: 'google',
+          options: {
+            redirectTo: desktopOAuthRedirect,
+            skipBrowserRedirect: true,
+            queryParams: {
+              prompt: 'select_account',
+            },
+          },
+        });
+        if (error) throw error;
+        if (!data?.url) throw new Error('OAuth URL not returned');
+
+        await open(data.url);
+        setMessage('Google sign-in opened in your browser. After selecting account, you will be returned to the app automatically.');
+        return;
+      }
+
+      const { error } = await supabase.auth.signInWithOAuth({
+        provider: 'google',
+        options: {
+          redirectTo: window.location.origin,
+          queryParams: {
+            prompt: 'select_account',
+          },
+        },
+      });
+      if (error) throw error;
+    } catch (err: any) {
+      setError(err.message || 'Unable to continue with Google');
+    } finally {
+      setLoading(false);
+    }
+  };
 
   const handleAuth = async (e: React.FormEvent) => {
     e.preventDefault();
@@ -155,6 +251,28 @@ export default function Auth() {
                     placeholder="Enter your password"
                   />
                 </div>
+              </div>
+            </div>
+
+            {/* Google OAuth */}
+            <button
+              type="button"
+              onClick={handleGoogleAuth}
+              disabled={loading}
+              className="w-full bg-white text-[#1a1a1a] py-3 rounded-xl text-[13px] font-semibold border border-[#1a1a1a]/10 hover:bg-[#fafafa] active:scale-[0.98] transition-all flex items-center justify-center gap-2 disabled:opacity-50"
+            >
+              <svg className="w-4 h-4" viewBox="0 0 24 24" aria-hidden="true">
+                <path fill="#EA4335" d="M12 10.2v3.9h5.5c-.2 1.3-1.5 3.9-5.5 3.9-3.3 0-6-2.7-6-6s2.7-6 6-6c1.9 0 3.2.8 3.9 1.5l2.7-2.6C17 3.4 14.7 2.4 12 2.4 6.9 2.4 2.7 6.6 2.7 11.7S6.9 21 12 21c6.9 0 8.6-4.8 8.6-7.3 0-.5 0-.9-.1-1.3H12z"/>
+              </svg>
+              Continue with Google
+            </button>
+
+            <div className="relative">
+              <div className="absolute inset-0 flex items-center">
+                <div className="w-full border-t border-[#1a1a1a]/10" />
+              </div>
+              <div className="relative flex justify-center text-[11px]">
+                <span className="bg-white px-2 text-[#1a1a1a]/30">or</span>
               </div>
             </div>
 

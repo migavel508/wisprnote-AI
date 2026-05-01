@@ -148,6 +148,7 @@ fn open_microphone_settings() -> Result<(), String> {
 pub fn run() {
     tauri::Builder::default()
         .plugin(tauri_plugin_shell::init())
+        .plugin(tauri_plugin_deep_link::init())
         .plugin(tauri_plugin_http::init())
         .manage(AppState {
             recorder: Mutex::new(SystemAudioRecorder::new()),
