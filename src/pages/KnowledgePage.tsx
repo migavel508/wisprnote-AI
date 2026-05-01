@@ -1,7 +1,8 @@
-import { useState, useRef, useEffect, useCallback, useMemo } from 'react';
+import React, { useState, useRef, useEffect, useCallback, useMemo } from 'react';
 import { logger } from '../lib/logger';
 
 const log = logger.scope('KnowledgePage');
+const env = (import.meta as any).env || {};
 import { motion, AnimatePresence } from 'framer-motion';
 import ForceGraph2D from 'react-force-graph-2d';
 import { 
@@ -465,11 +466,16 @@ export default function KnowledgePage({
           )
         : `You are a helpful assistant that answers questions about the user's meeting knowledge graph.\n${kgData.map((m: any, i: number) => `Meeting ${i + 1}: ${m.meetingTitle}\n- Topics: ${(m.topics || []).map((t: any) => `${t.name} (${t.status}): ${t.summary}`).join('; ') || 'None'}\n- Decisions: ${(m.decisions || []).map((d: any) => d.decision).join('; ') || 'None'}\n- People: ${(m.people || []).join(', ') || 'None'}\n- Actions: ${(m.actionItems || []).map((a: any) => `${a.owner}: ${a.task}`).join('; ') || 'None'}`).join('\n\n')}\n\nAnswer the user's question based on this data. Be concise and helpful.`;
 
-      const aiProvider = import.meta.env.VITE_AI_PROVIDER || process.env.VITE_AI_PROVIDER || 'gemini';
+      const aiProvider = env.VITE_AI_PROVIDER || process.env.VITE_AI_PROVIDER || 'gemini';
       let assistantMessage: string;
 
+      const historyForApi = chatMessages.slice(-10).map(m => ({
+        role: m.role === 'assistant' ? 'model' as const : m.role as 'user',
+        content: m.content,
+      }));
+
       if (aiProvider === 'openrouter') {
-        const openRouterKey = import.meta.env.VITE_OPENROUTER_API_KEY || process.env.VITE_OPENROUTER_API_KEY;
+        const openRouterKey = env.VITE_OPENROUTER_API_KEY || process.env.VITE_OPENROUTER_API_KEY;
         if (!openRouterKey) throw new Error('Missing OpenRouter API key');
 
         const response = await fetch('https://openrouter.ai/api/v1/chat/completions', {
@@ -484,18 +490,24 @@ export default function KnowledgePage({
             model: 'google/gemini-3-flash-preview',
             messages: [
               { role: 'system', content: systemPrompt },
+              ...historyForApi.map(m => ({ role: m.role === 'model' ? 'assistant' : m.role, content: m.content })),
               { role: 'user', content: userMessage },
             ],
-            temperature: 0.7,
-            max_tokens: 1024,
+            temperature: 0.15,
+            max_tokens: 2400,
           })
         });
 
         const data = await response.json();
         assistantMessage = data.choices?.[0]?.message?.content || 'Sorry, I could not generate a response.';
       } else {
-        const geminiApiKey = import.meta.env.VITE_GEMINI_API_KEY || import.meta.env.GEMINI_API_KEY || process.env.GEMINI_API_KEY;
+        const geminiApiKey = env.VITE_GEMINI_API_KEY || env.GEMINI_API_KEY || process.env.GEMINI_API_KEY;
         if (!geminiApiKey) throw new Error('Missing Gemini API key');
+
+        const geminiHistory = historyForApi.map(m => ({
+          role: m.role === 'model' ? 'model' : 'user',
+          parts: [{ text: m.content }],
+        }));
 
         const response = await fetch(
           `https://generativelanguage.googleapis.com/v1beta/models/gemini-3-flash-preview:generateContent?key=${geminiApiKey}`,
@@ -505,10 +517,11 @@ export default function KnowledgePage({
             body: JSON.stringify({
               contents: [
                 { role: 'user', parts: [{ text: systemPrompt }] },
-                { role: 'model', parts: [{ text: 'I understand. I will help answer questions about your meeting knowledge graph based on the data provided.' }] },
+                { role: 'model', parts: [{ text: 'I understand. I will help answer questions about your meeting knowledge graph based on the data provided. I will only state facts supported by the data.' }] },
+                ...geminiHistory,
                 { role: 'user', parts: [{ text: userMessage }] }
               ],
-              generationConfig: { temperature: 0.7, maxOutputTokens: 1024 }
+              generationConfig: { temperature: 0.15, maxOutputTokens: 2400 }
             })
           }
         );

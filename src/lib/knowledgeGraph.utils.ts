@@ -86,15 +86,16 @@ const EXTRACT_MODEL = 'gemini-3-flash-preview';
 
 // ─── AI Provider Helpers ─────────────────────────────────────────────────────
 type AIProvider = 'gemini' | 'openrouter';
+const env = (import.meta as any).env || {};
 
 function getProvider(): AIProvider {
-  const p = import.meta.env.VITE_AI_PROVIDER ||
+  const p = env.VITE_AI_PROVIDER ||
     process.env.VITE_AI_PROVIDER || 'gemini';
   return p === 'openrouter' ? 'openrouter' : 'gemini';
 }
 
 function getOpenRouterKey(): string {
-  return import.meta.env.VITE_OPENROUTER_API_KEY ||
+  return env.VITE_OPENROUTER_API_KEY ||
     process.env.VITE_OPENROUTER_API_KEY || '';
 }
 
@@ -104,7 +105,7 @@ function toOpenRouterModel(model: string): string {
 
 /** OpenRouter /v1/embeddings model — same ID family as EMBED_MODEL (gemini-embedding-001) so vector dim matches Turbopuffer + KG caches. */
 function getOpenRouterEmbedModel(): string {
-  return import.meta.env.VITE_OPENROUTER_EMBED_MODEL ||
+  return env.VITE_OPENROUTER_EMBED_MODEL ||
     process.env.VITE_OPENROUTER_EMBED_MODEL ||
     'google/gemini-embedding-001';
 }
@@ -122,8 +123,8 @@ function getLsEmbedKey(): string {
 
 function getApiKey(): string {
   const key =
-    import.meta.env.VITE_GEMINI_API_KEY ||
-    import.meta.env.GEMINI_API_KEY ||
+    env.VITE_GEMINI_API_KEY ||
+    env.GEMINI_API_KEY ||
     process.env.GEMINI_API_KEY;
   if (!key && getProvider() === 'gemini') {
     throw new Error('Missing GEMINI_API_KEY — set VITE_GEMINI_API_KEY or GEMINI_API_KEY in your .env');
@@ -1221,7 +1222,7 @@ export function searchNodes(query: string, nodes: any[]): any[] {
   return results;
 }
 
-const CHAT_CONTEXT_MAX_CHARS = 4000;
+const CHAT_CONTEXT_MAX_CHARS = 12000;
 const NOTABLE_STATUSES = new Set(['off-track', 'revisited', 'ongoing']);
 
 export function buildChatContext(
@@ -1266,13 +1267,10 @@ export function buildChatContext(
     sections.push(`ACTIONS: ${openActions.join('; ')}`);
   }
 
-  // Per-meeting summaries — compact: full summaries only for notable topics
   const meetingSummaries = kgData.map(m => {
-    const topicLine = (m.topics || []).map(t => {
-      const isNotable = NOTABLE_STATUSES.has(t.status) ||
-        (topicMeetingCount[t.name.toLowerCase()]?.count || 0) > 1;
-      return isNotable ? `${t.name} [${t.status}]: ${t.summary}` : `${t.name} [${t.status}]`;
-    }).join('; ');
+    const topicLine = (m.topics || []).map(t =>
+      `${t.name} [${t.status}]: ${t.summary}`
+    ).join('; ');
     const parts = [`${m.meetingTitle}: ${topicLine}`];
     if (m.decisions?.length) parts.push(`Decisions: ${m.decisions.map(d => d.decision).join('; ')}`);
     if (m.people?.length) parts.push(`People: ${m.people.join(', ')}`);
@@ -1286,8 +1284,15 @@ export function buildChatContext(
     context = context.substring(0, CHAT_CONTEXT_MAX_CHARS) + '\n[...truncated]';
   }
 
-  return `You are a helpful assistant answering questions about the user's meeting knowledge graph. Use the structured data below. Be concise.
+  return `You are a precise assistant answering questions about the user's meeting knowledge graph.
 
+STRICT GROUNDING RULES:
+- Answer ONLY from the structured data below — never fabricate or infer facts not present.
+- Quote meeting names, people, topics, and decisions exactly as they appear in the data.
+- If the answer is not in the data, say so explicitly rather than guessing.
+- Be thorough — cover all relevant meetings and data points that match the question.
+
+KNOWLEDGE GRAPH DATA:
 ${context}`;
 }
 
