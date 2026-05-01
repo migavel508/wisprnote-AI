@@ -202,6 +202,7 @@ let currentOrEmbedModel = getOpenRouterEmbedModel();
 // Two-tier: in-memory Map (hot) + localStorage (cold, survives reloads).
 // Storage key is namespaced by provider + embed model so Gemini vs OpenRouter vectors are never mixed.
 const LS_REL_KEY = 'kg_rel_cache';
+const REL_CACHE_VERSION = 2;
 
 function loadEmbedCacheFromStorage(): Map<string, number[]> {
   try {
@@ -228,7 +229,11 @@ function loadRelCacheFromStorage(): { key: string; value: ExtractedRelationship[
   try {
     const raw = localStorage.getItem(LS_REL_KEY);
     if (!raw) return { key: '', value: [] };
-    return JSON.parse(raw);
+    const parsed = JSON.parse(raw);
+    if (parsed?.version !== REL_CACHE_VERSION) {
+      return { key: '', value: [] };
+    }
+    return { key: parsed.key || '', value: Array.isArray(parsed.value) ? parsed.value : [] };
   } catch {
     return { key: '', value: [] };
   }
@@ -236,7 +241,7 @@ function loadRelCacheFromStorage(): { key: string; value: ExtractedRelationship[
 
 function saveRelCacheToStorage(key: string, value: ExtractedRelationship[]) {
   try {
-    localStorage.setItem(LS_REL_KEY, JSON.stringify({ key, value }));
+    localStorage.setItem(LS_REL_KEY, JSON.stringify({ version: REL_CACHE_VERSION, key, value }));
   } catch { /* quota exceeded */ }
 }
 
@@ -724,7 +729,40 @@ If no relationships are found, return an empty array [].`;
       ? data.choices?.[0]?.message?.content || '[]'
       : data.candidates?.[0]?.content?.parts?.[0]?.text || '[]';
 
-    const parsed: ExtractedRelationship[] = JSON.parse(rawText);
+    // Models can return either:
+    // 1) a JSON array: [ ... ]
+    // 2) a JSON object wrapper: { "relationships": [ ... ] }
+    // 3) fenced JSON with extra prose around it.
+    const extractRelationships = (raw: string): ExtractedRelationship[] => {
+      let clean = String(raw || '').trim();
+      clean = clean
+        .replace(/```json\s*/gi, '')
+        .replace(/```\s*/g, '')
+        .trim();
+
+      // Try direct parse first
+      const tryParse = (input: string): any => {
+        try { return JSON.parse(input); } catch { return null; }
+      };
+
+      let parsed: any = tryParse(clean);
+
+      // If direct parse failed, extract first JSON payload and retry.
+      if (!parsed) {
+        const objectMatch = clean.match(/\{[\s\S]*\}/);
+        const arrayMatch = clean.match(/\[[\s\S]*\]/);
+        const candidate = arrayMatch?.[0] || objectMatch?.[0] || '';
+        parsed = candidate ? tryParse(candidate) : null;
+      }
+
+      if (!parsed) return [];
+      if (Array.isArray(parsed)) return parsed as ExtractedRelationship[];
+      if (Array.isArray(parsed.relationships)) return parsed.relationships as ExtractedRelationship[];
+      if (Array.isArray(parsed.data)) return parsed.data as ExtractedRelationship[];
+      return [];
+    };
+
+    const parsed = extractRelationships(rawText);
 
     // Validate shape
     const validTypes = new Set(['continuation', 'resolution', 'escalation', 'recurring', 'reference']);
