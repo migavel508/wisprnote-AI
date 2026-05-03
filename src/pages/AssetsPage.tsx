@@ -44,7 +44,7 @@ export default function AssetsPage({
   }
 
   return (
-    <div className="absolute inset-0 flex flex-col bg-white overflow-hidden">
+    <div className="absolute inset-0 flex flex-col bg-app-panel text-app-fg overflow-hidden">
       {/* Fixed Header */}
       <div className="flex-none bg-white border-b border-[#141414]/10 px-4 sm:px-8 pt-6 pb-4">
         <div className="max-w-5xl mx-auto">

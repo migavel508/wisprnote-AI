@@ -42,10 +42,10 @@ export function MeetingNoteTab({ taskId, initialContent }: MeetingNoteTabProps) 
     <div className="h-full flex flex-col">
       {/* Status bar */}
       <div className="flex items-center justify-between px-1 pb-3">
-        <p className="text-[11px] text-[#b0b0b0]">
+        <p className="text-[11px] text-app-fg-muted">
           Personal note — only visible to you
         </p>
-        <div className="text-[11px] font-mono text-[#999]">
+        <div className="text-[11px] font-mono text-app-fg-subtle">
           {saveStatus === 'saving' && (
             <span className="flex items-center gap-1.5">
               <Loader2 className="w-3 h-3 animate-spin" />Saving…

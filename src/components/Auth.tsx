@@ -137,7 +137,7 @@ export default function Auth() {
   };
 
   return (
-    <div className="min-h-screen bg-[#e5ddd4] flex items-center justify-center p-6 font-[system-ui]">
+    <div className="min-h-screen bg-app-canvas text-app-fg flex items-center justify-center p-6 font-[system-ui]">
       <motion.div 
         initial={{ opacity: 0, y: 16 }}
         animate={{ opacity: 1, y: 0 }}
@@ -151,13 +151,13 @@ export default function Auth() {
           transition={{ duration: 0.5, delay: 0.1, ease: [0.22, 1, 0.36, 1] }}
           className="text-center mb-10"
         >
-          <div className="inline-flex items-center justify-center w-12 h-12 rounded-2xl bg-white shadow-[0_2px_16px_rgba(0,0,0,0.06)] border border-[#1a1a1a]/[0.04] mb-5">
+          <div className="inline-flex items-center justify-center w-12 h-12 rounded-2xl bg-app-panel shadow-[0_2px_16px_rgba(0,0,0,0.06)] dark:shadow-[0_2px_16px_rgba(0,0,0,0.35)] border border-app-card-border mb-5">
             <img src="/logo.png" alt="Logo" className="w-7 h-7 rounded-lg object-cover" />
           </div>
-          <h1 className="text-[32px] font-serif italic text-[#141414]/25 leading-tight mb-2">
+          <h1 className="text-[32px] font-serif italic text-app-fg/25 dark:text-app-fg/40 leading-tight mb-2">
             Wisprnote
           </h1>
-          <p className="text-[13px] text-[#141414]/30">
+          <p className="text-[13px] text-app-fg/35 dark:text-app-fg/45">
             {isSignUp ? 'Create your account to get started' : 'Welcome back'}
           </p>
         </motion.div>
@@ -167,7 +167,7 @@ export default function Auth() {
           initial={{ opacity: 0, y: 12 }}
           animate={{ opacity: 1, y: 0 }}
           transition={{ duration: 0.5, delay: 0.2, ease: [0.22, 1, 0.36, 1] }}
-          className="bg-white rounded-[20px] shadow-[0_2px_24px_rgba(0,0,0,0.06)] border border-[#1a1a1a]/[0.04] p-7"
+          className="bg-app-panel rounded-2xl shadow-[0_2px_24px_rgba(0,0,0,0.06)] dark:shadow-[0_2px_24px_rgba(0,0,0,0.4)] border border-app-card-border p-7"
         >
           <form onSubmit={handleAuth} className="space-y-5">
             {/* Error */}
@@ -179,9 +179,9 @@ export default function Auth() {
                   exit={{ opacity: 0, height: 0, marginBottom: 0 }}
                   className="overflow-hidden"
                 >
-                  <div className="bg-red-50/80 border border-red-200/50 rounded-xl px-4 py-3 flex items-start gap-2.5">
-                    <AlertCircle className="w-4 h-4 text-red-400 mt-0.5 flex-shrink-0" />
-                    <p className="text-[12px] text-red-500/80 leading-relaxed">{error}</p>
+                  <div className="bg-red-50/80 dark:bg-red-950/30 border border-red-200/50 dark:border-red-900/50 rounded-xl px-4 py-3 flex items-start gap-2.5">
+                    <AlertCircle className="w-4 h-4 text-red-400 dark:text-red-400 mt-0.5 flex-shrink-0" />
+                    <p className="text-[12px] text-red-600 dark:text-red-400/90 leading-relaxed">{error}</p>
                   </div>
                 </motion.div>
               )}
@@ -196,9 +196,9 @@ export default function Auth() {
                   exit={{ opacity: 0, height: 0, marginBottom: 0 }}
                   className="overflow-hidden"
                 >
-                  <div className="bg-green-50/80 border border-green-200/50 rounded-xl px-4 py-3 flex items-start gap-2.5">
-                    <CheckCircle2 className="w-4 h-4 text-green-500 mt-0.5 flex-shrink-0" />
-                    <p className="text-[12px] text-green-600/80 leading-relaxed">{message}</p>
+                  <div className="bg-green-50/80 dark:bg-emerald-950/25 border border-green-200/50 dark:border-emerald-900/40 rounded-xl px-4 py-3 flex items-start gap-2.5">
+                    <CheckCircle2 className="w-4 h-4 text-green-600 dark:text-emerald-400 mt-0.5 flex-shrink-0" />
+                    <p className="text-[12px] text-green-700 dark:text-emerald-400/90 leading-relaxed">{message}</p>
                   </div>
                 </motion.div>
               )}
@@ -207,15 +207,15 @@ export default function Auth() {
             <div className="space-y-3.5">
               {/* Email */}
               <div>
-                <label className="text-[11px] font-medium text-[#1a1a1a]/35 ml-0.5 mb-1.5 block">
+                <label className="text-[11px] font-medium text-app-fg-muted ml-0.5 mb-1.5 block">
                   Email
                 </label>
                 <div className={`relative rounded-xl border transition-all duration-200 ${
                   focusedField === 'email' 
-                    ? 'border-[#1a1a1a]/15 shadow-[0_0_0_3px_rgba(26,26,26,0.04)]' 
-                    : 'border-[#1a1a1a]/[0.07] hover:border-[#1a1a1a]/12'
+                    ? 'border-zinc-400 dark:border-zinc-500 shadow-[0_0_0_3px_rgba(26,26,26,0.04)] dark:shadow-[0_0_0_3px_rgba(255,255,255,0.06)]' 
+                    : 'border-zinc-200/90 dark:border-zinc-600/80 hover:border-zinc-300 dark:hover:border-zinc-500'
                 }`}>
-                  <Mail className="absolute left-3.5 top-1/2 -translate-y-1/2 w-[15px] h-[15px] text-[#1a1a1a]/20" />
+                  <Mail className="absolute left-3.5 top-1/2 -translate-y-1/2 w-[15px] h-[15px] text-app-fg-subtle" />
                   <input 
                     type="email" 
                     required
@@ -223,7 +223,7 @@ export default function Auth() {
                     onChange={(e) => setEmail(e.target.value)}
                     onFocus={() => setFocusedField('email')}
                     onBlur={() => setFocusedField(null)}
-                    className="w-full bg-transparent rounded-xl py-3 pl-10 pr-4 text-[14px] text-[#1a1a1a] placeholder:text-[#1a1a1a]/20 focus:outline-none"
+                    className="w-full bg-transparent rounded-xl py-3 pl-10 pr-4 text-[14px] text-app-fg placeholder:text-app-fg-subtle focus:outline-none"
                     placeholder="name@company.com"
                   />
                 </div>
@@ -231,15 +231,15 @@ export default function Auth() {
 
               {/* Password */}
               <div>
-                <label className="text-[11px] font-medium text-[#1a1a1a]/35 ml-0.5 mb-1.5 block">
+                <label className="text-[11px] font-medium text-app-fg-muted ml-0.5 mb-1.5 block">
                   Password
                 </label>
                 <div className={`relative rounded-xl border transition-all duration-200 ${
                   focusedField === 'password' 
-                    ? 'border-[#1a1a1a]/15 shadow-[0_0_0_3px_rgba(26,26,26,0.04)]' 
-                    : 'border-[#1a1a1a]/[0.07] hover:border-[#1a1a1a]/12'
+                    ? 'border-zinc-400 dark:border-zinc-500 shadow-[0_0_0_3px_rgba(26,26,26,0.04)] dark:shadow-[0_0_0_3px_rgba(255,255,255,0.06)]' 
+                    : 'border-zinc-200/90 dark:border-zinc-600/80 hover:border-zinc-300 dark:hover:border-zinc-500'
                 }`}>
-                  <Lock className="absolute left-3.5 top-1/2 -translate-y-1/2 w-[15px] h-[15px] text-[#1a1a1a]/20" />
+                  <Lock className="absolute left-3.5 top-1/2 -translate-y-1/2 w-[15px] h-[15px] text-app-fg-subtle" />
                   <input 
                     type="password" 
                     required
@@ -247,7 +247,7 @@ export default function Auth() {
                     onChange={(e) => setPassword(e.target.value)}
                     onFocus={() => setFocusedField('password')}
                     onBlur={() => setFocusedField(null)}
-                    className="w-full bg-transparent rounded-xl py-3 pl-10 pr-4 text-[14px] text-[#1a1a1a] placeholder:text-[#1a1a1a]/20 focus:outline-none"
+                    className="w-full bg-transparent rounded-xl py-3 pl-10 pr-4 text-[14px] text-app-fg placeholder:text-app-fg-subtle focus:outline-none"
                     placeholder="Enter your password"
                   />
                 </div>
@@ -259,7 +259,7 @@ export default function Auth() {
               type="button"
               onClick={handleGoogleAuth}
               disabled={loading}
-              className="w-full bg-white text-[#1a1a1a] py-3 rounded-xl text-[13px] font-semibold border border-[#1a1a1a]/10 hover:bg-[#fafafa] active:scale-[0.98] transition-all flex items-center justify-center gap-2 disabled:opacity-50"
+              className="w-full bg-zinc-50 dark:bg-app-raised text-app-fg py-3 rounded-xl text-[13px] font-semibold border border-zinc-200/80 dark:border-app-border hover:bg-zinc-100 dark:hover:bg-app-chip active:scale-[0.98] transition-all flex items-center justify-center gap-2 disabled:opacity-50"
             >
               <svg className="w-4 h-4" viewBox="0 0 24 24" aria-hidden="true">
                 <path fill="#EA4335" d="M12 10.2v3.9h5.5c-.2 1.3-1.5 3.9-5.5 3.9-3.3 0-6-2.7-6-6s2.7-6 6-6c1.9 0 3.2.8 3.9 1.5l2.7-2.6C17 3.4 14.7 2.4 12 2.4 6.9 2.4 2.7 6.6 2.7 11.7S6.9 21 12 21c6.9 0 8.6-4.8 8.6-7.3 0-.5 0-.9-.1-1.3H12z"/>
@@ -269,10 +269,10 @@ export default function Auth() {
 
             <div className="relative">
               <div className="absolute inset-0 flex items-center">
-                <div className="w-full border-t border-[#1a1a1a]/10" />
+                <div className="w-full border-t border-zinc-200/80 dark:border-zinc-600/60" />
               </div>
               <div className="relative flex justify-center text-[11px]">
-                <span className="bg-white px-2 text-[#1a1a1a]/30">or</span>
+                <span className="bg-app-panel px-2 text-app-fg-subtle">or</span>
               </div>
             </div>
 
@@ -280,7 +280,7 @@ export default function Auth() {
             <button 
               type="submit"
               disabled={loading}
-              className="w-full bg-[#1a1a1a] text-white py-3 rounded-xl text-[13px] font-semibold hover:bg-[#333] active:scale-[0.98] transition-all flex items-center justify-center gap-2 shadow-sm disabled:opacity-50"
+              className="w-full bg-zinc-900 text-white dark:bg-zinc-100 dark:text-zinc-900 py-3 rounded-xl text-[13px] font-semibold hover:bg-zinc-800 dark:hover:bg-zinc-200 active:scale-[0.98] transition-all flex items-center justify-center gap-2 shadow-sm disabled:opacity-50"
             >
               {loading ? (
                 <Loader2 className="w-4 h-4 animate-spin" />
@@ -294,15 +294,15 @@ export default function Auth() {
           </form>
 
           {/* Toggle */}
-          <div className="mt-6 pt-5 border-t border-[#1a1a1a]/[0.05] text-center">
+          <div className="mt-6 pt-5 border-t border-app-card-border text-center">
             <button 
               onClick={() => { setIsSignUp(!isSignUp); setError(null); setMessage(null); }}
-              className="text-[12px] text-[#1a1a1a]/30 hover:text-[#1a1a1a]/60 transition-colors"
+              className="text-[12px] text-app-fg-subtle hover:text-app-fg-muted transition-colors"
             >
               {isSignUp ? (
-                <>Already have an account? <span className="font-medium text-[#1a1a1a]/50">Sign In</span></>
+                <>Already have an account? <span className="font-medium text-app-fg-muted">Sign In</span></>
               ) : (
-                <>Don't have an account? <span className="font-medium text-[#1a1a1a]/50">Sign Up</span></>
+                <>Don't have an account? <span className="font-medium text-app-fg-muted">Sign Up</span></>
               )}
             </button>
           </div>
@@ -315,10 +315,10 @@ export default function Auth() {
           transition={{ duration: 0.5, delay: 0.4 }}
           className="mt-8 flex justify-between items-center px-1"
         >
-          <p className="text-[11px] text-[#1a1a1a]/15">© 2025 Wisprnote</p>
+          <p className="text-[11px] text-app-fg-subtle/60">© 2026 Wisprnote</p>
           <div className="flex gap-4">
-            <a href="#" className="text-[11px] text-[#1a1a1a]/15 hover:text-[#1a1a1a]/40 transition-colors">Privacy</a>
-            <a href="#" className="text-[11px] text-[#1a1a1a]/15 hover:text-[#1a1a1a]/40 transition-colors">Terms</a>
+            <a href="#" className="text-[11px] text-app-fg-subtle/60 hover:text-app-fg-muted transition-colors">Privacy</a>
+            <a href="#" className="text-[11px] text-app-fg-subtle/60 hover:text-app-fg-muted transition-colors">Terms</a>
           </div>
         </motion.div>
       </motion.div>

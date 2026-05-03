@@ -16,7 +16,7 @@ export function Skeleton({
   height,
   count = 1
 }: SkeletonProps) {
-  const baseClasses = 'bg-gray-200 animate-pulse';
+  const baseClasses = 'bg-zinc-200 dark:bg-zinc-700 animate-pulse';
   
   const variantClasses = {
     text: 'h-4 rounded',
@@ -81,7 +81,7 @@ export function MeetingGridSkeleton({ count = 6 }: { count?: number }) {
 // Notes page skeleton
 export function NotesPageSkeleton() {
   return (
-    <div className="p-6 space-y-6">
+    <div className="p-6 space-y-6 bg-app-panel text-app-fg min-h-[200px]">
       {/* Header */}
       <div className="flex items-center justify-between">
         <div className="space-y-2">
@@ -171,9 +171,9 @@ export function AssetsPageSkeleton() {
 // Knowledge graph skeleton
 export function KnowledgeGraphSkeleton() {
   return (
-    <div className="flex flex-col h-full">
+    <div className="flex flex-col h-full bg-app-panel text-app-fg">
       {/* Header */}
-      <div className="flex items-center justify-between p-4 border-b">
+      <div className="flex items-center justify-between p-4 border-b border-zinc-200/80 dark:border-app-border">
         <div className="space-y-1">
           <Skeleton variant="text" width={180} height={24} />
           <Skeleton variant="text" width={280} height={12} />
@@ -185,7 +185,7 @@ export function KnowledgeGraphSkeleton() {
       </div>
       
       {/* Graph area */}
-      <div className="flex-1 flex items-center justify-center bg-gray-50">
+      <div className="flex-1 flex items-center justify-center bg-zinc-50 dark:bg-app-canvas">
         <div className="text-center space-y-4">
           <div className="relative w-48 h-48 mx-auto">
             {/* Simulated graph nodes */}
@@ -233,14 +233,14 @@ export function ProcessPageSkeleton() {
 // Full page loading skeleton with shimmer
 export function PageLoadingSkeleton({ message = 'Loading...' }: { message?: string }) {
   return (
-    <div className="absolute inset-0 flex flex-col items-center justify-center bg-white">
+    <div className="absolute inset-0 flex flex-col items-center justify-center bg-app-panel text-app-fg">
       <motion.div
         initial={{ opacity: 0, scale: 0.9 }}
         animate={{ opacity: 1, scale: 1 }}
         className="text-center"
       >
-        <div className="w-12 h-12 border-2 border-gray-200 border-t-gray-800 rounded-full animate-spin mx-auto mb-4" />
-        <p className="text-sm text-gray-500 font-mono">{message}</p>
+        <div className="w-12 h-12 border-2 border-zinc-300 dark:border-zinc-600 border-t-zinc-800 dark:border-t-zinc-200 rounded-full animate-spin mx-auto mb-4" />
+        <p className="text-sm text-app-fg-muted font-mono">{message}</p>
       </motion.div>
     </div>
   );

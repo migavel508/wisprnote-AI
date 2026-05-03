@@ -187,7 +187,7 @@ export default function HistoryPage({ history, onSelectTask, isLoading = false, 
   }, [onSelectTask]);
   
   return (
-    <div className="absolute inset-0 flex flex-col bg-white overflow-hidden font-[system-ui]">
+    <div className="absolute inset-0 flex flex-col bg-app-panel text-app-fg overflow-hidden font-[system-ui]">
       {/* Fixed Header */}
       <div className="flex-none px-3 sm:px-6 md:px-10 pt-5 sm:pt-8 pb-3 sm:pb-5">
         <div className="max-w-5xl mx-auto">
@@ -276,7 +276,7 @@ export default function HistoryPage({ history, onSelectTask, isLoading = false, 
                 >
                   {/* Loading overlay */}
                   {loadingTaskId === task.id && (
-                    <div className="absolute inset-0 bg-white/80 backdrop-blur-sm rounded-2xl flex items-center justify-center z-10">
+                    <div className="absolute inset-0 bg-app-panel/85 dark:bg-app-panel/90 backdrop-blur-sm rounded-2xl flex items-center justify-center z-10">
                       <Loader2 className="w-5 h-5 animate-spin text-[#1a1a1a]/40" />
                     </div>
                   )}
