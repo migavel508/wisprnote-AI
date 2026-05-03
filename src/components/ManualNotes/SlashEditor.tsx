@@ -197,7 +197,7 @@ function SlashMenu({ state }: { state: SlashMenuState | null }) {
 
   return (
     <div
-      className="fixed z-[9999] w-[268px] bg-white rounded-xl border border-[#e5e5e5] shadow-[0_8px_32px_rgba(0,0,0,0.12)] overflow-hidden"
+      className="fixed z-[9999] w-[268px] bg-app-panel rounded-xl border border-zinc-200 dark:border-zinc-600 shadow-[0_8px_32px_rgba(0,0,0,0.12)] dark:shadow-[0_8px_32px_rgba(0,0,0,0.45)] overflow-hidden text-app-fg"
       style={{ top, left }}
     >
       <div className="px-3 pt-2.5 pb-1">
@@ -215,9 +215,9 @@ function SlashMenu({ state }: { state: SlashMenuState | null }) {
                 : 'text-[#3a3a3a] hover:bg-[#f8f8f7]'
             }`}
           >
-            <div className={`w-8 h-8 rounded-[8px] flex items-center justify-center flex-shrink-0 border transition-colors ${
+            <div className={`w-8 h-8 rounded-md flex items-center justify-center flex-shrink-0 border transition-colors ${
               i === state.selectedIndex
-                ? 'bg-white border-[#e0e0e0] text-[#1a1a1a]'
+                ? 'bg-zinc-50 dark:bg-app-chip border-zinc-200 dark:border-app-border text-app-fg'
                 : 'bg-[#f4f4f3] border-transparent text-[#595959]'
             }`}>
               {item.icon}

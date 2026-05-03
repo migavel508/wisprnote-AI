@@ -41,6 +41,7 @@ import {
   buildChatContext,
 } from '../lib/knowledgeGraph.utils';
 import { buildFingerprint, loadCachedArtifact, saveCachedArtifact } from '../lib/kgArtifactCache';
+import { useTheme } from '../theme/ThemeProvider';
 
 interface KnowledgePageProps {
   kgData: any[];
@@ -63,6 +64,7 @@ export default function KnowledgePage({
   historyLength,
   isInitialLoading = false
 }: KnowledgePageProps) {
+  const { resolved: themeResolved } = useTheme();
   const [selectedNode, setSelectedNode] = useState<any>(null);
   const [searchQuery, setSearchQuery] = useState('');
   const [searchResults, setSearchResults] = useState<any[]>([]);
@@ -332,55 +334,55 @@ export default function KnowledgePage({
     };
     
     return (
-      <div key={idx} className="bg-gradient-to-br from-purple-50/80 to-blue-50/80 rounded-xl border border-purple-100/50 overflow-hidden transition-all duration-300 hover:shadow-md">
+      <div key={idx} className="bg-gradient-to-br from-purple-50/80 to-blue-50/80 dark:from-purple-950/50 dark:to-blue-950/50 rounded-xl border border-purple-100/50 dark:border-purple-800/40 overflow-hidden transition-all duration-300 hover:shadow-md">
         {/* Collapsed Header (Always visible) */}
         <div 
-          className="p-3.5 flex items-center justify-between cursor-pointer hover:bg-white/40 transition-colors group"
+          className="p-3.5 flex items-center justify-between cursor-pointer hover:bg-white/40 dark:hover:bg-white/5 transition-colors group"
           onClick={() => setIsExpanded(!isExpanded)}
         >
           <div className="flex-1 min-w-0 pr-3">
             <div className="flex items-center gap-2 mb-1.5">
-              <span className="text-sm font-bold text-gray-800 truncate group-hover:text-purple-700 transition-colors">
+              <span className="text-sm font-bold text-gray-800 dark:text-app-fg truncate group-hover:text-purple-700 dark:group-hover:text-purple-300 transition-colors">
                 {relatedMeetingData.meetingTitle?.replace(/\.[^.]+$/, '') || 'Meeting'}
               </span>
-              <span className="text-[9px] px-2 py-0.5 bg-purple-200/50 text-purple-800 rounded-md font-mono shrink-0 font-medium">
+              <span className="text-[9px] px-2 py-0.5 bg-purple-200/50 dark:bg-purple-900/60 text-purple-800 dark:text-purple-200 rounded-md font-mono shrink-0 font-medium">
                 {related.totalScore.toFixed(1)} pts
               </span>
             </div>
-            <div className="text-[10px] text-gray-500 truncate flex items-center gap-1.5 flex-wrap">
+            <div className="text-[10px] text-gray-500 dark:text-zinc-400 truncate flex items-center gap-1.5 flex-wrap">
               {related.relationships.length > 0 && related.relationships.map((r, rIdx) => (
-                <span key={rIdx} className={`text-[8px] px-1.5 py-0.5 rounded font-mono ${REL_BADGE_COLORS[r.relationshipType] || 'bg-gray-100 text-gray-600'}`}>
+                <span key={rIdx} className={`text-[8px] px-1.5 py-0.5 rounded font-mono ${REL_BADGE_COLORS[r.relationshipType] || 'bg-gray-100 dark:bg-app-chip text-gray-600 dark:text-zinc-300'}`}>
                   {r.relationshipType}
                 </span>
               ))}
               {related.embeddingScore > 0 && (
-                <span className="flex items-center gap-1 bg-white/60 px-1.5 py-0.5 rounded text-gray-600">
+                <span className="flex items-center gap-1 bg-white/60 dark:bg-app-chip/80 px-1.5 py-0.5 rounded text-gray-600 dark:text-zinc-300">
                   sim: {(related.embeddingScore * 100).toFixed(0)}%
                 </span>
               )}
             </div>
           </div>
-          <div className={`shrink-0 p-1.5 bg-white/80 rounded-lg text-purple-600 shadow-sm transition-transform duration-300 ${isExpanded ? '-rotate-90 bg-purple-100' : 'rotate-90'}`}>
+          <div className={`shrink-0 p-1.5 bg-white/80 dark:bg-app-chip rounded-lg text-purple-600 dark:text-purple-400 shadow-sm transition-transform duration-300 ${isExpanded ? '-rotate-90 bg-purple-100 dark:bg-purple-900/70' : 'rotate-90'}`}>
             <ChevronRight className="w-3.5 h-3.5" />
           </div>
         </div>
 
         {/* Expanded Content */}
         {isExpanded && (
-          <div className="p-3 pt-0 border-t border-purple-100 bg-white/40">
+          <div className="p-3 pt-0 border-t border-purple-100 dark:border-purple-900/50 bg-white/40 dark:bg-app-panel/60">
             <div className="pt-3">
               {/* Contextual Relationships */}
               {related.relationships.length > 0 && (
                 <div className="mb-3 space-y-1.5">
                   {related.relationships.map((r, rIdx) => (
-                    <div key={rIdx} className="p-2 bg-white/70 rounded border border-purple-200">
+                    <div key={rIdx} className="p-2 bg-white/70 dark:bg-app-raised rounded border border-purple-200 dark:border-purple-800/50">
                       <div className="flex items-center gap-2 mb-1">
-                        <span className={`text-[8px] px-1.5 py-0.5 rounded font-mono font-medium ${REL_BADGE_COLORS[r.relationshipType] || 'bg-gray-100 text-gray-600'}`}>
+                        <span className={`text-[8px] px-1.5 py-0.5 rounded font-mono font-medium ${REL_BADGE_COLORS[r.relationshipType] || 'bg-gray-100 dark:bg-app-chip text-gray-600 dark:text-zinc-300'}`}>
                           {r.relationshipType}
                         </span>
-                        <span className="text-[8px] text-gray-400 font-mono">{r.confidence}</span>
+                        <span className="text-[8px] text-gray-400 dark:text-zinc-500 font-mono">{r.confidence}</span>
                       </div>
-                      <p className="text-[10px] text-gray-700">{r.sharedThread}</p>
+                      <p className="text-[10px] text-gray-700 dark:text-zinc-200">{r.sharedThread}</p>
                     </div>
                   ))}
                 </div>
@@ -389,15 +391,15 @@ export default function KnowledgePage({
               {/* What Was Discussed in That Meeting - All Topics */}
               {(relatedMeetingData.topics || []).length > 0 && (
                 <div className="mb-3">
-                  <span className="text-[9px] font-mono uppercase text-indigo-700 block mb-2 flex items-center gap-1">
+                  <span className="text-[9px] font-mono uppercase text-indigo-700 dark:text-indigo-300 block mb-2 flex items-center gap-1">
                     <MessageSquare className="w-3 h-3" />
                     What Was Discussed:
                   </span>
                   <div className="space-y-1.5">
                     {(relatedMeetingData.topics || []).map((topic: any, tIdx: number) => (
-                      <div key={tIdx} className="p-2 rounded bg-white/80">
+                      <div key={tIdx} className="p-2 rounded bg-white/80 dark:bg-app-chip/90">
                         <div className="flex items-start justify-between gap-2 mb-1">
-                          <span className="text-[10px] font-semibold text-gray-800">
+                          <span className="text-[10px] font-semibold text-gray-800 dark:text-app-fg">
                             {topic.name}
                           </span>
                           <span className={`text-[8px] px-1 py-0.5 rounded font-mono shrink-0 ${
@@ -407,7 +409,7 @@ export default function KnowledgePage({
                             topic.status === 'ongoing' ? 'bg-blue-100 text-blue-700' : 'bg-purple-100 text-purple-700'
                           }`}>{topic.status}</span>
                         </div>
-                        <p className="text-[9px] text-gray-600 leading-relaxed line-clamp-2 hover:line-clamp-none transition-all">"{topic.summary}"</p>
+                        <p className="text-[9px] text-gray-600 dark:text-zinc-300 leading-relaxed line-clamp-2 hover:line-clamp-none transition-all">"{topic.summary}"</p>
                       </div>
                     ))}
                   </div>
@@ -417,22 +419,22 @@ export default function KnowledgePage({
               {/* Decisions and Actions */}
               <div className="grid grid-cols-1 gap-2 mt-3">
                 {(relatedMeetingData.decisions || []).length > 0 && (
-                  <div className="bg-yellow-50/50 rounded p-2 border border-yellow-100">
-                    <span className="text-[9px] font-mono uppercase text-yellow-700 block mb-1">Decisions</span>
+                  <div className="bg-yellow-50/50 dark:bg-yellow-950/40 rounded p-2 border border-yellow-100 dark:border-yellow-900/50">
+                    <span className="text-[9px] font-mono uppercase text-yellow-700 dark:text-yellow-300 block mb-1">Decisions</span>
                     <ul className="space-y-1">
                       {(relatedMeetingData.decisions || []).slice(0, 2).map((dec: any, dIdx: number) => (
-                        <li key={dIdx} className="text-[9px] text-yellow-900 truncate">• {dec.decision}</li>
+                        <li key={dIdx} className="text-[9px] text-yellow-900 dark:text-yellow-100 truncate">• {dec.decision}</li>
                       ))}
                     </ul>
                   </div>
                 )}
                 
                 {(relatedMeetingData.actionItems || []).length > 0 && (
-                  <div className="bg-pink-50/50 rounded p-2 border border-pink-100">
-                    <span className="text-[9px] font-mono uppercase text-pink-700 block mb-1">Actions</span>
+                  <div className="bg-pink-50/50 dark:bg-pink-950/40 rounded p-2 border border-pink-100 dark:border-pink-900/50">
+                    <span className="text-[9px] font-mono uppercase text-pink-700 dark:text-pink-300 block mb-1">Actions</span>
                     <ul className="space-y-1">
                       {(relatedMeetingData.actionItems || []).slice(0, 2).map((action: any, aIdx: number) => (
-                        <li key={aIdx} className="text-[9px] text-pink-900 truncate">
+                        <li key={aIdx} className="text-[9px] text-pink-900 dark:text-pink-100 truncate">
                           <span className="font-medium">{action.owner}:</span> {action.task}
                         </li>
                       ))}
@@ -541,7 +543,7 @@ export default function KnowledgePage({
 
   // Node type colors for legend
   const nodeTypes = [
-    { type: 'meeting', color: '#141414', label: 'Meeting', shape: 'large' },
+    { type: 'meeting', color: '#475569', label: 'Meeting', shape: 'large' },
     { type: 'topic', color: '#8b5cf6', label: 'Topic', shape: 'medium' },
     { type: 'person', color: '#06b6d4', label: 'Person', shape: 'small' },
     { type: 'decision', color: '#f59e0b', label: 'Decision', shape: 'small' },
@@ -554,52 +556,52 @@ export default function KnowledgePage({
   }
 
   return (
-    <div className="absolute inset-0 flex flex-col bg-white overflow-hidden">
+    <div className="absolute inset-0 flex flex-col bg-app-panel text-app-fg overflow-hidden">
       {/* Header */}
-      <div className="flex-none bg-white border-b border-[#141414]/10 px-3 sm:px-6 py-2.5 sm:py-4">
+      <div className="flex-none bg-app-panel border-b border-zinc-200/80 dark:border-app-border px-3 sm:px-6 py-2.5 sm:py-4">
         <div className="flex items-center justify-between gap-2 sm:gap-4">
           <div className="min-w-0">
             <h2 className="text-base sm:text-xl font-serif italic font-bold flex items-center gap-1.5 sm:gap-2">
               <Network className="w-4 sm:w-5 h-4 sm:h-5 flex-shrink-0" />
               <span className="truncate">Knowledge Graph</span>
             </h2>
-            <p className="text-[10px] sm:text-xs opacity-50 mt-0.5 hidden sm:block">Cross-meeting memory — see how topics, decisions, and people connect</p>
+            <p className="text-[10px] sm:text-xs text-zinc-500 dark:text-zinc-400 mt-0.5 hidden sm:block">Cross-meeting memory — see how topics, decisions, and people connect</p>
           </div>
           
           <div className="flex items-center gap-2 sm:gap-3 overflow-x-auto">
             {/* Search - Hidden on mobile, shown as icon */}
             <div className="relative hidden sm:block">
-              <div className="flex items-center gap-2 border border-[#141414]/20 bg-white px-3 py-2 rounded-lg w-48 lg:w-64">
-                <Search className="w-4 h-4 opacity-40" />
+              <div className="flex items-center gap-2 border border-zinc-200/90 dark:border-app-border bg-app-panel dark:bg-app-raised px-3 py-2 rounded-lg w-48 lg:w-64">
+                <Search className="w-4 h-4 text-zinc-400 dark:text-zinc-500" />
                 <input
                   type="text"
                   placeholder="Search nodes..."
                   value={searchQuery}
                   onChange={(e) => handleSearch(e.target.value)}
-                  className="bg-transparent border-none outline-none text-sm w-full"
+                  className="bg-transparent border-none outline-none text-sm w-full text-zinc-900 dark:text-app-fg placeholder:text-zinc-400 dark:placeholder:text-zinc-500"
                 />
                 {searchQuery && (
                   <button onClick={() => { setSearchQuery(''); setSearchResults([]); }}>
-                    <X className="w-3 h-3 opacity-40 hover:opacity-100" />
+                    <X className="w-3 h-3 text-zinc-400 hover:text-zinc-600 dark:text-zinc-500 dark:hover:text-zinc-300" />
                   </button>
                 )}
               </div>
               
               {/* Search Results Dropdown */}
               {searchResults.length > 0 && (
-                <div className="absolute top-full left-0 right-0 mt-1 bg-white border border-[#141414]/10 rounded-lg shadow-lg z-50 max-h-64 overflow-y-auto">
+                <div className="absolute top-full left-0 right-0 mt-1 bg-app-panel dark:bg-app-raised border border-zinc-200/80 dark:border-app-border rounded-lg shadow-lg z-50 max-h-64 overflow-y-auto">
                   {searchResults.map((result, idx) => (
                     <button
                       key={idx}
                       onClick={() => focusOnNode(result)}
-                      className="w-full px-3 py-2 text-left hover:bg-gray-50 flex items-center gap-2 border-b border-gray-100 last:border-0"
+                      className="w-full px-3 py-2 text-left text-zinc-800 dark:text-app-fg hover:bg-zinc-50 dark:hover:bg-app-chip flex items-center gap-2 border-b border-zinc-100 dark:border-app-border last:border-0"
                     >
                       <span 
                         className="w-2 h-2 rounded-full flex-shrink-0" 
                         style={{ backgroundColor: result.color }} 
                       />
                       <span className="text-xs font-medium truncate">{result.label}</span>
-                      <span className="text-[10px] text-gray-400 uppercase ml-auto">{result.type}</span>
+                      <span className="text-[10px] text-zinc-500 dark:text-zinc-400 uppercase ml-auto">{result.type}</span>
                     </button>
                   ))}
                 </div>
@@ -610,7 +612,7 @@ export default function KnowledgePage({
             <button
               onClick={() => setShowChat(!showChat)}
               className={`px-3 sm:px-4 py-2 text-[10px] sm:text-xs font-mono uppercase tracking-wider flex items-center gap-1.5 sm:gap-2 rounded-lg transition-colors flex-shrink-0 ${
-                showChat ? 'bg-[#141414] text-white' : 'border border-[#141414]/20 hover:bg-gray-50'
+                showChat ? 'bg-[#141414] dark:bg-zinc-100 text-white dark:text-zinc-900' : 'border border-zinc-300/80 dark:border-app-border text-zinc-700 dark:text-app-fg-muted hover:bg-zinc-50 dark:hover:bg-app-chip'
               }`}
             >
               <Sparkles className="w-3.5 sm:w-4 h-3.5 sm:h-4" />
@@ -621,7 +623,7 @@ export default function KnowledgePage({
             <button 
               onClick={buildKnowledgeGraph}
               disabled={isLoadingKG || historyLength === 0}
-              className="px-3 sm:px-4 py-2 bg-[#141414] text-white text-[10px] sm:text-xs font-mono uppercase tracking-wider hover:bg-[#333] disabled:opacity-30 flex items-center gap-1.5 sm:gap-2 rounded-lg transition-colors flex-shrink-0"
+              className="px-3 sm:px-4 py-2 bg-zinc-900 text-white dark:bg-zinc-100 dark:text-zinc-900 text-[10px] sm:text-xs font-mono uppercase tracking-wider hover:bg-zinc-800 dark:hover:bg-white disabled:opacity-30 flex items-center gap-1.5 sm:gap-2 rounded-lg transition-colors flex-shrink-0"
             >
               {isLoadingKG ? <Loader2 className="w-3.5 sm:w-4 h-3.5 sm:h-4 animate-spin" /> : <Network className="w-3.5 sm:w-4 h-3.5 sm:h-4" />}
               <span className="hidden sm:inline">{kgBuilt ? 'Rebuild' : 'Build Graph'}</span>
@@ -642,7 +644,7 @@ export default function KnowledgePage({
                 initial={{ opacity: 0, y: -20 }}
                 animate={{ opacity: 1, y: 0 }}
                 exit={{ opacity: 0, y: -20 }}
-                className="absolute top-4 left-1/2 transform -translate-x-1/2 z-50 bg-[#141414] text-white px-4 py-2 rounded-full shadow-lg flex items-center gap-3 text-xs font-mono"
+                className="absolute top-4 left-1/2 transform -translate-x-1/2 z-50 bg-zinc-900 text-white dark:bg-zinc-100 dark:text-zinc-900 px-4 py-2 rounded-full shadow-lg flex items-center gap-3 text-xs font-mono"
               >
                 <Loader2 className="w-3 h-3 animate-spin" />
                 <span>Extracting latest meeting data...</span>
@@ -668,30 +670,30 @@ export default function KnowledgePage({
           </AnimatePresence>
 
           {!kgBuilt && !isExtractingNewKG ? (
-            <div className="flex-1 flex flex-col items-center justify-center text-center p-8 bg-[#FAFAFA]">
+            <div className="flex-1 flex flex-col items-center justify-center text-center p-8 bg-zinc-50 dark:bg-app-canvas text-zinc-800 dark:text-app-fg">
               {isLoadingKG ? (
                 <div className="w-full max-w-md flex flex-col items-center">
-                  <Loader2 className="w-16 h-16 animate-spin opacity-20 mb-6" />
-                  <h3 className="text-lg font-bold opacity-80 mb-2">
+                  <Loader2 className="w-16 h-16 animate-spin text-zinc-400 dark:text-zinc-500 mb-6" />
+                  <h3 className="text-lg font-bold text-zinc-800 dark:text-app-fg mb-2">
                     Analyzing Meeting {kgProgress.current} of {kgProgress.total}
                   </h3>
-                  <div className="w-full bg-gray-200 rounded-full h-2.5 mb-4">
+                  <div className="w-full bg-zinc-200 dark:bg-app-chip rounded-full h-2.5 mb-4">
                     <motion.div 
-                      className="bg-[#141414] h-2.5 rounded-full" 
+                      className="bg-zinc-900 dark:bg-zinc-200 h-2.5 rounded-full" 
                       initial={{ width: 0 }}
                       animate={{ width: `${(kgProgress.current / kgProgress.total) * 100}%` }}
                       transition={{ duration: 0.5 }}
                     />
                   </div>
-                  <p className="text-xs opacity-50 mt-2">
+                  <p className="text-xs text-zinc-500 dark:text-zinc-400 mt-2">
                     Extracting topics, decisions, people, and action items...
                   </p>
                 </div>
               ) : (
                 <>
-                  <Share2 className="w-16 h-16 opacity-10 mb-6" />
-                  <h3 className="text-lg font-serif italic opacity-30">No Graph Built Yet</h3>
-                  <p className="text-xs opacity-30 mt-2 max-w-md">
+                  <Share2 className="w-16 h-16 text-zinc-300 dark:text-zinc-600 mb-6" />
+                  <h3 className="text-lg font-serif italic text-zinc-500 dark:text-zinc-400">No Graph Built Yet</h3>
+                  <p className="text-xs text-zinc-500 dark:text-zinc-400 mt-2 max-w-md">
                     {historyLength === 0 
                       ? 'Process some audio files first, then come back to build your knowledge graph.'
                       : `You have ${historyLength} meeting${historyLength !== 1 ? 's' : ''} ready. Click "Build Graph" to analyze and connect them.`
@@ -705,22 +707,22 @@ export default function KnowledgePage({
               <div className="flex-1 flex flex-col min-h-0 overflow-hidden">
                 <div className="flex-1 flex flex-col min-w-0 min-h-0">
                   {/* View controls */}
-                  <div className="flex-none flex items-center gap-1.5 sm:gap-2 px-2 sm:px-3 py-1.5 sm:py-2 bg-white border-b border-gray-100 overflow-x-auto no-scrollbar">
+                  <div className="flex-none flex items-center gap-1.5 sm:gap-2 px-2 sm:px-3 py-1.5 sm:py-2 bg-app-panel dark:bg-app-raised border-b border-zinc-200/80 dark:border-app-border overflow-x-auto no-scrollbar">
                     <button
                       type="button"
                       onClick={() => setBrowsePanelOpen((v) => !v)}
                       className={`px-2.5 py-1.5 text-[10px] font-mono uppercase tracking-wide rounded-md border flex items-center gap-1.5 transition-colors ${
                         browsePanelOpen
-                          ? 'bg-[#141414] text-white border-[#141414]'
-                          : 'border-gray-200 text-gray-700 bg-white hover:bg-gray-50'
+                          ? 'bg-zinc-900 text-white border-zinc-900 dark:bg-zinc-100 dark:text-zinc-900 dark:border-zinc-100'
+                          : 'border-zinc-200 dark:border-app-border text-zinc-700 dark:text-app-fg-muted bg-app-panel dark:bg-app-panel hover:bg-zinc-50 dark:hover:bg-app-chip'
                       }`}
                       title="Open or close the meeting list"
                     >
                       <List className="w-3.5 h-3.5" />
                       <span className="hidden sm:inline">Meeting index</span>
                     </button>
-                    <div className="h-4 w-px bg-gray-200" />
-                    <div className="flex items-center rounded-lg border border-gray-200/90 p-0.5 bg-[#FAFAFA]">
+                    <div className="h-4 w-px bg-zinc-200 dark:bg-app-border" />
+                    <div className="flex items-center rounded-lg border border-zinc-200/90 dark:border-app-border p-0.5 bg-zinc-50 dark:bg-app-canvas">
                       <button
                         type="button"
                         onClick={() => {
@@ -729,7 +731,7 @@ export default function KnowledgePage({
                           setSelectedNode(null);
                         }}
                         className={`px-2.5 py-1.5 text-[10px] font-mono uppercase tracking-wide rounded-md flex items-center gap-1.5 transition-colors ${
-                          graphViewMode === 'overview' ? 'bg-white shadow-sm text-[#141414]' : 'text-gray-500 hover:text-gray-800'
+                          graphViewMode === 'overview' ? 'bg-app-panel dark:bg-app-chip shadow-sm text-zinc-900 dark:text-app-fg' : 'text-zinc-500 dark:text-zinc-400 hover:text-zinc-800 dark:hover:text-app-fg'
                         }`}
                         title="Only meetings and cross-meeting links — clearest map"
                       >
@@ -740,7 +742,7 @@ export default function KnowledgePage({
                         type="button"
                         onClick={() => setGraphViewMode('full')}
                         className={`px-2.5 py-1.5 text-[10px] font-mono uppercase tracking-wide rounded-md flex items-center gap-1.5 transition-colors ${
-                          graphViewMode === 'full' ? 'bg-white shadow-sm text-[#141414]' : 'text-gray-500 hover:text-gray-800'
+                          graphViewMode === 'full' ? 'bg-app-panel dark:bg-app-chip shadow-sm text-zinc-900 dark:text-app-fg' : 'text-zinc-500 dark:text-zinc-400 hover:text-zinc-800 dark:hover:text-app-fg'
                         }`}
                         title="Topics, people, decisions, and actions"
                       >
@@ -754,38 +756,38 @@ export default function KnowledgePage({
                       onClick={() => setEgoFocus(f => !f)}
                       className={`px-2.5 py-1.5 text-[10px] font-mono uppercase tracking-wide rounded-md border flex items-center gap-1.5 transition-colors ${
                         egoFocus && selectedNode
-                          ? 'bg-violet-50 border-violet-200 text-violet-900'
-                          : 'border-gray-200 text-gray-600 hover:bg-gray-50'
+                          ? 'bg-violet-50 dark:bg-violet-950/50 border-violet-200 dark:border-violet-800 text-violet-900 dark:text-violet-200'
+                          : 'border-zinc-200 dark:border-app-border text-zinc-600 dark:text-zinc-300 hover:bg-zinc-50 dark:hover:bg-app-chip'
                       } ${graphViewMode === 'overview' || !selectedNode ? 'opacity-40 pointer-events-none' : ''}`}
                       title={!selectedNode ? 'Select a node on the graph first' : 'Show only this node and its direct connections'}
                     >
                       <Crosshair className="w-3.5 h-3.5" />
                       Neighborhood
                     </button>
-                    <div className="h-4 w-px bg-gray-200 hidden sm:block" />
-                    <span className="text-[10px] text-gray-400 tabular-nums hidden sm:inline">
+                    <div className="h-4 w-px bg-zinc-200 dark:bg-app-border hidden sm:block" />
+                    <span className="text-[10px] text-zinc-500 dark:text-zinc-400 tabular-nums hidden sm:inline">
                       {displayGraphData.nodes.length} nodes · {displayGraphData.links.length} links
                     </span>
                     {graphViewMode === 'overview' && (
-                      <span className="text-[10px] text-gray-400 ml-auto hidden sm:inline">Cross-meeting links only</span>
+                      <span className="text-[10px] text-zinc-500 dark:text-zinc-400 ml-auto hidden sm:inline">Cross-meeting links only</span>
                     )}
                     <button
                       type="button"
                       onClick={() => graphRef.current?.zoomToFit(450, 70)}
-                      className="ml-auto sm:ml-0 px-2 py-1 text-[9px] font-mono uppercase text-gray-500 hover:text-[#141414] sm:hidden"
+                      className="ml-auto sm:ml-0 px-2 py-1 text-[9px] font-mono uppercase text-zinc-500 dark:text-zinc-400 hover:text-zinc-900 dark:hover:text-app-fg sm:hidden"
                     >
                       Fit
                     </button>
                   </div>
 
                   {graphViewMode === 'full' && (
-                    <div className="flex-none px-3 py-2 bg-[#FAFAFA] border-b border-gray-100 flex items-center gap-1.5 flex-wrap">
-                      <Filter className="w-3 h-3 opacity-40 flex-shrink-0" />
-                      <span className="text-[9px] font-mono uppercase opacity-40 flex-shrink-0">Show:</span>
+                    <div className="flex-none px-3 py-2 bg-zinc-50 dark:bg-app-canvas border-b border-zinc-100 dark:border-app-border flex items-center gap-1.5 flex-wrap">
+                      <Filter className="w-3 h-3 text-zinc-400 dark:text-zinc-500 flex-shrink-0" />
+                      <span className="text-[9px] font-mono uppercase text-zinc-500 dark:text-zinc-400 flex-shrink-0">Show:</span>
                       <button
                         onClick={() => setFilterType(null)}
                         className={`px-2 py-0.5 text-[9px] rounded-md transition-colors ${
-                          !filterType ? 'bg-[#141414] text-white' : 'bg-white border border-gray-200 hover:bg-gray-50'
+                          !filterType ? 'bg-zinc-900 text-white dark:bg-zinc-100 dark:text-zinc-900' : 'bg-app-panel dark:bg-app-raised border border-zinc-200 dark:border-app-border text-zinc-700 dark:text-app-fg hover:bg-zinc-50 dark:hover:bg-app-chip'
                         }`}
                       >
                         All types
@@ -795,7 +797,7 @@ export default function KnowledgePage({
                           key={nt.type}
                           onClick={() => setFilterType(filterType === nt.type ? null : nt.type)}
                           className={`px-2 py-0.5 text-[9px] rounded-md transition-colors flex items-center gap-1 ${
-                            filterType === nt.type ? 'bg-[#141414] text-white' : 'bg-white border border-gray-200 hover:bg-gray-50'
+                            filterType === nt.type ? 'bg-zinc-900 text-white dark:bg-zinc-100 dark:text-zinc-900' : 'bg-app-panel dark:bg-app-raised border border-zinc-200 dark:border-app-border text-zinc-700 dark:text-app-fg hover:bg-zinc-50 dark:hover:bg-app-chip'
                           }`}
                         >
                           <span className="w-1.5 h-1.5 rounded-full" style={{ backgroundColor: nt.color }} />
@@ -805,7 +807,7 @@ export default function KnowledgePage({
                     </div>
                   )}
 
-                  <div ref={kgContainerRef} className="flex-1 bg-[#F4F4F3] relative min-h-0 overflow-hidden">
+                  <div ref={kgContainerRef} className="flex-1 bg-zinc-100 dark:bg-app-canvas relative min-h-0 overflow-hidden">
                     {/* Meeting index drawer — scoped to this canvas */}
                     <AnimatePresence>
                       {browsePanelOpen && (
@@ -823,19 +825,19 @@ export default function KnowledgePage({
                             animate={{ x: 0 }}
                             exit={{ x: '-100%' }}
                             transition={{ type: 'spring', damping: 30, stiffness: 340 }}
-                            className="absolute left-0 top-0 bottom-0 w-72 z-30 flex flex-col bg-white border-r border-gray-200/90 shadow-2xl"
+                            className="absolute left-0 top-0 bottom-0 w-72 z-30 flex flex-col bg-app-panel dark:bg-app-raised border-r border-zinc-200/90 dark:border-app-border shadow-2xl"
                           >
-                            <div className="px-3 py-2.5 border-b border-gray-100 bg-white">
+                            <div className="px-3 py-2.5 border-b border-zinc-100 dark:border-app-border bg-app-panel dark:bg-app-raised">
                               <div className="flex items-center justify-between">
-                                <div className="flex items-center gap-2 text-[10px] font-mono uppercase tracking-wider text-gray-500">
+                                <div className="flex items-center gap-2 text-[10px] font-mono uppercase tracking-wider text-zinc-500 dark:text-zinc-400">
                                   <List className="w-3.5 h-3.5 flex-shrink-0" />
                                   Meeting index
-                                  <span className="text-[9px] text-gray-400 tabular-nums">{meetingNodesSorted.length}</span>
+                                  <span className="text-[9px] text-zinc-400 dark:text-zinc-500 tabular-nums">{meetingNodesSorted.length}</span>
                                 </div>
                                 <button
                                   type="button"
                                   onClick={() => setBrowsePanelOpen(false)}
-                                  className="p-1.5 rounded-lg hover:bg-gray-100 text-gray-500"
+                                  className="p-1.5 rounded-lg hover:bg-zinc-100 dark:hover:bg-app-chip text-zinc-500 dark:text-zinc-400"
                                   aria-label="Close"
                                 >
                                   <PanelLeftClose className="w-4 h-4" />
@@ -860,7 +862,7 @@ export default function KnowledgePage({
                                   return (
                                     <div key={m.id}>
                                       {isNewMonth && (
-                                        <p className="text-[9px] font-mono uppercase tracking-widest text-gray-400 px-1 pt-3 pb-1 first:pt-1">
+                                        <p className="text-[9px] font-mono uppercase tracking-widest text-zinc-500 dark:text-zinc-500 px-1 pt-3 pb-1 first:pt-1">
                                           {monthLabel}
                                         </p>
                                       )}
@@ -872,15 +874,15 @@ export default function KnowledgePage({
                                         }}
                                         className={`w-full text-left px-2.5 py-2 rounded-lg border transition-colors ${
                                           isSel
-                                            ? 'bg-[#141414] text-white border-[#141414]'
-                                            : 'bg-white border-gray-200/70 text-gray-800 hover:border-gray-300 hover:bg-gray-50'
+                                            ? 'bg-zinc-900 text-white border-zinc-900 dark:bg-zinc-100 dark:text-zinc-900 dark:border-zinc-100'
+                                            : 'bg-app-panel dark:bg-app-panel border-zinc-200/70 dark:border-app-border text-zinc-800 dark:text-app-fg hover:border-zinc-300 dark:hover:border-zinc-600 hover:bg-zinc-50 dark:hover:bg-app-chip'
                                         }`}
                                       >
                                         <span className="block text-[11px] leading-snug line-clamp-2 break-words">
                                           {m.label || 'Meeting'}
                                         </span>
                                         {dayLabel && (
-                                          <span className={`block text-[9px] mt-0.5 tabular-nums ${isSel ? 'text-white/60' : 'text-gray-400'}`}>
+                                          <span className={`block text-[9px] mt-0.5 tabular-nums ${isSel ? 'text-white/70 dark:text-zinc-600' : 'text-zinc-500 dark:text-zinc-400'}`}>
                                             {dayLabel}
                                           </span>
                                         )}
@@ -898,7 +900,7 @@ export default function KnowledgePage({
                     <div className="absolute bottom-4 right-4 z-10 flex flex-col gap-1.5">
                       <button
                         onClick={() => graphRef.current?.zoom(graphRef.current.zoom() * 1.3, 300)}
-                        className="bg-white border border-gray-200/90 p-2 rounded-lg shadow-sm hover:bg-gray-50 transition-colors"
+                        className="bg-app-panel dark:bg-app-raised border border-zinc-200/90 dark:border-app-border p-2 rounded-lg shadow-sm hover:bg-zinc-50 dark:hover:bg-app-chip text-zinc-700 dark:text-app-fg transition-colors"
                         title="Zoom In"
                         type="button"
                       >
@@ -906,7 +908,7 @@ export default function KnowledgePage({
                       </button>
                       <button
                         onClick={() => graphRef.current?.zoom(graphRef.current.zoom() / 1.3, 300)}
-                        className="bg-white border border-gray-200/90 p-2 rounded-lg shadow-sm hover:bg-gray-50 transition-colors"
+                        className="bg-app-panel dark:bg-app-raised border border-zinc-200/90 dark:border-app-border p-2 rounded-lg shadow-sm hover:bg-zinc-50 dark:hover:bg-app-chip text-zinc-700 dark:text-app-fg transition-colors"
                         title="Zoom Out"
                         type="button"
                       >
@@ -914,7 +916,7 @@ export default function KnowledgePage({
                       </button>
                       <button
                         onClick={() => { shouldAutoFitRef.current = false; graphRef.current?.zoomToFit(450, 70); }}
-                        className="bg-white border border-gray-200/90 p-2 rounded-lg shadow-sm hover:bg-gray-50 transition-colors"
+                        className="bg-app-panel dark:bg-app-raised border border-zinc-200/90 dark:border-app-border p-2 rounded-lg shadow-sm hover:bg-zinc-50 dark:hover:bg-app-chip text-zinc-700 dark:text-app-fg transition-colors"
                         title="Fit everything in view"
                         type="button"
                       >
@@ -922,11 +924,11 @@ export default function KnowledgePage({
                       </button>
                     </div>
 
-                    <div className="absolute top-3 left-3 z-10 max-w-[200px] sm:max-w-[220px] bg-white/95 backdrop-blur-sm border border-gray-200/80 rounded-lg px-2.5 py-2 shadow-sm hidden sm:block">
-                      <h4 className="text-[9px] font-mono uppercase tracking-widest text-gray-400 mb-1.5">Key</h4>
+                    <div className="absolute top-3 left-3 z-10 max-w-[200px] sm:max-w-[220px] bg-app-panel/95 dark:bg-app-chip/95 backdrop-blur-sm border border-zinc-200/80 dark:border-app-border rounded-lg px-2.5 py-2 shadow-sm hidden sm:block">
+                      <h4 className="text-[9px] font-mono uppercase tracking-widest text-zinc-500 dark:text-zinc-400 mb-1.5">Key</h4>
                       <div className="flex flex-wrap gap-x-2 gap-y-1">
                         {nodeTypes.map(item => (
-                          <span key={item.label} className="inline-flex items-center gap-1 text-[9px] text-gray-600">
+                          <span key={item.label} className="inline-flex items-center gap-1 text-[9px] text-zinc-600 dark:text-zinc-300">
                             <span
                               className={`rounded-full ${item.shape === 'large' ? 'w-2.5 h-2.5' : item.shape === 'medium' ? 'w-2 h-2' : 'w-1.5 h-1.5'}`}
                               style={{ backgroundColor: item.color }}
@@ -935,7 +937,7 @@ export default function KnowledgePage({
                           </span>
                         ))}
                       </div>
-                      <p className="text-[8px] text-gray-400 mt-2 leading-tight">Zoom in for more labels, or use the meeting list.</p>
+                      <p className="text-[8px] text-zinc-500 dark:text-zinc-400 mt-2 leading-tight">Zoom in for more labels, or use the meeting list.</p>
                     </div>
 
                     <ForceGraph2D
@@ -946,7 +948,12 @@ export default function KnowledgePage({
                       nodeLabel={(node: any) => `${node.type.toUpperCase()}: ${node.label}`}
                       nodeColor={(node: any) => node.color}
                       nodeVal={(node: any) => node.size}
-                      linkColor={(link: any) => link.type === 'meeting-sibling' ? (link.color || '#9ca3af') : 'rgba(200,200,200,0.7)'}
+                      linkColor={(link: any) =>
+                        link.type === 'meeting-sibling'
+                          ? link.color || '#9ca3af'
+                          : themeResolved === 'dark'
+                            ? 'rgba(120,120,135,0.4)'
+                            : 'rgba(200,200,200,0.7)'}
                       linkWidth={(link: any) => (link.type === 'meeting-sibling' ? Math.min(0.6 + (link.weight || 0) / 8, 2.2) : 1)}
                       linkLineDash={(link: any) => link.type === 'meeting-sibling' ? [5, 4] : [2, 4]}
                       linkLabel={(link: any) =>
@@ -1002,6 +1009,7 @@ export default function KnowledgePage({
                         ctx.fill();
                       }}
                       nodeCanvasObject={(node: any, ctx: CanvasRenderingContext2D, globalScale: number) => {
+                        const isDarkBg = themeResolved === 'dark';
                         const isSel = selectedNode && node.id === selectedNode.id;
                         const isHover = hoveredNode && node.id === hoveredNode.id;
                         const label = node.label || '';
@@ -1014,20 +1022,20 @@ export default function KnowledgePage({
                         if (node.type === 'meeting') {
                           ctx.beginPath();
                           ctx.arc((node as any).x + 1, (node as any).y + 1, r, 0, 2 * Math.PI, false);
-                          ctx.fillStyle = 'rgba(0,0,0,0.08)';
+                          ctx.fillStyle = isDarkBg ? 'rgba(0,0,0,0.35)' : 'rgba(0,0,0,0.08)';
                           ctx.fill();
                         }
 
                         if (isSel) {
                           ctx.beginPath();
                           ctx.arc(node.x, node.y, r + 4 / globalScale, 0, 2 * Math.PI, false);
-                          ctx.strokeStyle = 'rgba(20, 20, 20, 0.45)';
+                          ctx.strokeStyle = isDarkBg ? 'rgba(255,255,255,0.45)' : 'rgba(20, 20, 20, 0.45)';
                           ctx.lineWidth = 2.5 / globalScale;
                           ctx.stroke();
                         } else if (isHover) {
                           ctx.beginPath();
                           ctx.arc(node.x, node.y, r + 3 / globalScale, 0, 2 * Math.PI, false);
-                          ctx.strokeStyle = 'rgba(20, 20, 20, 0.2)';
+                          ctx.strokeStyle = isDarkBg ? 'rgba(255,255,255,0.22)' : 'rgba(20, 20, 20, 0.2)';
                           ctx.lineWidth = 1.5 / globalScale;
                           ctx.stroke();
                         }
@@ -1038,7 +1046,7 @@ export default function KnowledgePage({
                         ctx.fill();
 
                         if (node.type === 'meeting') {
-                          ctx.strokeStyle = '#000';
+                          ctx.strokeStyle = isDarkBg ? '#27272a' : '#000';
                           ctx.lineWidth = 1.5 / globalScale;
                           ctx.stroke();
                         }
@@ -1049,7 +1057,7 @@ export default function KnowledgePage({
                         const displayLabel = label.length > maxLen ? label.substring(0, maxLen) + '…' : label;
                         const textWidth = ctx.measureText(displayLabel).width;
 
-                        ctx.fillStyle = 'rgba(255,255,255,0.94)';
+                        ctx.fillStyle = isDarkBg ? 'rgba(30,30,34,0.94)' : 'rgba(255,255,255,0.94)';
                         const pad = 3;
                         const boxW = textWidth + pad * 2;
                         const boxH = fontSize + pad;
@@ -1059,7 +1067,7 @@ export default function KnowledgePage({
 
                         ctx.textAlign = 'center';
                         ctx.textBaseline = 'top';
-                        ctx.fillStyle = '#1a1a1a';
+                        ctx.fillStyle = isDarkBg ? '#e4e4e7' : '#1a1a1a';
                         ctx.fillText(displayLabel, node.x, ry + 2);
                       }}
                       cooldownTicks={180}
@@ -1095,19 +1103,19 @@ export default function KnowledgePage({
                 animate={{ y: 0, opacity: 1 }}
                 exit={{ y: '100%', opacity: 0 }}
                 transition={{ type: 'spring', damping: 25, stiffness: 300 }}
-                className="fixed bottom-0 left-0 right-0 sm:relative sm:bottom-auto sm:left-auto sm:right-auto w-full sm:w-[380px] h-[70vh] sm:h-auto max-h-[70vh] sm:max-h-none flex-shrink-0 border-t sm:border-t-0 sm:border-l border-gray-200 bg-white flex flex-col z-40 sm:z-20 rounded-t-[20px] sm:rounded-none shadow-[0_-4px_30px_rgba(0,0,0,0.15)] sm:shadow-[0_0_15px_rgba(0,0,0,0.05)]"
+                className="fixed bottom-0 left-0 right-0 sm:relative sm:bottom-auto sm:left-auto sm:right-auto w-full sm:w-[380px] h-[70vh] sm:h-auto max-h-[70vh] sm:max-h-none flex-shrink-0 border-t sm:border-t-0 sm:border-l border-zinc-200 dark:border-app-border bg-app-panel dark:bg-app-raised flex flex-col z-40 sm:z-20 rounded-t-2xl sm:rounded-none shadow-[0_-4px_30px_rgba(0,0,0,0.15)] sm:shadow-[0_0_15px_rgba(0,0,0,0.05)] dark:sm:shadow-[0_0_20px_rgba(0,0,0,0.4)]"
               >
                 {/* Drag Handle - Mobile Only */}
                 <div className="flex justify-center py-2 sm:hidden">
-                  <div className="w-10 h-1 bg-gray-300 rounded-full" />
+                  <div className="w-10 h-1 bg-zinc-300 dark:bg-zinc-600 rounded-full" />
                 </div>
                 
-                <div className="flex-none px-4 py-3 border-b border-gray-100 flex items-center justify-between">
+                <div className="flex-none px-4 py-3 border-b border-zinc-100 dark:border-app-border flex items-center justify-between">
                   <div className="flex items-center gap-2">
-                    <Sparkles className="w-4 h-4 text-purple-500" />
-                    <span className="text-sm font-bold">Chat with Knowledge</span>
+                    <Sparkles className="w-4 h-4 text-purple-500 dark:text-purple-400" />
+                    <span className="text-sm font-bold text-zinc-900 dark:text-app-fg">Chat with Knowledge</span>
                   </div>
-                  <button onClick={() => setShowChat(false)} className="p-1.5 hover:bg-gray-100 rounded-lg">
+                  <button onClick={() => setShowChat(false)} className="p-1.5 hover:bg-zinc-100 dark:hover:bg-app-chip rounded-lg text-zinc-700 dark:text-app-fg">
                     <X className="w-4 h-4" />
                   </button>
                 </div>
@@ -1116,17 +1124,17 @@ export default function KnowledgePage({
                 <div className="flex-1 overflow-y-auto p-4 space-y-3">
                   {chatMessages.length === 0 && (
                     <div className="text-center py-6">
-                      <Sparkles className="w-8 h-8 mx-auto mb-3 opacity-20" />
-                      <p className="text-sm text-gray-500">Ask questions about your meetings</p>
-                      <p className="text-xs text-gray-400 mt-1">e.g., "What decisions were made?"</p>
+                      <Sparkles className="w-8 h-8 mx-auto mb-3 text-zinc-300 dark:text-zinc-600" />
+                      <p className="text-sm text-zinc-600 dark:text-zinc-300">Ask questions about your meetings</p>
+                      <p className="text-xs text-zinc-500 dark:text-zinc-400 mt-1">e.g., "What decisions were made?"</p>
                     </div>
                   )}
                   {chatMessages.map((msg, idx) => (
                     <div key={idx} className={`flex ${msg.role === 'user' ? 'justify-end' : 'justify-start'}`}>
                       <div className={`max-w-[85%] px-3 py-2 rounded-2xl text-sm ${
                         msg.role === 'user' 
-                          ? 'bg-[#141414] text-white rounded-br-md' 
-                          : 'bg-gray-100 text-gray-800 rounded-bl-md'
+                          ? 'bg-zinc-900 text-white dark:bg-zinc-100 dark:text-zinc-900 rounded-br-md' 
+                          : 'bg-zinc-100 dark:bg-app-chip text-zinc-800 dark:text-app-fg rounded-bl-md'
                       }`}>
                         {msg.content}
                       </div>
@@ -1134,7 +1142,7 @@ export default function KnowledgePage({
                   ))}
                   {isChatting && (
                     <div className="flex justify-start">
-                      <div className="bg-gray-100 px-4 py-3 rounded-2xl rounded-bl-md">
+                      <div className="bg-zinc-100 dark:bg-app-chip px-4 py-3 rounded-2xl rounded-bl-md text-zinc-700 dark:text-app-fg">
                         <Loader2 className="w-4 h-4 animate-spin" />
                       </div>
                     </div>
@@ -1143,7 +1151,7 @@ export default function KnowledgePage({
                 </div>
 
                 {/* Chat Input */}
-                <div className="flex-none p-3 sm:p-4 border-t border-gray-100 bg-white">
+                <div className="flex-none p-3 sm:p-4 border-t border-zinc-100 dark:border-app-border bg-app-panel dark:bg-app-raised">
                   <div className="flex items-center gap-2">
                     <input
                       type="text"
@@ -1151,13 +1159,13 @@ export default function KnowledgePage({
                       onChange={(e) => setChatInput(e.target.value)}
                       onKeyDown={(e) => e.key === 'Enter' && handleChatSubmit()}
                       placeholder="Ask about your meetings..."
-                      className="flex-1 px-4 py-2.5 border border-gray-200 rounded-full text-sm outline-none focus:border-[#141414] bg-gray-50"
+                      className="flex-1 px-4 py-2.5 border border-zinc-200 dark:border-app-border rounded-full text-sm outline-none focus:border-zinc-900 dark:focus:border-zinc-300 bg-zinc-50 dark:bg-app-canvas text-zinc-900 dark:text-app-fg placeholder:text-zinc-400 dark:placeholder:text-zinc-500"
                       disabled={isChatting}
                     />
                     <button
                       onClick={handleChatSubmit}
                       disabled={isChatting || !chatInput.trim()}
-                      className="p-2.5 bg-[#141414] text-white rounded-full disabled:opacity-30 hover:bg-[#333] transition-colors"
+                      className="p-2.5 bg-zinc-900 text-white dark:bg-zinc-100 dark:text-zinc-900 rounded-full disabled:opacity-30 hover:bg-zinc-800 dark:hover:bg-white transition-colors"
                     >
                       <Send className="w-4 h-4" />
                     </button>
@@ -1186,49 +1194,49 @@ export default function KnowledgePage({
                 animate={{ y: 0, opacity: 1 }}
                 exit={{ y: '100%', opacity: 0 }}
                 transition={{ type: 'spring', damping: 25, stiffness: 300 }}
-                className="fixed bottom-0 left-0 right-0 sm:relative sm:bottom-auto sm:left-auto sm:right-auto w-full sm:w-[380px] max-h-[70vh] sm:max-h-none flex-shrink-0 bg-white border-t sm:border-t-0 sm:border-l border-gray-200 overflow-y-auto overflow-x-hidden z-40 sm:z-20 rounded-t-[20px] sm:rounded-none shadow-[0_-4px_30px_rgba(0,0,0,0.15)] sm:shadow-[0_0_15px_rgba(0,0,0,0.05)]"
+                className="fixed bottom-0 left-0 right-0 sm:relative sm:bottom-auto sm:left-auto sm:right-auto w-full sm:w-[380px] max-h-[70vh] sm:max-h-none flex-shrink-0 bg-app-panel dark:bg-app-raised border-t sm:border-t-0 sm:border-l border-zinc-200 dark:border-app-border overflow-y-auto overflow-x-hidden z-40 sm:z-20 rounded-t-2xl sm:rounded-none shadow-[0_-4px_30px_rgba(0,0,0,0.15)] sm:shadow-[0_0_15px_rgba(0,0,0,0.05)] dark:sm:shadow-[0_0_20px_rgba(0,0,0,0.4)]"
               >
                 {/* Drag Handle - Mobile Only */}
                 <div className="flex justify-center py-2 sm:hidden">
-                  <div className="w-10 h-1 bg-gray-300 rounded-full" />
+                  <div className="w-10 h-1 bg-zinc-300 dark:bg-zinc-600 rounded-full" />
                 </div>
-              <div className="p-4 border-b border-gray-100 flex items-center justify-between sticky top-0 bg-white z-10">
+              <div className="p-4 border-b border-zinc-100 dark:border-app-border flex items-center justify-between sticky top-0 bg-app-panel dark:bg-app-raised z-10">
                 <div className="flex items-center gap-2">
                   <span className="w-3 h-3 rounded-full" style={{ backgroundColor: selectedNode.color }} />
-                  <span className="text-[10px] font-mono uppercase font-bold text-gray-500 tracking-wider">
+                  <span className="text-[10px] font-mono uppercase font-bold text-zinc-500 dark:text-zinc-400 tracking-wider">
                     {selectedNode.type}
                   </span>
                 </div>
                 <button 
                   onClick={() => setSelectedNode(null)} 
-                  className="p-1 hover:bg-gray-100 rounded"
+                  className="p-1 hover:bg-zinc-100 dark:hover:bg-app-chip rounded text-zinc-700 dark:text-app-fg"
                 >
                   <X className="w-4 h-4" />
                 </button>
               </div>
               
-              <div className="p-4">
+              <div className="p-4 text-zinc-900 dark:text-app-fg">
                 <h3 className="font-bold text-lg mb-4">{selectedNode.label}</h3>
                 
                 {selectedNode.type === 'meeting' && selectedNode.data && (
                   <div className="space-y-4">
                     {(selectedNode.data.topics || []).length > 0 && (
                       <div>
-                        <h4 className="text-[10px] font-mono uppercase text-gray-400 mb-2 flex items-center gap-1">
+                        <h4 className="text-[10px] font-mono uppercase text-zinc-500 dark:text-zinc-400 mb-2 flex items-center gap-1">
                           <MessageSquare className="w-3 h-3" /> Topics
                         </h4>
                         <div className="space-y-2">
                           {selectedNode.data.topics.map((t: any, i: number) => (
-                            <div key={i} className="p-2 bg-gray-50 rounded-lg">
+                            <div key={i} className="p-2 bg-zinc-50 dark:bg-app-canvas rounded-lg border border-transparent dark:border-app-border/60">
                               <div className="flex items-center justify-between mb-1">
-                                <span className="text-xs font-semibold">{t.name}</span>
+                                <span className="text-xs font-semibold text-zinc-900 dark:text-app-fg">{t.name}</span>
                                 <span className={`text-[9px] px-1.5 py-0.5 rounded ${
                                   t.status === 'resolved' ? 'bg-green-100 text-green-700' :
                                   t.status === 'off-track' ? 'bg-red-100 text-red-700' :
                                   t.status === 'ongoing' ? 'bg-blue-100 text-blue-700' : 'bg-purple-100 text-purple-700'
                                 }`}>{t.status}</span>
                               </div>
-                              <p className="text-[11px] text-gray-500">{t.summary}</p>
+                              <p className="text-[11px] text-zinc-600 dark:text-zinc-300">{t.summary}</p>
                             </div>
                           ))}
                         </div>
@@ -1237,12 +1245,12 @@ export default function KnowledgePage({
                     
                     {(selectedNode.data.people || []).length > 0 && (
                       <div>
-                        <h4 className="text-[10px] font-mono uppercase text-gray-400 mb-2 flex items-center gap-1">
+                        <h4 className="text-[10px] font-mono uppercase text-zinc-500 dark:text-zinc-400 mb-2 flex items-center gap-1">
                           <Users className="w-3 h-3" /> People
                         </h4>
                         <div className="flex flex-wrap gap-1">
                           {selectedNode.data.people.map((p: string, i: number) => (
-                            <span key={i} className="px-2 py-1 bg-cyan-50 text-cyan-700 text-[10px] rounded">{p}</span>
+                            <span key={i} className="px-2 py-1 bg-cyan-50 dark:bg-cyan-950/50 text-cyan-700 dark:text-cyan-200 text-[10px] rounded border border-cyan-100/80 dark:border-cyan-800/40">{p}</span>
                           ))}
                         </div>
                       </div>
@@ -1250,12 +1258,12 @@ export default function KnowledgePage({
                     
                     {(selectedNode.data.decisions || []).length > 0 && (
                       <div>
-                        <h4 className="text-[10px] font-mono uppercase text-gray-400 mb-2 flex items-center gap-1">
+                        <h4 className="text-[10px] font-mono uppercase text-zinc-500 dark:text-zinc-400 mb-2 flex items-center gap-1">
                           <CheckCircle2 className="w-3 h-3" /> Decisions
                         </h4>
                         <ul className="space-y-1">
                           {selectedNode.data.decisions.map((d: any, i: number) => (
-                            <li key={i} className="text-xs text-gray-700 bg-yellow-50 p-2 rounded">• {d.decision}</li>
+                            <li key={i} className="text-xs text-yellow-950 dark:text-yellow-100 bg-yellow-50 dark:bg-yellow-950/40 border border-yellow-100/80 dark:border-yellow-900/40 p-2 rounded">• {d.decision}</li>
                           ))}
                         </ul>
                       </div>
@@ -1263,15 +1271,15 @@ export default function KnowledgePage({
 
                     {(selectedNode.data.actionItems || []).length > 0 && (
                       <div>
-                        <h4 className="text-[10px] font-mono uppercase text-gray-400 mb-2 flex items-center gap-1">
+                        <h4 className="text-[10px] font-mono uppercase text-zinc-500 dark:text-zinc-400 mb-2 flex items-center gap-1">
                           <CheckCircle2 className="w-3 h-3" /> Action Items
                         </h4>
                         <ul className="space-y-2">
                           {selectedNode.data.actionItems.map((a: any, i: number) => (
-                            <li key={i} className="p-2 bg-pink-50 rounded-lg">
-                              <span className="text-sm font-medium text-pink-900 block mb-1">{a.task}</span>
+                            <li key={i} className="p-2 bg-pink-50 dark:bg-pink-950/40 rounded-lg border border-pink-100/80 dark:border-pink-900/40">
+                              <span className="text-sm font-medium text-pink-900 dark:text-pink-100 block mb-1">{a.task}</span>
                               <div className="flex items-center gap-1.5">
-                                <span className="text-[10px] text-pink-600 font-medium">Assignee: {a.owner}</span>
+                                <span className="text-[10px] text-pink-600 dark:text-pink-300 font-medium">Assignee: {a.owner}</span>
                               </div>
                             </li>
                           ))}
@@ -1285,8 +1293,8 @@ export default function KnowledgePage({
                       if (relatedMeetings.length === 0) return null;
                       
                       return (
-                        <div className="border-t border-gray-200 pt-5 mt-5">
-                          <h4 className="text-[10px] font-mono uppercase tracking-widest text-gray-400 mb-4 flex items-center gap-2">
+                        <div className="border-t border-zinc-200 dark:border-app-border pt-5 mt-5">
+                          <h4 className="text-[10px] font-mono uppercase tracking-widest text-zinc-500 dark:text-zinc-400 mb-4 flex items-center gap-2">
                             <Share2 className="w-3 h-3" />
                             Connected Meetings ({relatedMeetings.length})
                           </h4>
@@ -1296,7 +1304,7 @@ export default function KnowledgePage({
                             ))}
                           </div>
                           {relatedMeetings.length > 5 && (
-                            <button className="w-full mt-3 py-2 text-[10px] font-mono uppercase tracking-wider text-gray-400 hover:text-gray-600 bg-gray-50 hover:bg-gray-100 rounded-lg transition-colors">
+                            <button className="w-full mt-3 py-2 text-[10px] font-mono uppercase tracking-wider text-zinc-500 dark:text-zinc-400 hover:text-zinc-800 dark:hover:text-app-fg bg-zinc-50 dark:bg-app-canvas hover:bg-zinc-100 dark:hover:bg-app-chip rounded-lg transition-colors border border-transparent dark:border-app-border/50">
                               View {relatedMeetings.length - 5} More
                             </button>
                           )}
@@ -1315,11 +1323,11 @@ export default function KnowledgePage({
                     }`}>
                       Status: {selectedNode.data.status}
                     </div>
-                    <p className="text-sm text-gray-700">{selectedNode.data.summary}</p>
+                    <p className="text-sm text-zinc-700 dark:text-zinc-200">{selectedNode.data.summary}</p>
                     
                     {selectedNode.data.allStatuses && selectedNode.data.allStatuses.length > 1 && (
                       <div>
-                        <h4 className="text-[10px] font-mono uppercase text-gray-400 mb-2 flex items-center gap-1">
+                        <h4 className="text-[10px] font-mono uppercase text-zinc-500 dark:text-zinc-400 mb-2 flex items-center gap-1">
                           <Clock className="w-3 h-3" /> Evolution
                         </h4>
                         <div className="space-y-2">
@@ -1331,8 +1339,8 @@ export default function KnowledgePage({
                                 status === 'ongoing' ? 'bg-blue-500' : 'bg-purple-500'
                               }`} />
                               <div>
-                                <span className="text-[10px] font-medium">{status}</span>
-                                <p className="text-[10px] text-gray-500 italic">"{selectedNode.data.allSummaries?.[idx]}"</p>
+                                <span className="text-[10px] font-medium text-zinc-800 dark:text-app-fg">{status}</span>
+                                <p className="text-[10px] text-zinc-600 dark:text-zinc-300 italic">"{selectedNode.data.allSummaries?.[idx]}"</p>
                               </div>
                             </div>
                           ))}
@@ -1345,22 +1353,22 @@ export default function KnowledgePage({
                 {selectedNode.type === 'person' && selectedNode.data && (
                   <div className="space-y-4">
                     <div className="flex items-center gap-3">
-                      <div className="w-12 h-12 rounded-full bg-cyan-100 flex items-center justify-center">
-                        <Users className="w-6 h-6 text-cyan-600" />
+                      <div className="w-12 h-12 rounded-full bg-cyan-100 dark:bg-cyan-950/50 flex items-center justify-center border border-cyan-200/60 dark:border-cyan-800/50">
+                        <Users className="w-6 h-6 text-cyan-600 dark:text-cyan-400" />
                       </div>
                       <div>
                         <p className="font-bold">{selectedNode.label}</p>
-                        <p className="text-xs text-gray-500">
+                        <p className="text-xs text-zinc-500 dark:text-zinc-400">
                           {selectedNode.data.meetings?.length || 0} meeting(s)
                         </p>
                       </div>
                     </div>
                     {selectedNode.data.meetings && (
                       <div>
-                        <h4 className="text-[10px] font-mono uppercase text-gray-400 mb-2">Present in:</h4>
+                        <h4 className="text-[10px] font-mono uppercase text-zinc-500 dark:text-zinc-400 mb-2">Present in:</h4>
                         <ul className="space-y-1">
                           {selectedNode.data.meetings.map((m: string, i: number) => (
-                            <li key={i} className="text-xs text-gray-700 bg-gray-50 p-2 rounded">
+                            <li key={i} className="text-xs text-zinc-800 dark:text-zinc-200 bg-zinc-50 dark:bg-app-canvas p-2 rounded border border-transparent dark:border-app-border/60">
                               {m?.replace(/\.[^.]+$/, '')}
                             </li>
                           ))}
@@ -1372,10 +1380,10 @@ export default function KnowledgePage({
 
                 {selectedNode.type === 'decision' && selectedNode.data && (
                   <div className="space-y-4">
-                    <div className="p-3 bg-yellow-50 rounded-lg">
-                      <p className="text-sm text-yellow-900">{selectedNode.data.decision}</p>
+                    <div className="p-3 bg-yellow-50 dark:bg-yellow-950/40 rounded-lg border border-yellow-100 dark:border-yellow-900/40">
+                      <p className="text-sm text-yellow-900 dark:text-yellow-100">{selectedNode.data.decision}</p>
                     </div>
-                    <div className="text-xs text-gray-500">
+                    <div className="text-xs text-zinc-600 dark:text-zinc-300">
                       <p><strong>Related Topic:</strong> {selectedNode.data.relatedTopic || 'General'}</p>
                       <p><strong>Meeting:</strong> {selectedNode.data.meetingTitle?.replace(/\.[^.]+$/, '')}</p>
                     </div>
@@ -1384,10 +1392,10 @@ export default function KnowledgePage({
 
                 {selectedNode.type === 'action' && selectedNode.data && (
                   <div className="space-y-4">
-                    <div className="p-3 bg-pink-50 rounded-lg">
-                      <p className="text-sm text-pink-900">{selectedNode.data.task}</p>
+                    <div className="p-3 bg-pink-50 dark:bg-pink-950/40 rounded-lg border border-pink-100 dark:border-pink-900/40">
+                      <p className="text-sm text-pink-900 dark:text-pink-100">{selectedNode.data.task}</p>
                     </div>
-                    <div className="text-xs text-gray-500">
+                    <div className="text-xs text-zinc-600 dark:text-zinc-300">
                       <p><strong>Owner:</strong> {selectedNode.data.owner}</p>
                       <p><strong>Related Topic:</strong> {selectedNode.data.relatedTopic || 'General'}</p>
                       <p><strong>Meeting:</strong> {selectedNode.data.meetingTitle?.replace(/\.[^.]+$/, '')}</p>

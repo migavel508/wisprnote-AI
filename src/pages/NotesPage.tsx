@@ -156,16 +156,16 @@ export default function NotesPage({ selectedTask, onNavigateToAssets, isLoading 
   };
 
   return (
-    <div className="absolute inset-0 flex flex-col bg-white overflow-hidden">
+    <div className="absolute inset-0 flex flex-col bg-app-panel text-app-fg overflow-hidden">
       {/* Header */}
-      <div className="flex-none bg-white/95 backdrop-blur-xl sticky top-0 z-10">
+      <div className="flex-none bg-app-panel/95 dark:bg-app-panel/98 backdrop-blur-xl sticky top-0 z-10 border-b border-zinc-200/70 dark:border-app-border">
         <div className="max-w-3xl lg:max-w-4xl mx-auto w-full px-3 sm:px-6 md:px-8 pt-3 sm:pt-4 pb-2 sm:pb-3">
           {/* Breadcrumb + date */}
           <div className="flex items-center gap-1.5 mb-1 text-[10px] sm:text-[10.5px] tracking-[0.04em] uppercase">
-            <BookOpen className="w-3 h-3 text-[#a89888] flex-shrink-0" />
-            <span className="truncate max-w-[120px] sm:max-w-[180px] text-[#9a8d7f] font-semibold">{selectedTask.filename}</span>
-            <span className="text-[#c4bab0]">·</span>
-            <span className="flex-shrink-0 text-[#b5a99a] font-medium">
+            <BookOpen className="w-3 h-3 text-app-fg-muted flex-shrink-0" />
+            <span className="truncate max-w-[120px] sm:max-w-[180px] text-app-fg-muted font-semibold">{selectedTask.filename}</span>
+            <span className="text-app-fg-subtle">·</span>
+            <span className="flex-shrink-0 text-app-fg-subtle font-medium">
               {new Date(selectedTask.created_at!).toLocaleDateString('en-US', { month: 'short', day: 'numeric', year: 'numeric' })}
             </span>
           </div>
@@ -173,7 +173,7 @@ export default function NotesPage({ selectedTask, onNavigateToAssets, isLoading 
           {/* Title row */}
           <div className="flex items-center gap-2 mb-2">
             <h1
-              className="text-[17px] sm:text-[22px] font-semibold tracking-[-0.02em] text-[#2c2520] truncate flex-1 leading-tight"
+              className="text-[17px] sm:text-[22px] font-semibold tracking-[-0.02em] text-zinc-900 dark:text-zinc-50 truncate flex-1 leading-tight"
               style={{ fontFamily: 'Georgia, "Times New Roman", serif', fontStyle: 'italic' }}
             >
               {selectedTask.filename}
@@ -181,7 +181,7 @@ export default function NotesPage({ selectedTask, onNavigateToAssets, isLoading 
             <button
               onClick={handleGenerateTitle}
               disabled={isGeneratingTitle}
-              className="flex-shrink-0 flex items-center justify-center w-7 h-7 sm:w-auto sm:h-auto sm:gap-1.5 sm:px-2.5 sm:py-1 text-[10.5px] font-semibold text-[#a89888] hover:text-[#5c5147] bg-[#e8e2da]/40 hover:bg-[#e8e2da]/80 rounded-md transition-all disabled:opacity-30"
+              className="flex-shrink-0 flex items-center justify-center w-7 h-7 sm:w-auto sm:h-auto sm:gap-1.5 sm:px-2.5 sm:py-1 text-[10.5px] font-semibold text-app-fg-muted hover:text-app-fg bg-zinc-200/60 dark:bg-app-raised hover:bg-zinc-200 dark:hover:bg-app-chip rounded-md transition-all disabled:opacity-30"
               title="Generate AI title based on content"
             >
               {isGeneratingTitle ? (
@@ -195,7 +195,7 @@ export default function NotesPage({ selectedTask, onNavigateToAssets, isLoading 
             </button>
             <button
               onClick={() => setIsShareOpen(true)}
-              className="flex-shrink-0 flex items-center justify-center w-7 h-7 sm:w-auto sm:h-auto sm:gap-1.5 sm:px-2.5 sm:py-1 text-[10.5px] font-semibold text-[#a89888] hover:text-[#5c5147] bg-[#e8e2da]/40 hover:bg-[#e8e2da]/80 rounded-md transition-all"
+              className="flex-shrink-0 flex items-center justify-center w-7 h-7 sm:w-auto sm:h-auto sm:gap-1.5 sm:px-2.5 sm:py-1 text-[10.5px] font-semibold text-app-fg-muted hover:text-app-fg bg-zinc-200/60 dark:bg-app-raised hover:bg-zinc-200 dark:hover:bg-app-chip rounded-md transition-all"
               title="Share meeting notes"
             >
               <Share2 className="w-3 h-3" />
@@ -205,15 +205,15 @@ export default function NotesPage({ selectedTask, onNavigateToAssets, isLoading 
 
           {/* Tab Switcher — horizontally scrollable on mobile */}
           <div className="overflow-x-auto no-scrollbar -mx-3 sm:mx-0 px-3 sm:px-0">
-            <div className="flex gap-[3px] bg-[#e8e2da]/60 rounded-lg p-[3px] w-fit">
+            <div className="flex gap-[3px] bg-zinc-200/70 dark:bg-app-raised rounded-lg p-[3px] w-fit">
               {(['transcription', 'summary', 'notes', 'note'] as NoteTab[]).map((tab) => (
                 <button
                   key={tab}
                   onClick={() => setNoteTab(tab)}
                   className={`px-2.5 sm:px-3 py-[4px] rounded-md text-[11px] sm:text-[11.5px] font-semibold transition-all whitespace-nowrap ${
                     noteTab === tab
-                      ? 'bg-white text-[#2c2520] shadow-sm shadow-[#c4bab0]/25'
-                      : 'text-[#9a8d7f] hover:text-[#5c5147]'
+                      ? 'bg-app-chip text-zinc-900 dark:text-app-fg shadow-sm shadow-black/10 dark:shadow-black/50 ring-1 ring-zinc-300/80 dark:ring-white/[0.08]'
+                      : 'text-app-fg-muted hover:text-app-fg'
                   }`}
                 >
                   {tab === 'note' ? 'My Note' : tab.charAt(0).toUpperCase() + tab.slice(1)}
@@ -222,8 +222,7 @@ export default function NotesPage({ selectedTask, onNavigateToAssets, isLoading 
             </div>
           </div>
         </div>
-        {/* Thin warm accent line */}
-        <div className="h-[1.5px] bg-gradient-to-r from-transparent via-[#c4bab0]/80 to-transparent" />
+        <div className="h-px bg-gradient-to-r from-transparent via-zinc-300/80 to-transparent dark:via-zinc-600/50" />
       </div>
 
       {/* Scrollable Content Area */}
@@ -238,19 +237,19 @@ export default function NotesPage({ selectedTask, onNavigateToAssets, isLoading 
               transition={{ duration: 0.2 }}
             >
               {noteTab === 'transcription' && (
-                <div className="prose prose-sm max-w-none prose-p:text-[14.5px] prose-p:leading-[1.75] prose-p:text-[#1a1a1a]/75 prose-strong:text-[#1a1a1a] prose-headings:tracking-tight transcription-content markdown-body">
+                <div className="prose prose-sm max-w-none prose-p:text-[14.5px] prose-p:leading-[1.75] prose-p:text-zinc-700 dark:prose-p:text-zinc-300 prose-strong:text-zinc-900 dark:prose-strong:text-zinc-100 prose-headings:text-zinc-900 dark:prose-headings:text-zinc-100 prose-headings:tracking-tight transcription-content markdown-body">
                   <Markdown remarkPlugins={[remarkGfm]}>{formatTranscriptionWithBoldSpeakers(selectedTask.transcription)}</Markdown>
                 </div>
               )}
 
               {noteTab === 'summary' && (
-                <div className="bg-[#faf8f6] p-4 sm:p-6 md:p-8 rounded-xl sm:rounded-2xl border border-[#141414]/[0.05]">
+                <div className="bg-zinc-100 dark:bg-app-raised p-4 sm:p-6 md:p-8 rounded-xl sm:rounded-2xl border border-zinc-200/90 dark:border-app-border">
                   <div className="flex items-center justify-between mb-5">
-                    <h3 className="text-[17px] font-semibold tracking-[-0.01em] text-[#1a1a1a]">Key Summary</h3>
+                    <h3 className="text-[17px] font-semibold tracking-[-0.01em] text-zinc-900 dark:text-zinc-50">Key Summary</h3>
                     <button
                       onClick={handleRegenerateSummary}
                       disabled={isRegeneratingSummary}
-                      className="flex items-center gap-1.5 px-2.5 py-1.5 text-[11px] font-medium text-[#141414]/40 hover:text-[#141414]/70 hover:bg-white rounded-lg transition-all disabled:opacity-30"
+                      className="flex items-center gap-1.5 px-2.5 py-1.5 text-[11px] font-medium text-app-fg-muted hover:text-app-fg hover:bg-zinc-200/80 dark:hover:bg-app-chip rounded-lg transition-all disabled:opacity-30"
                     >
                       {isRegeneratingSummary ? (
                         <Loader2 className="w-3.5 h-3.5 animate-spin" />
@@ -264,10 +263,10 @@ export default function NotesPage({ selectedTask, onNavigateToAssets, isLoading 
                   </div>
                   {isRegeneratingSummary ? (
                     <div className="flex items-center justify-center py-16">
-                      <Loader2 className="w-5 h-5 animate-spin text-[#141414]/20" />
+                      <Loader2 className="w-5 h-5 animate-spin text-app-fg-subtle" />
                     </div>
                   ) : (
-                    <div className="prose prose-sm max-w-none prose-p:text-[14px] prose-p:leading-[1.75] prose-p:text-[#1a1a1a]/70 prose-strong:text-[#1a1a1a] prose-headings:tracking-tight markdown-body">
+                    <div className="prose prose-sm max-w-none prose-p:text-[14px] prose-p:leading-[1.75] prose-p:text-zinc-700 dark:prose-p:text-zinc-300 prose-strong:text-zinc-900 dark:prose-strong:text-zinc-100 prose-headings:text-zinc-900 dark:prose-headings:text-zinc-100 prose-headings:tracking-tight markdown-body">
                       <Markdown remarkPlugins={[remarkGfm]}>{selectedTask.summary || 'No summary generated.'}</Markdown>
                     </div>
                   )}
@@ -278,12 +277,12 @@ export default function NotesPage({ selectedTask, onNavigateToAssets, isLoading 
                 <div className="space-y-6">
                   {/* Notes toolbar */}
                   <div className="flex items-center justify-between">
-                    <h3 className="text-[17px] font-semibold tracking-[-0.01em] text-[#1a1a1a]">Structured Notes</h3>
+                    <h3 className="text-[17px] font-semibold tracking-[-0.01em] text-zinc-900 dark:text-zinc-50">Structured Notes</h3>
                     <div className="flex items-center gap-1">
                       <button
                         onClick={handleVisualizeNotes}
                         disabled={isVisualizing || (!selectedTask.notes && !selectedTask.summary)}
-                        className="flex items-center gap-1.5 px-2.5 py-1.5 text-[11px] font-medium text-[#141414]/40 hover:text-[#141414]/70 hover:bg-[#141414]/[0.04] rounded-lg transition-all disabled:opacity-30"
+                        className="flex items-center gap-1.5 px-2.5 py-1.5 text-[11px] font-medium text-app-fg-muted hover:text-app-fg hover:bg-zinc-200/70 dark:hover:bg-app-chip rounded-lg transition-all disabled:opacity-30"
                       >
                         {isVisualizing ? (
                           <Loader2 className="w-3.5 h-3.5 animate-spin" />
@@ -295,7 +294,7 @@ export default function NotesPage({ selectedTask, onNavigateToAssets, isLoading 
                       <button
                         onClick={handleRegenerateNotes}
                         disabled={isRegeneratingNotes}
-                        className="flex items-center gap-1.5 px-2.5 py-1.5 text-[11px] font-medium text-[#141414]/40 hover:text-[#141414]/70 hover:bg-[#141414]/[0.04] rounded-lg transition-all disabled:opacity-30"
+                        className="flex items-center gap-1.5 px-2.5 py-1.5 text-[11px] font-medium text-app-fg-muted hover:text-app-fg hover:bg-zinc-200/70 dark:hover:bg-app-chip rounded-lg transition-all disabled:opacity-30"
                       >
                         {isRegeneratingNotes ? (
                           <Loader2 className="w-3.5 h-3.5 animate-spin" />
@@ -311,15 +310,15 @@ export default function NotesPage({ selectedTask, onNavigateToAssets, isLoading 
                   
                   {/* Visualization Result */}
                   {visualizationImage && (
-                    <div className="rounded-2xl overflow-hidden border border-[#141414]/[0.05] bg-[#faf8f6]">
-                      <div className="px-4 py-3 border-b border-[#141414]/[0.05] flex items-center justify-between">
-                        <span className="text-[12px] font-medium text-[#1a1a1a]/60 flex items-center gap-1.5">
+                    <div className="rounded-2xl overflow-hidden border border-zinc-200/90 dark:border-app-border bg-zinc-100 dark:bg-app-raised">
+                      <div className="px-4 py-3 border-b border-zinc-200/90 dark:border-app-border flex items-center justify-between">
+                        <span className="text-[12px] font-medium text-app-fg-muted flex items-center gap-1.5">
                           <Sparkles className="w-3.5 h-3.5 text-amber-500" />
                           AI Visualization
                         </span>
                         <button 
                           onClick={() => setVisualizationImage(null)}
-                          className="text-[11px] font-medium text-[#141414]/30 hover:text-[#141414]/60 transition-colors"
+                          className="text-[11px] font-medium text-app-fg-subtle hover:text-app-fg-muted transition-colors"
                         >
                           Dismiss
                         </button>
@@ -338,10 +337,10 @@ export default function NotesPage({ selectedTask, onNavigateToAssets, isLoading 
                   {/* Notes content */}
                   {isRegeneratingNotes ? (
                     <div className="flex items-center justify-center py-16">
-                      <Loader2 className="w-5 h-5 animate-spin text-[#141414]/20" />
+                      <Loader2 className="w-5 h-5 animate-spin text-app-fg-subtle" />
                     </div>
                   ) : (
-                    <div className="prose prose-sm max-w-none prose-p:text-[14px] prose-p:leading-[1.75] prose-p:text-[#1a1a1a]/70 prose-strong:text-[#1a1a1a] prose-headings:tracking-tight prose-h2:text-[16px] prose-h2:font-semibold prose-h3:text-[14px] prose-h3:font-semibold prose-li:text-[14px] prose-li:text-[#1a1a1a]/70 markdown-body">
+                    <div className="prose prose-sm max-w-none prose-p:text-[14px] prose-p:leading-[1.75] prose-p:text-zinc-700 dark:prose-p:text-zinc-300 prose-strong:text-zinc-900 dark:prose-strong:text-zinc-100 prose-headings:text-zinc-900 dark:prose-headings:text-zinc-100 prose-headings:tracking-tight prose-h2:text-[16px] prose-h2:font-semibold prose-h3:text-[14px] prose-h3:font-semibold prose-li:text-[14px] prose-li:text-zinc-700 dark:prose-li:text-zinc-300 markdown-body">
                       <Markdown remarkPlugins={[remarkGfm]}>{selectedTask.notes || 'No structured notes generated.'}</Markdown>
                     </div>
                   )}

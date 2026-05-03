@@ -46,17 +46,17 @@ export function ManualNoteEditor({ note, onSave, onBack }: ManualNoteEditorProps
   useEffect(() => { scheduleSave(); }, [title]);
 
   return (
-    <div className="flex flex-col h-full bg-[#faf9f7]">
+    <div className="flex flex-col h-full bg-zinc-50 dark:bg-app-panel text-app-fg">
       {/* Header */}
-      <div className="flex-none flex items-center justify-between px-3 sm:px-6 md:px-8 py-3 border-b border-[#e5e5e5] bg-[#faf9f7]/90 backdrop-blur sticky top-0 z-10">
+      <div className="flex-none flex items-center justify-between px-3 sm:px-6 md:px-8 py-3 border-b border-zinc-200 dark:border-app-border bg-zinc-50/90 dark:bg-app-panel/90 backdrop-blur sticky top-0 z-10">
         <button
           onClick={onBack}
-          className="flex items-center gap-1.5 text-[13px] text-[#595959] hover:text-[#1a1a1a] transition-colors"
+          className="flex items-center gap-1.5 text-[13px] text-app-fg-muted hover:text-app-fg transition-colors"
         >
           <ChevronLeft className="w-4 h-4" />
           All Notes
         </button>
-        <div className="text-[11px] font-mono text-[#999]">
+        <div className="text-[11px] font-mono text-app-fg-subtle">
           {isSaving ? (
             <span className="flex items-center gap-1.5"><Loader2 className="w-3 h-3 animate-spin" />Saving…</span>
           ) : saveStatus === 'saved' ? (
@@ -74,7 +74,7 @@ export function ManualNoteEditor({ note, onSave, onBack }: ManualNoteEditorProps
             value={title}
             onChange={(e) => setTitle(e.target.value)}
             placeholder="Untitled"
-            className="w-full text-[1.5rem] sm:text-[2.5rem] font-bold leading-tight border-none outline-none placeholder:text-[#d8d8d8] mb-4 sm:mb-6 bg-transparent"
+            className="w-full text-[1.5rem] sm:text-[2.5rem] font-bold leading-tight border-none outline-none placeholder:text-zinc-300 dark:placeholder:text-zinc-600 mb-4 sm:mb-6 bg-transparent text-app-fg"
           />
 
           {/* Notion-like slash editor */}

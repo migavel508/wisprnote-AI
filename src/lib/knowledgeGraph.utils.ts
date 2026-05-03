@@ -944,7 +944,7 @@ export function buildGraphData(
       label: meeting.meetingTitle?.replace(/\.[^.]+$/, '') || 'Meeting',
       type: 'meeting',
       data: meeting,
-      color: '#141414',
+      color: '#475569',
       size: 24,
     });
 

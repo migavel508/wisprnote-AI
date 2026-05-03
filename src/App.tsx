@@ -203,7 +203,7 @@ function MobileBottomNav({ currentView, onViewChange, status }: {
   ];
 
   return (
-    <nav className="md:hidden flex-shrink-0 bg-[#e5ddd4] border-t border-[#d5cbc0] px-1 pb-[env(safe-area-inset-bottom)] z-50">
+    <nav className="md:hidden flex-shrink-0 bg-app-canvas border-t border-app-border-strong px-1 pb-[env(safe-area-inset-bottom)] z-50">
       <div className="flex items-center justify-around h-14">
         {tabs.map((tab) => {
           const Icon = tab.icon;
@@ -214,8 +214,8 @@ function MobileBottomNav({ currentView, onViewChange, status }: {
               onClick={() => onViewChange(tab.id)}
               className={`flex flex-col items-center justify-center gap-0.5 flex-1 py-1.5 rounded-lg transition-colors ${
                 isActive
-                  ? 'text-[#1a1a1a]'
-                  : 'text-[#9a918a]'
+                  ? 'text-app-fg'
+                  : 'text-app-fg-subtle'
               }`}
             >
               <div className="relative">
@@ -3090,7 +3090,7 @@ export default function App() {
   }
 
   return (
-    <div className="h-screen bg-[#e5ddd4] text-[#1a1a1a] font-[system-ui] selection:bg-[#1a1a1a] selection:text-white flex flex-col md:flex-row overflow-hidden">
+    <div className="h-screen bg-app-canvas text-app-fg font-[system-ui] selection:bg-app-fg selection:text-app-panel flex flex-col md:flex-row overflow-hidden">
       {/* Network Status — floating pill toast (Apple-style) */}
       <AnimatePresence>
         {!isOnline && (
@@ -3137,39 +3137,39 @@ export default function App() {
               initial={{ scale: 0.95, opacity: 0 }}
               animate={{ scale: 1, opacity: 1 }}
               exit={{ scale: 0.95, opacity: 0 }}
-              className="bg-white rounded-2xl shadow-2xl max-w-md w-full mx-4 overflow-hidden"
+              className="bg-app-panel rounded-2xl shadow-2xl max-w-md w-full mx-4 overflow-hidden border border-app-card-border"
             >
-              <div className="p-6 border-b border-gray-100">
+              <div className="p-6 border-b border-zinc-200/80 dark:border-zinc-700/80">
                 <div className="flex items-center gap-3 mb-2">
-                  <div className="w-10 h-10 rounded-full bg-blue-100 flex items-center justify-center">
-                    <History className="w-5 h-5 text-blue-600" />
+                  <div className="w-10 h-10 rounded-full bg-blue-100 dark:bg-blue-950/50 flex items-center justify-center">
+                    <History className="w-5 h-5 text-blue-600 dark:text-blue-400" />
                   </div>
-                  <h2 className="text-xl font-bold">Resume Processing?</h2>
+                  <h2 className="text-xl font-bold text-app-fg">Resume Processing?</h2>
                 </div>
-                <p className="text-sm text-gray-600 mt-2">
+                <p className="text-sm text-zinc-600 dark:text-zinc-400 mt-2">
                   We found an interrupted transcription session. Would you like to continue where you left off?
                 </p>
               </div>
               
               <div className="p-6 space-y-4">
-                <div className="bg-gray-50 rounded-lg p-4 space-y-2">
+                <div className="bg-zinc-50 dark:bg-app-raised rounded-lg p-4 space-y-2 border border-transparent dark:border-app-border">
                   <div className="flex justify-between text-sm">
-                    <span className="text-gray-600">File:</span>
-                    <span className="font-medium truncate ml-2 max-w-[200px]">{recoverableProgress.filename}</span>
+                    <span className="text-zinc-600 dark:text-zinc-400">File:</span>
+                    <span className="font-medium text-app-fg truncate ml-2 max-w-[200px]">{recoverableProgress.filename}</span>
                   </div>
                   <div className="flex justify-between text-sm">
-                    <span className="text-gray-600">Progress:</span>
-                    <span className="font-medium">
+                    <span className="text-zinc-600 dark:text-zinc-400">Progress:</span>
+                    <span className="font-medium text-app-fg">
                       {recoverableProgress.completedBatches} / {recoverableProgress.totalBatches} {recoverableProgress.stage === 'realtime-postprocess' ? 'steps' : 'batches'}
                     </span>
                   </div>
-                  <div className="w-full bg-gray-200 rounded-full h-2 mt-2">
+                  <div className="w-full bg-zinc-200 dark:bg-zinc-700 rounded-full h-2 mt-2">
                     <div
-                      className="bg-blue-600 h-2 rounded-full transition-all"
+                      className="bg-blue-600 dark:bg-blue-500 h-2 rounded-full transition-all"
                       style={{ width: `${(recoverableProgress.completedBatches / recoverableProgress.totalBatches) * 100}%` }}
                     />
                   </div>
-                  <p className="text-xs text-gray-500 mt-2">
+                  <p className="text-xs text-zinc-500 dark:text-zinc-500 mt-2">
                     Last updated: {new Date(recoverableProgress.updatedAt).toLocaleString()}
                   </p>
                 </div>
@@ -3177,7 +3177,7 @@ export default function App() {
                 <div className="flex gap-3">
                   <button
                     onClick={handleDiscardRecovery}
-                    className="flex-1 px-4 py-2.5 rounded-lg border border-gray-300 text-gray-700 hover:bg-gray-50 transition-colors font-medium"
+                    className="flex-1 px-4 py-2.5 rounded-lg border border-zinc-300 dark:border-zinc-600 text-zinc-700 dark:text-zinc-300 hover:bg-zinc-50 dark:hover:bg-zinc-800 transition-colors font-medium"
                   >
                     Start Fresh
                   </button>
@@ -3221,7 +3221,7 @@ export default function App() {
         {/* Top drag region — enables double-click to zoom (macOS native behavior), hidden on mobile */}
         <div data-tauri-drag-region className="w-full h-0 md:h-10 flex-shrink-0 cursor-default" style={{ WebkitUserSelect: 'none', userSelect: 'none' }} />
         <div className="flex-1 flex overflow-hidden p-0 md:pr-2.5 md:pl-1.5 md:pb-2.5 md:pt-0">
-        <main className="flex-1 bg-white w-full relative overflow-y-auto rounded-none md:rounded-2xl shadow-sm md:border md:border-[#d8cec3]/60">
+        <main className="flex-1 bg-app-panel w-full relative overflow-y-auto rounded-none md:rounded-3xl shadow-sm md:border md:border-app-border text-app-fg">
           <AnimatePresence mode="wait">
             {currentView === 'process' && (
               <motion.div 

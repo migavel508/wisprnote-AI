@@ -150,7 +150,7 @@ export default function ProcessPage({
   const isProcessing = status === 'processing' || status === 'splitting' || status === 'finalizing';
 
   return (
-    <div className="flex flex-col h-full bg-white font-[system-ui] overflow-hidden relative">
+    <div className="flex flex-col h-full bg-app-panel text-app-fg font-[system-ui] overflow-hidden relative">
       {/* Main Content Area */}
       <main className="flex-1 overflow-y-auto w-full flex flex-col pt-6 sm:pt-14 pb-32 sm:pb-48 px-4 sm:px-10 lg:px-16">
         {/* Hero Section */}
@@ -160,10 +160,10 @@ export default function ProcessPage({
           transition={{ duration: 0.5, ease: [0.22, 1, 0.36, 1] }}
           className="mb-8 max-w-3xl"
         >
-          <h1 className="text-[22px] sm:text-[36px] font-serif italic text-[#141414]/25 mb-2 sm:mb-3 leading-tight">
+          <h1 className="text-[22px] sm:text-[36px] font-serif italic text-zinc-500 dark:text-zinc-400 mb-2 sm:mb-3 leading-tight">
             {file ? file.name.replace(/\.[^/.]+$/, '') : 'New Recording'}
           </h1>
-          <p className="text-[13px] sm:text-[14px] text-[#141414]/25 leading-relaxed">
+          <p className="text-[13px] sm:text-[14px] text-zinc-500 dark:text-zinc-400 leading-relaxed">
             {file 
               ? `${(file.size / (1024 * 1024)).toFixed(1)} MB · Ready to process`
               : isRecording 
@@ -206,22 +206,22 @@ export default function ProcessPage({
               animate={{ opacity: 1, y: 0 }}
               className="w-full max-w-[560px]"
             >
-              <div className="bg-[#faf8f6] rounded-2xl border border-[#1a1a1a]/[0.05] overflow-hidden">
+              <div className="bg-zinc-50 dark:bg-app-raised rounded-2xl border border-zinc-200/80 dark:border-app-border overflow-hidden">
                 <div className="px-5 py-4 flex items-center justify-between">
                   <div className="flex items-center gap-3">
                     <div className="w-7 h-7 rounded-full bg-[#1a1a1a]/[0.06] flex items-center justify-center">
-                      <Loader2 className="w-3.5 h-3.5 text-[#1a1a1a]/60 animate-spin" />
+                      <Loader2 className="w-3.5 h-3.5 text-zinc-600 dark:text-zinc-300 animate-spin" />
                     </div>
                     <div className="flex flex-col">
-                      <span className="text-[13px] font-medium text-[#1a1a1a]/70">
+                      <span className="text-[13px] font-medium text-zinc-700 dark:text-zinc-300">
                         {processingHeadline}
                       </span>
-                      <span className="text-[11px] text-[#1a1a1a]/45 mt-0.5">
+                      <span className="text-[11px] text-zinc-500 dark:text-zinc-400 mt-0.5">
                         {processingSubtext}
                       </span>
                     </div>
                   </div>
-                  <span className="text-[12px] font-medium text-[#1a1a1a]/35 tabular-nums">
+                  <span className="text-[12px] font-medium text-zinc-500 dark:text-zinc-500 tabular-nums">
                     {Math.round(totalProgress)}%
                   </span>
                 </div>
@@ -245,14 +245,14 @@ export default function ProcessPage({
                             batch.status === 'completed' 
                               ? 'bg-[#1a1a1a] text-white' 
                               : batch.status === 'processing'
-                              ? 'bg-[#1a1a1a]/10 text-[#1a1a1a]/60'
-                              : 'bg-[#1a1a1a]/[0.04] text-[#1a1a1a]/30'
+                              ? 'bg-[#1a1a1a]/10 text-zinc-600 dark:text-zinc-300'
+                              : 'bg-[#1a1a1a]/[0.04] text-zinc-500 dark:text-zinc-400'
                           }`}>
                             {idx + 1}
                           </div>
-                          <span className="text-[12px] text-[#1a1a1a]/50">Batch {idx + 1}</span>
+                          <span className="text-[12px] text-zinc-600 dark:text-zinc-400">Batch {idx + 1}</span>
                         </div>
-                        {batch.status === 'processing' && <Loader2 className="w-3 h-3 animate-spin text-[#1a1a1a]/30" />}
+                        {batch.status === 'processing' && <Loader2 className="w-3 h-3 animate-spin text-zinc-500 dark:text-zinc-400" />}
                         {batch.status === 'completed' && <CheckCircle2 className="w-3 h-3 text-green-500" />}
                       </div>
                     ))}
@@ -363,12 +363,12 @@ export default function ProcessPage({
                       {[0, 1, 2].map((i) => (
                         <div
                           key={i}
-                          className="w-[2.5px] rounded-full bg-[#4a4038] group-hover:bg-[#2a2420] transition-all duration-300"
+                          className="w-[2.5px] rounded-full bg-[#4a4038] dark:bg-zinc-500 group-hover:bg-[#2a2420] dark:group-hover:bg-zinc-400 transition-all duration-300"
                           style={{ height: `${6 + i * 3}px`, transitionDelay: `${i * 40}ms` }}
                         />
                       ))}
                     </div>
-                    <ChevronUp className="w-3.5 h-3.5 text-[#4a4038] group-hover:text-[#2a2420] group-hover:-translate-y-[1px] transition-all duration-300" />
+                    <ChevronUp className="w-3.5 h-3.5 text-[#4a4038] dark:text-zinc-400 group-hover:text-[#2a2420] dark:group-hover:text-zinc-200 group-hover:-translate-y-[1px] transition-all duration-300" />
                   </div>
                 )}
               </button>
@@ -379,19 +379,19 @@ export default function ProcessPage({
                   onClick={() => setViewState('expanded')}
                   className="flex-1 flex items-center py-1.5 cursor-pointer sm:min-w-[280px] overflow-hidden"
                 >
-                  <span className="text-[14px] text-[#1a1a1a]/28 truncate tracking-[-0.01em]">
+                  <span className="text-[14px] text-zinc-500 dark:text-zinc-400 truncate tracking-[-0.01em]">
                     {file ? file.name : 'Drop audio or record...'}
                   </span>
                 </div>
 
                 <button 
                   onClick={() => setInputMode(inputMode === 'upload' ? 'record' : 'upload')}
-                  className="flex-shrink-0 flex items-center gap-2 bg-white/90 hover:bg-white rounded-full px-4 py-2.5 text-[13px] font-medium text-[#1a1a1a]/55 hover:text-[#1a1a1a]/80 shadow-[0_1px_4px_rgba(0,0,0,0.04)] border border-white/80 transition-all duration-200"
+                  className="flex-shrink-0 flex items-center gap-2 bg-white/90 dark:bg-app-chip/95 hover:bg-white dark:hover:bg-app-chip rounded-full px-4 py-2.5 text-[13px] font-medium text-zinc-600 dark:text-app-fg-muted hover:text-zinc-900 dark:hover:text-app-fg shadow-[0_1px_4px_rgba(0,0,0,0.04)] dark:shadow-[0_4px_20px_rgba(0,0,0,0.35)] border border-white/80 dark:border-app-border transition-all duration-200"
                 >
                   {inputMode === 'upload' ? (
-                    <><Mic className="w-4 h-4 text-[#1a1a1a]/30" /><span>Record</span></>
+                    <><Mic className="w-4 h-4 text-zinc-500 dark:text-zinc-400" /><span>Record</span></>
                   ) : (
-                    <><Upload className="w-4 h-4 text-[#1a1a1a]/30" /><span>Upload</span></>
+                    <><Upload className="w-4 h-4 text-zinc-500 dark:text-zinc-400" /><span>Upload</span></>
                   )}
                 </button>
               </div>
@@ -410,23 +410,23 @@ export default function ProcessPage({
             exit={{ opacity: 0, scale: 0.95, y: 8 }}
             transition={{ type: 'spring', damping: 28, stiffness: 350 }}
             style={{ transformOrigin: 'bottom center' }}
-            className="absolute bottom-2 sm:bottom-6 left-1/2 -translate-x-1/2 w-[calc(100%-16px)] sm:w-[600px] h-[380px] sm:h-[420px] max-h-[55vh] sm:max-h-[60vh] bg-white rounded-[20px] sm:rounded-[24px] shadow-[0_4px_40px_rgba(0,0,0,0.12)] border border-[#1a1a1a]/[0.06] flex flex-col z-40 overflow-hidden"
+            className="absolute bottom-2 sm:bottom-6 left-1/2 -translate-x-1/2 w-[calc(100%-16px)] sm:w-[600px] h-[380px] sm:h-[420px] max-h-[55vh] sm:max-h-[60vh] bg-white dark:bg-app-raised rounded-2xl sm:rounded-3xl shadow-[0_4px_40px_rgba(0,0,0,0.12)] dark:shadow-[0_8px_48px_rgba(0,0,0,0.5)] border border-[#1a1a1a]/[0.06] dark:border-app-border text-zinc-900 dark:text-app-fg flex flex-col z-40 overflow-hidden"
             onClick={(e) => e.stopPropagation()}
           >
             {/* Drag handle */}
             <div className="flex justify-center pt-3 pb-1">
-              <div className="w-8 h-1 rounded-full bg-[#1a1a1a]/10" />
+              <div className="w-8 h-1 rounded-full bg-zinc-300/80 dark:bg-white/20" />
             </div>
 
               {/* Header */}
               <div className="flex items-center justify-between px-5 py-2.5">
-                <div className="flex gap-0.5 bg-[#1a1a1a]/[0.04] rounded-lg p-0.5">
+                <div className="flex gap-0.5 bg-[#1a1a1a]/[0.04] dark:bg-app-panel rounded-lg p-0.5 ring-1 ring-transparent dark:ring-white/[0.06]">
                   <button
                     onClick={() => setInputMode('upload')}
                     className={`flex items-center gap-1.5 px-3 py-[6px] text-[12px] font-medium rounded-md transition-all ${
                       inputMode === 'upload' 
-                        ? 'bg-white shadow-sm shadow-black/[0.04] text-[#1a1a1a]' 
-                        : 'text-[#1a1a1a]/35 hover:text-[#1a1a1a]/55'
+                        ? 'bg-white dark:bg-app-chip shadow-sm shadow-black/[0.04] dark:shadow-black/40 text-zinc-900 dark:text-app-fg' 
+                        : 'text-zinc-500 dark:text-app-fg-subtle hover:text-zinc-800 dark:hover:text-app-fg-muted'
                     }`}
                   >
                     <Upload className="w-3.5 h-3.5" /> Upload
@@ -435,8 +435,8 @@ export default function ProcessPage({
                     onClick={() => setInputMode('record')}
                     className={`flex items-center gap-1.5 px-3 py-[6px] text-[12px] font-medium rounded-md transition-all ${
                       inputMode === 'record' 
-                        ? 'bg-white shadow-sm shadow-black/[0.04] text-[#1a1a1a]' 
-                        : 'text-[#1a1a1a]/35 hover:text-[#1a1a1a]/55'
+                        ? 'bg-white dark:bg-app-chip shadow-sm shadow-black/[0.04] dark:shadow-black/40 text-zinc-900 dark:text-app-fg' 
+                        : 'text-zinc-500 dark:text-app-fg-subtle hover:text-zinc-800 dark:hover:text-app-fg-muted'
                     }`}
                   >
                     <Mic className="w-3.5 h-3.5" /> Record
@@ -444,7 +444,7 @@ export default function ProcessPage({
                 </div>
                 <button 
                   onClick={() => setViewState('collapsed')}
-                  className="text-[#1a1a1a]/30 hover:text-[#1a1a1a]/60 p-1.5 hover:bg-[#1a1a1a]/[0.04] rounded-lg transition-colors"
+                  className="text-zinc-500 dark:text-app-fg-subtle hover:text-zinc-700 dark:hover:text-app-fg p-1.5 hover:bg-zinc-100 dark:hover:bg-app-chip rounded-lg transition-colors"
                 >
                   <ChevronDown className="w-5 h-5" />
                 </button>
@@ -467,7 +467,7 @@ export default function ProcessPage({
                         ? 'bg-[#1a1a1a]/[0.06] border-2 border-[#1a1a1a]/20' 
                         : file 
                           ? 'bg-green-50/60 border-2 border-green-200/40' 
-                          : 'bg-[#faf8f6] border-2 border-dashed border-[#1a1a1a]/[0.08] hover:border-[#1a1a1a]/15 hover:bg-[#e5ddd4]/50'
+                          : 'bg-zinc-50 dark:bg-app-panel border-2 border-dashed border-zinc-300/80 dark:border-white/15 hover:border-zinc-400 dark:hover:border-white/25 hover:bg-zinc-100 dark:hover:bg-app-chip/60'
                     }`}
                   >
                     <input type="file" ref={fileInputRef} onChange={handleFileChange} className="hidden" accept="audio/*" />
@@ -478,12 +478,12 @@ export default function ProcessPage({
                           <FileAudio className="w-7 h-7 text-green-600/70" />
                         </div>
                         <div className="text-center">
-                          <p className="text-[14px] font-medium text-[#1a1a1a]/80 mb-0.5">{file.name}</p>
-                          <p className="text-[12px] text-[#1a1a1a]/35">{(file.size / (1024 * 1024)).toFixed(2)} MB</p>
+                          <p className="text-[14px] font-medium text-zinc-800 dark:text-zinc-200 mb-0.5">{file.name}</p>
+                          <p className="text-[12px] text-zinc-500 dark:text-zinc-500">{(file.size / (1024 * 1024)).toFixed(2)} MB</p>
                         </div>
                         <button 
                           onClick={(e) => { e.stopPropagation(); setFile(null); }}
-                          className="text-[11px] font-medium text-[#1a1a1a]/30 hover:text-[#1a1a1a]/60 transition-colors"
+                          className="text-[11px] font-medium text-zinc-500 dark:text-zinc-400 hover:text-zinc-600 dark:text-zinc-300 transition-colors"
                         >
                           Remove
                         </button>
@@ -491,11 +491,11 @@ export default function ProcessPage({
                     ) : (
                       <motion.div initial={{ opacity: 0, y: 8 }} animate={{ opacity: 1, y: 0 }} className="flex flex-col items-center gap-3">
                         <div className="w-14 h-14 rounded-2xl bg-[#1a1a1a]/[0.04] flex items-center justify-center">
-                          <Upload className="w-7 h-7 text-[#1a1a1a]/20" />
+                          <Upload className="w-7 h-7 text-zinc-400 dark:text-zinc-500" />
                         </div>
                         <div className="text-center">
-                          <p className="text-[14px] font-medium text-[#1a1a1a]/60">Drop audio file here</p>
-                          <p className="text-[12px] text-[#1a1a1a]/25 mt-0.5">or click to browse</p>
+                          <p className="text-[14px] font-medium text-zinc-600 dark:text-zinc-300">Drop audio file here</p>
+                          <p className="text-[12px] text-zinc-400 dark:text-zinc-500 mt-0.5">or click to browse</p>
                         </div>
                       </motion.div>
                     )}
@@ -510,10 +510,10 @@ export default function ProcessPage({
                         <div className="flex items-center justify-between py-2 flex-shrink-0">
                           <div className="flex items-center gap-2">
                             <span className="w-1.5 h-1.5 rounded-full bg-red-500 animate-pulse" />
-                            <span className="text-[13px] font-mono font-semibold text-[#1a1a1a] tabular-nums">{formatTime(recordingTime)}</span>
+                            <span className="text-[13px] font-mono font-semibold text-zinc-900 dark:text-app-fg tabular-nums">{formatTime(recordingTime)}</span>
                             <span className="text-[10px] px-2 py-0.5 rounded-full bg-red-50 text-red-500/80 font-medium">Live</span>
                             {currentInputDevice && (
-                              <span className="text-[10px] px-2 py-0.5 rounded-full bg-[#1a1a1a]/[0.04] text-[#1a1a1a]/40 font-medium truncate max-w-[120px]" title={currentInputDevice}>
+                              <span className="text-[10px] px-2 py-0.5 rounded-full bg-[#1a1a1a]/[0.04] text-zinc-500 dark:text-zinc-400 font-medium truncate max-w-[120px]" title={currentInputDevice}>
                                 {currentInputDevice}
                               </span>
                             )}
@@ -540,7 +540,7 @@ export default function ProcessPage({
                             ) : (
                               <button
                                 onClick={pauseRecording}
-                                className="w-8 h-8 bg-[#1a1a1a]/[0.06] text-[#1a1a1a]/50 rounded-full flex items-center justify-center hover:bg-[#1a1a1a]/10 transition-colors"
+                                className="w-8 h-8 bg-[#1a1a1a]/[0.06] text-zinc-600 dark:text-zinc-400 rounded-full flex items-center justify-center hover:bg-[#1a1a1a]/10 transition-colors"
                                 title="Pause recording"
                               >
                                 <PauseCircle className="w-4 h-4" />
@@ -552,21 +552,21 @@ export default function ProcessPage({
                           </div>
                         </div>
 
-                        <div className="flex-1 overflow-y-auto mt-2 -mx-5 px-5 border-t border-[#1a1a1a]/[0.04] pt-3">
+                        <div className="flex-1 overflow-y-auto mt-2 -mx-5 px-5 border-t border-zinc-200/80 dark:border-app-border pt-3">
                           <div className="flex items-center gap-2 mb-3">
                             <span className="w-1.5 h-1.5 rounded-full bg-green-500" />
-                            <span className="text-[10px] font-semibold text-[#1a1a1a]/25 uppercase tracking-wider">Live Transcript</span>
+                            <span className="text-[10px] font-semibold text-zinc-400 dark:text-zinc-500 uppercase tracking-wider">Live Transcript</span>
                           </div>
                           {realtimeTranscript.length === 0 && !interimTranscript ? (
                             <div className="flex flex-col items-center justify-center py-12">
-                              <p className="text-[13px] text-[#1a1a1a]/20">Waiting for speech…</p>
+                              <p className="text-[13px] text-zinc-400 dark:text-zinc-500">Waiting for speech…</p>
                             </div>
                           ) : (
                             <div className="space-y-1">
                               {realtimeTranscript.map((line, i) => (
-                                <p key={i} className="text-[13px] text-[#1a1a1a]/65 leading-relaxed py-1">{line}</p>
+                                <p key={i} className="text-[13px] text-zinc-700 dark:text-zinc-300 leading-relaxed py-1">{line}</p>
                               ))}
-                              {interimTranscript && <p className="text-[13px] text-[#1a1a1a]/25 italic leading-relaxed py-1">{interimTranscript}</p>}
+                              {interimTranscript && <p className="text-[13px] text-zinc-400 dark:text-zinc-500 italic leading-relaxed py-1">{interimTranscript}</p>}
                               <div ref={transcriptEndRef} />
                             </div>
                           )}
@@ -575,7 +575,7 @@ export default function ProcessPage({
                       ) : (
                       /* Batch Recording */
                       <motion.div initial={{ opacity: 0 }} animate={{ opacity: 1 }} className="flex flex-col items-center justify-center h-full gap-5">
-                        <div className="text-[40px] font-mono font-bold text-[#1a1a1a] tracking-wider tabular-nums">
+                        <div className="text-[40px] font-mono font-bold text-zinc-900 dark:text-app-fg tracking-wider tabular-nums">
                           {formatTime(recordingTime)}
                         </div>
                         
@@ -596,7 +596,7 @@ export default function ProcessPage({
                               <PlayCircle className="w-5 h-5" />
                             </button>
                           ) : (
-                            <button onClick={pauseRecording} className="w-10 h-10 bg-[#1a1a1a]/[0.06] text-[#1a1a1a]/50 rounded-full flex items-center justify-center hover:bg-[#1a1a1a]/10 transition-colors">
+                            <button onClick={pauseRecording} className="w-10 h-10 bg-[#1a1a1a]/[0.06] text-zinc-600 dark:text-zinc-400 rounded-full flex items-center justify-center hover:bg-[#1a1a1a]/10 transition-colors">
                               <PauseCircle className="w-5 h-5" />
                             </button>
                           )}
@@ -605,13 +605,13 @@ export default function ProcessPage({
                           </button>
                         </div>
                         
-                        <span className={`text-[10px] font-medium uppercase tracking-widest ${isPaused ? 'text-[#1a1a1a]/30' : 'text-red-400/80'}`}>
+                        <span className={`text-[10px] font-medium uppercase tracking-widest ${isPaused ? 'text-zinc-500 dark:text-zinc-400' : 'text-red-400/80'}`}>
                           {isPaused ? 'Paused' : 'Recording'}
                         </span>
 
                         {currentInputDevice && (
                           <div className="flex items-center gap-2 mt-1">
-                            <span className="text-[10px] px-2.5 py-1 rounded-full bg-[#1a1a1a]/[0.04] text-[#1a1a1a]/35 font-medium">
+                            <span className="text-[10px] px-2.5 py-1 rounded-full bg-[#1a1a1a]/[0.04] text-zinc-500 dark:text-zinc-500 font-medium">
                               {currentInputDevice}
                             </span>
                             {deviceRestartNotice && (
@@ -628,9 +628,9 @@ export default function ProcessPage({
                         <div className="w-12 h-12 rounded-2xl bg-green-50 flex items-center justify-center">
                           <CheckCircle2 className="w-6 h-6 text-green-500" />
                         </div>
-                        <p className="text-[14px] font-medium text-[#1a1a1a]/70">Recording saved</p>
-                        <p className="text-[11px] text-[#1a1a1a]/30 tabular-nums">{formatTime(recordingTime)}</p>
-                        <button onClick={() => { setFile(null); startRecording(); }} className="text-[11px] font-medium text-[#1a1a1a]/30 hover:text-[#1a1a1a]/60 transition-colors mt-1">
+                        <p className="text-[14px] font-medium text-zinc-700 dark:text-zinc-300">Recording saved</p>
+                        <p className="text-[11px] text-zinc-500 dark:text-zinc-400 tabular-nums">{formatTime(recordingTime)}</p>
+                        <button onClick={() => { setFile(null); startRecording(); }} className="text-[11px] font-medium text-zinc-500 dark:text-zinc-400 hover:text-zinc-600 dark:text-zinc-300 transition-colors mt-1">
                           Record again
                         </button>
                       </motion.div>
@@ -642,11 +642,11 @@ export default function ProcessPage({
                           <motion.div initial={{ opacity: 0, y: 8 }} animate={{ opacity: 1, y: 0 }} className="flex flex-col items-center gap-5">
                             {nativeServerAvailable && (
                               <div className="flex flex-col items-center gap-2">
-                                <div className="flex gap-0.5 bg-[#1a1a1a]/[0.04] rounded-lg p-0.5">
+                                <div className="flex gap-0.5 bg-[#1a1a1a]/[0.04] dark:bg-app-panel rounded-lg p-0.5 ring-1 ring-transparent dark:ring-white/[0.06]">
                                   <button
                                     onClick={() => setDesktopRecordingMode('batch')}
                                     className={`flex items-center gap-1.5 px-3.5 py-[6px] rounded-md text-[12px] font-medium transition-all ${
-                                      desktopRecordingMode === 'batch' ? 'bg-white text-[#1a1a1a] shadow-sm shadow-black/[0.04]' : 'text-[#1a1a1a]/35 hover:text-[#1a1a1a]/55'
+                                      desktopRecordingMode === 'batch' ? 'bg-white dark:bg-app-chip text-zinc-900 dark:text-app-fg shadow-sm shadow-black/[0.04] dark:shadow-black/35' : 'text-zinc-500 dark:text-app-fg-subtle hover:text-zinc-800 dark:hover:text-app-fg-muted'
                                     }`}
                                   >
                                     <Layers className="w-3 h-3" /> Batch
@@ -654,13 +654,13 @@ export default function ProcessPage({
                                   <button
                                     onClick={() => setDesktopRecordingMode('realtime')}
                                     className={`flex items-center gap-1.5 px-3.5 py-[6px] rounded-md text-[12px] font-medium transition-all ${
-                                      desktopRecordingMode === 'realtime' ? 'bg-white text-[#1a1a1a] shadow-sm shadow-black/[0.04]' : 'text-[#1a1a1a]/35 hover:text-[#1a1a1a]/55'
+                                      desktopRecordingMode === 'realtime' ? 'bg-white dark:bg-app-chip text-zinc-900 dark:text-app-fg shadow-sm shadow-black/[0.04] dark:shadow-black/35' : 'text-zinc-500 dark:text-app-fg-subtle hover:text-zinc-800 dark:hover:text-app-fg-muted'
                                     }`}
                                   >
                                     <Radio className="w-3 h-3" /> Real-time
                                   </button>
                                 </div>
-                                <p className="text-[10px] text-[#1a1a1a]/25 text-center max-w-[240px]">
+                                <p className="text-[10px] text-zinc-400 dark:text-zinc-500 text-center max-w-[240px]">
                                   {desktopRecordingMode === 'batch' ? 'Mic + system audio · transcribed after stop' : 'Live transcription via Deepgram'}
                                 </p>
                               </div>
@@ -675,7 +675,7 @@ export default function ProcessPage({
                             </button>
 
                             {!nativeServerAvailable && (
-                              <p className="text-[10px] text-[#1a1a1a]/20 text-center">Browser mic only — run as desktop app for system audio</p>
+                              <p className="text-[10px] text-zinc-400 dark:text-zinc-500 text-center">Browser mic only — run as desktop app for system audio</p>
                             )}
                           </motion.div>
                         )}
@@ -686,10 +686,10 @@ export default function ProcessPage({
               </div>
 
               {/* Panel bottom bar */}
-              <div className="px-5 py-3 bg-[#faf8f6] border-t border-[#1a1a1a]/[0.04] flex items-center justify-between">
+              <div className="px-5 py-3 bg-zinc-50 dark:bg-app-panel border-t border-zinc-200/80 dark:border-app-border flex items-center justify-between">
                 <button 
                   onClick={() => setViewState('collapsed')}
-                  className="flex items-center gap-1.5 text-[#1a1a1a]/30 hover:text-[#1a1a1a]/60 transition-colors"
+                  className="flex items-center gap-1.5 text-zinc-500 dark:text-zinc-400 hover:text-zinc-600 dark:text-zinc-300 transition-colors"
                 >
                   <div className="flex items-center gap-[2px] h-[14px]">
                     {[0, 1, 2].map((i) => (
