@@ -1,4 +1,5 @@
 import type { APIGatewayProxyEvent, APIGatewayProxyResult } from 'aws-lambda';
+import { CognitoJwtVerifier } from 'aws-jwt-verify';
 import { query, queryOne, queryCount } from './db';
 import { ok, created, noContent, badRequest, notFound, unauthorized, serverError, corsPreflightResponse } from './response';
 import { S3Client, PutObjectCommand } from '@aws-sdk/client-s3';
@@ -8,15 +9,38 @@ const S3_BUCKET = process.env.S3_BUCKET || '';
 const S3_REGION = process.env.AWS_REGION || 'us-east-1';
 const s3 = new S3Client({ region: S3_REGION });
 
-function getUserId(event: APIGatewayProxyEvent): string {
-  const claims = event.requestContext.authorizer?.claims;
-  const sub = claims?.sub;
-  if (!sub) throw new Error('UNAUTHORIZED');
-  return sub;
+const COGNITO_USER_POOL_ID = process.env.COGNITO_USER_POOL_ID || '';
+const COGNITO_CLIENT_ID = process.env.COGNITO_CLIENT_ID || '';
+
+const idTokenVerifier = CognitoJwtVerifier.create({
+  userPoolId: COGNITO_USER_POOL_ID,
+  tokenUse: 'id',
+  clientId: COGNITO_CLIENT_ID,
+});
+
+interface VerifiedClaims {
+  sub: string;
+  email?: string;
 }
 
-function getUserEmail(event: APIGatewayProxyEvent): string | null {
-  return event.requestContext.authorizer?.claims?.email || null;
+async function verifyToken(event: APIGatewayProxyEvent): Promise<VerifiedClaims> {
+  const authHeader = event.headers?.Authorization || event.headers?.authorization || '';
+  const token = authHeader.replace(/^Bearer\s+/i, '');
+  if (!token) throw new Error('UNAUTHORIZED');
+
+  const payload = await idTokenVerifier.verify(token);
+  return { sub: payload.sub, email: (payload as any).email || undefined };
+}
+
+let cachedClaims: VerifiedClaims | null = null;
+
+function getUserId(): string {
+  if (!cachedClaims?.sub) throw new Error('UNAUTHORIZED');
+  return cachedClaims.sub;
+}
+
+function getUserEmail(): string | null {
+  return cachedClaims?.email || null;
 }
 
 function parseBody(event: APIGatewayProxyEvent): any {
@@ -47,12 +71,14 @@ export const handler = async (event: APIGatewayProxyEvent): Promise<APIGatewayPr
   const qs = event.queryStringParameters || {};
 
   try {
-    // Public route: share verification
+    // Public route: share verification (no auth required)
     if (resource === 'shares' && segments[1] === 'verify' && segments[2] && method === 'GET') {
       return await handleShareVerify(segments[2], qs.email || null);
     }
 
-    const userId = getUserId(event);
+    // Verify JWT and extract claims
+    cachedClaims = await verifyToken(event);
+    const userId = getUserId();
 
     switch (resource) {
       case 'tasks':    return await handleTasks(method, segments, userId, event);
@@ -69,6 +95,8 @@ export const handler = async (event: APIGatewayProxyEvent): Promise<APIGatewayPr
     if (err.message === 'UNAUTHORIZED') return unauthorized();
     console.error('Handler error:', err);
     return serverError(err.message || 'Internal server error');
+  } finally {
+    cachedClaims = null;
   }
 };
 

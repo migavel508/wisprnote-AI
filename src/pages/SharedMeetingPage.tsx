@@ -284,7 +284,7 @@ export default function SharedMeetingPage() {
             {tab === 'summary' && (
               <div className="bg-white p-6 sm:p-8 rounded-2xl border border-[#e8e2da]/60 shadow-sm">
                 <h3 className="text-[17px] font-semibold tracking-[-0.01em] text-[#1a1a1a] mb-5">Key Summary</h3>
-                <div className="prose prose-sm max-w-none prose-p:text-[14px] prose-p:leading-[1.75] prose-p:text-[#1a1a1a]/70 prose-strong:text-[#1a1a1a] prose-headings:tracking-tight markdown-body">
+                <div className="prose prose-sm max-w-none text-[#2c2520] prose-p:text-[14px] prose-p:leading-[1.75] prose-p:text-[#2c2520]/85 prose-strong:text-[#1a1a1a] prose-headings:text-[#1a1a1a] prose-headings:tracking-tight prose-li:text-[14px] prose-li:text-[#2c2520]/85 prose-td:text-[#2c2520]/85 prose-th:text-[#1a1a1a] prose-blockquote:text-[#2c2520]/70 markdown-body" style={{ color: '#2c2520' }}>
                   <Markdown remarkPlugins={[remarkGfm]}>{meeting.summary || 'No summary available.'}</Markdown>
                 </div>
               </div>
@@ -293,7 +293,7 @@ export default function SharedMeetingPage() {
             {tab === 'notes' && (
               <div className="bg-white p-6 sm:p-8 rounded-2xl border border-[#e8e2da]/60 shadow-sm">
                 <h3 className="text-[17px] font-semibold tracking-[-0.01em] text-[#1a1a1a] mb-5">Structured Notes</h3>
-                <div className="prose prose-sm max-w-none prose-p:text-[14px] prose-p:leading-[1.75] prose-p:text-[#1a1a1a]/70 prose-strong:text-[#1a1a1a] prose-headings:tracking-tight prose-h2:text-[16px] prose-h2:font-semibold prose-h3:text-[14px] prose-h3:font-semibold prose-li:text-[14px] prose-li:text-[#1a1a1a]/70 markdown-body">
+                <div className="prose prose-sm max-w-none text-[#2c2520] prose-p:text-[14px] prose-p:leading-[1.75] prose-p:text-[#2c2520]/85 prose-strong:text-[#1a1a1a] prose-headings:text-[#1a1a1a] prose-headings:tracking-tight prose-h2:text-[16px] prose-h2:font-semibold prose-h3:text-[14px] prose-h3:font-semibold prose-li:text-[14px] prose-li:text-[#2c2520]/85 prose-td:text-[#2c2520]/85 prose-th:text-[#1a1a1a] prose-blockquote:text-[#2c2520]/70 markdown-body" style={{ color: '#2c2520' }}>
                   <Markdown remarkPlugins={[remarkGfm]}>{meeting.notes || 'No notes available.'}</Markdown>
                 </div>
               </div>
@@ -354,7 +354,7 @@ export default function SharedMeetingPage() {
                           : 'bg-[#f5f0eb] text-[#1a1a1a]/80 rounded-bl-md'
                       }`}>
                         {msg.role === 'model' ? (
-                          <div className="prose prose-sm max-w-none prose-p:text-[13px] prose-p:leading-relaxed prose-p:text-[#1a1a1a]/80 prose-strong:text-[#1a1a1a] markdown-body">
+                          <div className="prose prose-sm max-w-none prose-p:text-[13px] prose-p:leading-relaxed prose-p:text-[#1a1a1a]/80 prose-strong:text-[#1a1a1a] prose-li:text-[#1a1a1a]/80 markdown-body" style={{ color: '#1a1a1a' }}>
                             <Markdown remarkPlugins={[remarkGfm]}>{msg.text}</Markdown>
                           </div>
                         ) : msg.text}
