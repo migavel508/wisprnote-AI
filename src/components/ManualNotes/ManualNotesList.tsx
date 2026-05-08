@@ -1,39 +1,31 @@
-import React, { useState, useEffect } from 'react';
+import React, { useState } from 'react';
 import { motion } from 'motion/react';
 import { logger } from '../../lib/logger';
 
 const log = logger.scope('ManualNotesList');
 import { 
-  FileText, Plus, Search, MoreHorizontal, 
+  FileText, Plus, Search, 
   Trash2, Loader2, Calendar
 } from 'lucide-react';
-import { ManualNote, getManualNotes, deleteManualNote } from '../../services/awsService';
+import { ManualNote, deleteManualNote } from '../../services/awsService';
 
 interface ManualNotesListProps {
+  notes: ManualNote[];
+  isLoading: boolean;
   onSelectNote: (note: ManualNote) => void;
   onCreateNote: () => void;
+  onDeleteNote: (id: string) => Promise<void>;
 }
 
-export function ManualNotesList({ onSelectNote, onCreateNote }: ManualNotesListProps) {
-  const [notes, setNotes] = useState<ManualNote[]>([]);
-  const [isLoading, setIsLoading] = useState(true);
+export function ManualNotesList({
+  notes,
+  isLoading,
+  onSelectNote,
+  onCreateNote,
+  onDeleteNote,
+}: ManualNotesListProps) {
   const [searchQuery, setSearchQuery] = useState('');
   const [deletingId, setDeletingId] = useState<string | null>(null);
-
-  useEffect(() => {
-    fetchNotes();
-  }, []);
-
-  const fetchNotes = async () => {
-    try {
-      const fetchedNotes = await getManualNotes();
-      setNotes(fetchedNotes);
-    } catch (error) {
-      log.error('fetch_notes_failed', { error: error instanceof Error ? error : undefined });
-    } finally {
-      setIsLoading(false);
-    }
-  };
 
   const handleDelete = async (e: React.MouseEvent, id: string) => {
     e.stopPropagation();
@@ -41,8 +33,7 @@ export function ManualNotesList({ onSelectNote, onCreateNote }: ManualNotesListP
     
     setDeletingId(id);
     try {
-      await deleteManualNote(id);
-      setNotes(notes.filter(n => n.id !== id));
+      await onDeleteNote(id);
     } catch (error) {
       log.error('delete_note_failed', { error: error instanceof Error ? error : undefined });
     } finally {
