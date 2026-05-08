@@ -13,6 +13,9 @@ interface HistoryPageProps {
   onSelectTask: (task: TaskHistory) => void;
   isLoading?: boolean;
   onTaskUpdated?: (task: TaskHistory) => void;
+  onLoadMore?: () => Promise<void>;
+  hasMoreFromServer?: boolean;
+  totalCount?: number;
 }
 
 // Cache for full task details to avoid re-fetching
@@ -78,7 +81,7 @@ function searchMeetings(meetings: (TaskHistory | TaskMetadata)[], query: string)
 
 const PAGE_SIZE = 12; // Number of items to show initially and load more
 
-export default function HistoryPage({ history, onSelectTask, isLoading = false, onTaskUpdated }: HistoryPageProps) {
+export default function HistoryPage({ history, onSelectTask, isLoading = false, onTaskUpdated, onLoadMore, hasMoreFromServer = false, totalCount }: HistoryPageProps) {
   const [searchQuery, setSearchQuery] = useState('');
   const [loadingTaskId, setLoadingTaskId] = useState<string | null>(null);
   const [generatingTitleId, setGeneratingTitleId] = useState<string | null>(null);
@@ -89,23 +92,29 @@ export default function HistoryPage({ history, onSelectTask, isLoading = false, 
   
   // Handle generating title for a task
   const handleGenerateTitle = useCallback(async (e: React.MouseEvent, task: TaskHistory) => {
-    e.stopPropagation(); // Prevent card click
-    if (!task.id || !task.transcription) return;
+    e.stopPropagation();
+    if (!task.id) return;
     
     setGeneratingTitleId(task.id);
     
     try {
-      const newTitle = await generateMeetingTitle(task.transcription);
+      // Fetch full task if transcription not loaded yet
+      let transcription = task.transcription;
+      if (!transcription && task.id) {
+        const full = await getTaskById(task.id);
+        transcription = full?.transcription;
+      }
+      if (!transcription) return;
+
+      const newTitle = await generateMeetingTitle(transcription);
       const updatedTask = await updateTaskTitle(task.id, newTitle);
       
-      // Merge with original task to ensure all fields are preserved
       const mergedTask = { ...task, ...updatedTask };
       
       if (onTaskUpdated) {
         onTaskUpdated(mergedTask);
       }
       
-      // Update cache with merged task
       taskCache.set(task.id, mergedTask);
     } catch (error) {
       log.error('generate_title_failed', { error: error instanceof Error ? error : undefined });
@@ -124,7 +133,8 @@ export default function HistoryPage({ history, onSelectTask, isLoading = false, 
     return filteredHistory.slice(0, visibleCount);
   }, [filteredHistory, visibleCount]);
   
-  const hasMore = visibleCount < filteredHistory.length;
+  const hasMoreLocal = visibleCount < filteredHistory.length;
+  const hasMore = hasMoreLocal || (hasMoreFromServer && !hasSearchQuery);
   const hasSearchQuery = searchQuery.trim().length > 0;
   
   // Reset visible count when search changes
@@ -132,17 +142,27 @@ export default function HistoryPage({ history, onSelectTask, isLoading = false, 
     setVisibleCount(PAGE_SIZE);
   }, [searchQuery]);
   
-  // Infinite scroll - load more when reaching bottom
+  // Infinite scroll - load more from local slice or fetch next server page
   useEffect(() => {
     const observer = new IntersectionObserver(
       (entries) => {
         if (entries[0].isIntersecting && hasMore && !isLoadingMore) {
           setIsLoadingMore(true);
-          // Simulate small delay for smooth UX
-          setTimeout(() => {
-            setVisibleCount(prev => prev + PAGE_SIZE);
+
+          if (hasMoreLocal) {
+            setTimeout(() => {
+              setVisibleCount(prev => prev + PAGE_SIZE);
+              setIsLoadingMore(false);
+            }, 150);
+          } else if (hasMoreFromServer && onLoadMore && !hasSearchQuery) {
+            onLoadMore().then(() => {
+              setVisibleCount(prev => prev + PAGE_SIZE);
+            }).finally(() => {
+              setIsLoadingMore(false);
+            });
+          } else {
             setIsLoadingMore(false);
-          }, 200);
+          }
         }
       },
       { threshold: 0.1 }
@@ -153,7 +173,7 @@ export default function HistoryPage({ history, onSelectTask, isLoading = false, 
     }
     
     return () => observer.disconnect();
-  }, [hasMore, isLoadingMore]);
+  }, [hasMore, hasMoreLocal, hasMoreFromServer, isLoadingMore, hasSearchQuery, onLoadMore]);
   
   // Handle task selection - fetch full details if needed
   const handleSelectTask = useCallback(async (task: TaskHistory) => {
@@ -198,8 +218,10 @@ export default function HistoryPage({ history, onSelectTask, isLoading = false, 
               </h2>
               {!isLoading && history.length > 0 && (
                 <p className="text-[11px] sm:text-[12px] text-[#1a1a1a]/45 mt-0.5 sm:mt-1">
-                  {filteredHistory.length} meeting{filteredHistory.length !== 1 ? 's' : ''}
-                  {hasSearchQuery && ` matching "${searchQuery}"`}
+                  {hasSearchQuery 
+                    ? `${filteredHistory.length} meeting${filteredHistory.length !== 1 ? 's' : ''} matching "${searchQuery}"`
+                    : `${totalCount || filteredHistory.length} meeting${(totalCount || filteredHistory.length) !== 1 ? 's' : ''}`
+                  }
                 </p>
               )}
             </div>
@@ -307,7 +329,7 @@ export default function HistoryPage({ history, onSelectTask, isLoading = false, 
                   </div>
 
                   <p className="text-[12px] text-[#1a1a1a]/50 line-clamp-2 sm:line-clamp-3 leading-relaxed mb-3 sm:mb-4">
-                    {task.summary || (task.transcription ? task.transcription.substring(0, 120) + '...' : 'No summary available')}
+                    {task.summary || 'No summary available'}
                   </p>
 
                   <div className="flex items-center gap-1.5 text-[11px] font-medium text-[#1a1a1a]/30 group-hover:text-[#1a1a1a]/60 transition-colors">
@@ -332,9 +354,9 @@ export default function HistoryPage({ history, onSelectTask, isLoading = false, 
               )}
               
               {/* Show count */}
-              {!hasSearchQuery && filteredHistory.length > PAGE_SIZE && (
+              {!hasSearchQuery && (totalCount || filteredHistory.length) > PAGE_SIZE && (
                 <p className="text-center text-[11px] text-[#1a1a1a]/15 py-4">
-                  {visibleHistory.length} of {filteredHistory.length}
+                  {visibleHistory.length} of {totalCount || filteredHistory.length}
                 </p>
               )}
             </>

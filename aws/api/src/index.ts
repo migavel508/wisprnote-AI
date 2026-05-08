@@ -123,14 +123,23 @@ async function handleTasks(method: string, segments: string[], userId: string, e
 
   if (method === 'GET' && !taskId) {
     const page = parseInt(qs.page || '0', 10);
-    const pageSize = parseInt(qs.pageSize || '20', 10);
+    const pageSize = Math.min(parseInt(qs.pageSize || '24', 10), 100);
     const full = qs.full === 'true';
+    const search = qs.search?.trim() || '';
 
-    const total = await queryCount('SELECT COUNT(*) FROM task_history WHERE user_id=$1', [userId]);
+    let whereClause = 'user_id=$1';
+    const params: any[] = [userId];
+
+    if (search) {
+      params.push(`%${search}%`);
+      whereClause += ` AND (filename ILIKE $${params.length} OR summary ILIKE $${params.length})`;
+    }
+
+    const total = await queryCount(`SELECT COUNT(*) FROM task_history WHERE ${whereClause}`, params);
     const fields = full ? '*' : 'id, created_at, filename, summary, status, duration';
     const rows = await query(
-      `SELECT ${fields} FROM task_history WHERE user_id=$1 ORDER BY created_at DESC LIMIT $2 OFFSET $3`,
-      [userId, pageSize, page * pageSize]
+      `SELECT ${fields} FROM task_history WHERE ${whereClause} ORDER BY created_at DESC LIMIT $${params.length + 1} OFFSET $${params.length + 2}`,
+      [...params, pageSize, page * pageSize]
     );
     return ok({ data: rows, hasMore: total > (page + 1) * pageSize, total });
   }

@@ -60,7 +60,7 @@ export interface TaskHistory {
   created_at?: string;
   user_id?: string;
   filename: string;
-  transcription: string;
+  transcription?: string;
   summary?: string;
   notes?: string;
   audio_url?: string;
@@ -122,6 +122,11 @@ export async function getTaskById(taskId: string): Promise<TaskHistory | null> {
 
 export async function getTasks(): Promise<TaskHistory[]> {
   const result = await apiRequest<{ data: TaskHistory[] }>('GET', '/tasks?full=true&pageSize=10000');
+  return result.data;
+}
+
+export async function getAllTaskIds(): Promise<TaskMetadata[]> {
+  const result = await apiRequest<{ data: TaskMetadata[]; total: number }>('GET', '/tasks?pageSize=10000');
   return result.data;
 }
 
