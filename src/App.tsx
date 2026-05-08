@@ -90,9 +90,12 @@ import {
   getChatHistoryByThread,
   ChatMessage,
   ManualNote,
+  getManualNotes,
+  deleteManualNote,
   updateTaskSummary,
   updateTaskNotes,
 } from './services/awsService';
+import { cacheGet, cacheSet, cacheClearUser, type CachedHistoryPayload } from './services/appCache';
 import { getSession, onAuthStateChange, signOut, getUserId, type AuthSession } from './services/awsAuthService';
 import { splitAudio, AudioBatch, shouldUseFileAPI, FILE_API_THRESHOLD_MB, BlobReadError } from './services/audioService';
 import { 
@@ -284,6 +287,8 @@ export default function App() {
     }
   };
 
+  const ALL_MEETINGS_THREAD_ID = 'all-meetings';
+
   const [session, setSession] = useState<AuthSession | null>(null);
   const [file, setFile] = useState<File | null>(null);
   const [prompt, setPrompt] = useState('');
@@ -336,7 +341,8 @@ export default function App() {
 
   // Notebooks (manual notes) state
   const [activeNote, setActiveNote] = useState<ManualNote | null>(null);
-  const [notebookRefreshKey, setNotebookRefreshKey] = useState(0);
+  const [manualNotesList, setManualNotesList] = useState<ManualNote[]>([]);
+  const [isLoadingManualNotes, setIsLoadingManualNotes] = useState(true);
 
   const [history, setHistory] = useState<TaskHistory[]>([]);
   const [hasMoreHistory, setHasMoreHistory] = useState(false);
@@ -371,16 +377,26 @@ export default function App() {
     let cancelled = false;
     setIsLoadingTaskDetails(true);
 
-    getTaskById(selectedTask.id).then(full => {
-      if (cancelled || !full) return;
-      // Cache in history array for instant future access
-      setHistory(prev => prev.map(t => t.id === full.id ? { ...t, ...full } : t));
-      setSelectedTask(prev => prev?.id === full.id ? { ...prev, ...full } : prev);
-    }).catch(err => {
-      log.error('fetch_task_details_failed', { error: err instanceof Error ? err : undefined });
-    }).finally(() => {
-      if (!cancelled) setIsLoadingTaskDetails(false);
-    });
+    (async () => {
+      try {
+        const cached = await cacheGet<TaskHistory>(`task:${selectedTask.id}`);
+        if (cached?.transcription?.trim() && !cancelled) {
+          setHistory(prev => prev.map(t => t.id === cached.id ? { ...t, ...cached } : t));
+          setSelectedTask(prev => prev?.id === cached.id ? { ...prev, ...cached } : prev);
+          setIsLoadingTaskDetails(false);
+          return;
+        }
+        const full = await getTaskById(selectedTask.id!);
+        if (cancelled || !full) return;
+        setHistory(prev => prev.map(t => t.id === full.id ? { ...t, ...full } : t));
+        setSelectedTask(prev => prev?.id === full.id ? { ...prev, ...full } : prev);
+        if (full.id) await cacheSet(`task:${full.id}`, full);
+      } catch (err) {
+        log.error('fetch_task_details_failed', { error: err instanceof Error ? err : undefined });
+      } finally {
+        if (!cancelled) setIsLoadingTaskDetails(false);
+      }
+    })();
 
     return () => { cancelled = true; };
   }, [selectedTask?.id]);
@@ -446,6 +462,8 @@ export default function App() {
   }, [chatMessages]);
 
   const prevUserIdRef = useRef<string | null>(null);
+  const lastChatFetchTaskIdRef = useRef<string | null>(null);
+  const lastAssetsFetchTaskIdRef = useRef<string | null>(null);
   const autoSyncRanRef = useRef(false);
 
   const isNetworkRelatedError = (err: any): boolean => {
@@ -514,6 +532,10 @@ export default function App() {
 
   // Wipe all user-scoped state so no data leaks between accounts
   const clearUserState = useCallback(() => {
+    const uid = prevUserIdRef.current;
+    if (uid) void cacheClearUser(uid);
+    lastChatFetchTaskIdRef.current = null;
+    lastAssetsFetchTaskIdRef.current = null;
     setHistory([]);
     setSelectedTask(null);
     setKgData([]);
@@ -532,6 +554,8 @@ export default function App() {
     setProcessingSubtext('Hang tight, almost there 😄');
     setAwaitingNetworkResume(false);
     autoSyncRanRef.current = false;
+    setManualNotesList([]);
+    setIsLoadingManualNotes(true);
     resetUserLedgers();
   }, []);
 
@@ -636,33 +660,21 @@ export default function App() {
     }
   }, [session]);
 
-  useEffect(() => {
-    if (session) {
-      fetchHistory();
-    }
-  }, [session]);
-
-
-  useEffect(() => {
-    if (selectedTask) {
-      fetchAgentAssets(selectedTask.id!);
-      fetchChatHistory(selectedTask.id!);
-    } else if (currentView === 'chat' && !selectedTask) {
-      fetchChatHistory(null);
-    }
-  }, [selectedTask, currentView]);
-
   const fetchAgentAssets = async (taskId: string) => {
     try {
+      const cached = await cacheGet<GeneratedAsset[]>(`assets:${taskId}`);
+      if (cached?.length) {
+        const agentCached = cached.filter((a: GeneratedAsset) => a.type === 'email' || a.type === 'wiki');
+        setAgentAssetHistory(agentCached);
+      }
       const data = await getAssets(taskId);
       const agentAssets = data.filter((a: GeneratedAsset) => a.type === 'email' || a.type === 'wiki');
       setAgentAssetHistory(agentAssets);
+      await cacheSet(`assets:${taskId}`, data);
     } catch (err) {
       log.error('fetch_assets_failed', { error: err instanceof Error ? err : undefined });
     }
   };
-
-  const ALL_MEETINGS_THREAD_ID = 'all-meetings';
 
   const parseChatMessages = (data: any[]): Message[] =>
     data.map(msg => ({
@@ -688,10 +700,18 @@ export default function App() {
     }));
 
   const fetchChatHistory = async (taskId: string | null) => {
+    const cacheKey = taskId ? `chat:${taskId}` : 'chat:all-meetings';
     try {
+      const cachedRaw = await cacheGet<ChatMessage[]>(cacheKey);
+      if (cachedRaw?.length) {
+        const fromCache = parseChatMessages(cachedRaw as any[]);
+        setChatMessages(fromCache);
+        if (!taskId) setAllMeetingsChatMessages(fromCache);
+      }
       const data = taskId
         ? await getChatHistory(taskId)
         : await getChatHistoryByThread(ALL_MEETINGS_THREAD_ID);
+      await cacheSet(cacheKey, data);
       const messages = parseChatMessages(data);
       setChatMessages(messages);
       if (!taskId) {
@@ -703,6 +723,40 @@ export default function App() {
     }
   };
 
+  const persistChatThreadToCache = async (taskId: string | null) => {
+    try {
+      const cacheKey = taskId ? `chat:${taskId}` : 'chat:all-meetings';
+      const data = taskId
+        ? await getChatHistory(taskId)
+        : await getChatHistoryByThread(ALL_MEETINGS_THREAD_ID);
+      await cacheSet(cacheKey, data);
+    } catch {
+      /* non-fatal */
+    }
+  };
+
+  useEffect(() => {
+    if (!selectedTask?.id) {
+      lastChatFetchTaskIdRef.current = null;
+      lastAssetsFetchTaskIdRef.current = null;
+      return;
+    }
+    const tid = selectedTask.id;
+    if (lastChatFetchTaskIdRef.current !== tid) {
+      lastChatFetchTaskIdRef.current = tid;
+      void fetchChatHistory(tid);
+    }
+    if (lastAssetsFetchTaskIdRef.current !== tid) {
+      lastAssetsFetchTaskIdRef.current = tid;
+      void fetchAgentAssets(tid);
+    }
+  }, [selectedTask?.id]);
+
+  useEffect(() => {
+    if (currentView === 'chat' && !selectedTask) {
+      void fetchChatHistory(null);
+    }
+  }, [currentView, selectedTask?.id]);
 
   // Check if native system audio (Tauri) is available + permissions
   useEffect(() => {
@@ -1440,6 +1494,8 @@ export default function App() {
       if (uid) await loadUserLedgerState(uid);
 
       const data = await getKnowledgeGraph();
+      if (uid) await cacheSet(`kg:${uid}`, data ?? []);
+
       if (data && data.length > 0) {
         // Transform DB format to app format
         const transformed = data.map(entry => ({
@@ -1464,13 +1520,6 @@ export default function App() {
       log.error('fetch_knowledge_graph_failed', { error: err instanceof Error ? err : undefined });
     }
   };
-
-  // Load KG on mount
-  useEffect(() => {
-    if (session) {
-      fetchKnowledgeGraph();
-    }
-  }, [session]);
 
   // Auto-sync Knowledge Graph: check if any meetings in history are missing from KG.
   // Uses a ref snapshot of kgData (not a dependency) to avoid re-triggering when
@@ -2513,6 +2562,7 @@ export default function App() {
           ...chatSaveMeta,
         });
       }
+      void persistChatThreadToCache(selectedTask?.id ?? null);
     } catch (err) {
       log.error('chat_error', { error: err instanceof Error ? err : undefined });
       setChatMessages(prev => {
@@ -2546,6 +2596,7 @@ export default function App() {
           image: imageUrl,
           thread_id: `task:${selectedTask.id}`,
         });
+        void persistChatThreadToCache(selectedTask.id ?? null);
       } else {
         setChatMessages(prev => [
           ...prev.slice(0, -1), 
@@ -2563,9 +2614,23 @@ export default function App() {
     }
   };
 
-  const fetchHistory = async () => {
+  const refreshManualNotesFromCloud = async (opts?: { silent?: boolean }) => {
     try {
-      setIsLoadingHistory(true);
+      if (!opts?.silent) setIsLoadingManualNotes(true);
+      const notes = await getManualNotes();
+      setManualNotesList(notes);
+      const uid = await getUserId().catch(() => null);
+      if (uid) await cacheSet(`notes:${uid}`, notes);
+    } catch (err) {
+      log.error('fetch_manual_notes_failed', { error: err instanceof Error ? err : undefined });
+    } finally {
+      if (!opts?.silent) setIsLoadingManualNotes(false);
+    }
+  };
+
+  const fetchHistory = async (skipBlockingSpinner = false) => {
+    try {
+      if (!skipBlockingSpinner) setIsLoadingHistory(true);
       const uid = await getUserId().catch(() => null);
       if (uid) await loadUserLedgerState(uid);
 
@@ -2574,6 +2639,15 @@ export default function App() {
       setHasMoreHistory(result.hasMore);
       setTotalHistoryCount(result.total);
       historyPageRef.current = 0;
+
+      if (uid) {
+        await cacheSet(`tasks:${uid}`, {
+          list: result.data as TaskHistory[],
+          hasMore: result.hasMore,
+          total: result.total,
+          pageLoaded: 0,
+        });
+      }
 
       // Turbopuffer backfill uses lightweight ID list + lazy transcription fetch
       deferredBackfill().catch(err => log.warn('turbopuffer_backfill_error', { error: err instanceof Error ? err : undefined }));
@@ -2587,8 +2661,20 @@ export default function App() {
   const loadMoreHistory = async () => {
     const nextPage = historyPageRef.current + 1;
     try {
+      const uid = await getUserId().catch(() => null);
       const result = await getTasksLightweight(nextPage, HISTORY_PAGE_SIZE);
-      setHistory(prev => [...prev, ...(result.data as TaskHistory[])]);
+      setHistory(prev => {
+        const merged = [...prev, ...(result.data as TaskHistory[])];
+        if (uid) {
+          void cacheSet(`tasks:${uid}`, {
+            list: merged,
+            hasMore: result.hasMore,
+            total: result.total,
+            pageLoaded: nextPage,
+          });
+        }
+        return merged;
+      });
       setHasMoreHistory(result.hasMore);
       setTotalHistoryCount(result.total);
       historyPageRef.current = nextPage;
@@ -2619,15 +2705,95 @@ export default function App() {
 
   // Handler to update a task in history (e.g., when title is regenerated)
   const handleTaskUpdated = (updatedTask: TaskHistory) => {
-    // Update history array - merge with existing data to preserve all fields
-    setHistory(prev => prev.map(task => 
-      task.id === updatedTask.id ? { ...task, ...updatedTask } : task
-    ));
-    // Update selectedTask if it's the same task - merge to preserve all fields
+    setHistory(prev => {
+      const next = prev.map(task =>
+        task.id === updatedTask.id ? { ...task, ...updatedTask } : task
+      );
+      void getUserId().then(async uid => {
+        if (!uid || !updatedTask.id) return;
+        const merged = next.find(t => t.id === updatedTask.id);
+        if (merged?.id) await cacheSet(`task:${merged.id}`, merged);
+        const payload = await cacheGet<CachedHistoryPayload>(`tasks:${uid}`);
+        if (payload) {
+          await cacheSet(`tasks:${uid}`, {
+            ...payload,
+            list: next,
+          });
+        }
+      });
+      return next;
+    });
     if (selectedTask?.id === updatedTask.id) {
       setSelectedTask(prev => prev ? { ...prev, ...updatedTask } : updatedTask);
     }
   };
+
+  const handleDeleteManualNote = async (id: string) => {
+    await deleteManualNote(id);
+    setManualNotesList(prev => {
+      const next = prev.filter(n => n.id !== id);
+      void getUserId().then(uid => {
+        if (uid) void cacheSet(`notes:${uid}`, next);
+      });
+      return next;
+    });
+  };
+
+  useEffect(() => {
+    const uid = session?.user?.id;
+    if (!uid) return;
+    let cancelled = false;
+
+    const run = async () => {
+      const userId = await getUserId().catch(() => null);
+      if (!userId || userId !== uid || cancelled) return;
+
+      let hadTaskCache = false;
+      const cachedHist = await cacheGet<CachedHistoryPayload>(`tasks:${userId}`);
+      if (cachedHist?.list?.length && !cancelled) {
+        hadTaskCache = true;
+        setHistory(cachedHist.list);
+        setHasMoreHistory(!!cachedHist.hasMore);
+        setTotalHistoryCount(cachedHist.total ?? cachedHist.list.length);
+        historyPageRef.current = cachedHist.pageLoaded ?? 0;
+        setIsLoadingHistory(false);
+      }
+
+      const cachedKg = await cacheGet<KnowledgeGraphEntry[]>(`kg:${userId}`);
+      if (cachedKg?.length && !cancelled) {
+        const transformed = cachedKg.map(entry => ({
+          meetingId: entry.task_id,
+          meetingTitle: entry.meeting_title,
+          meetingDate: entry.created_at,
+          topics: entry.topics || [],
+          decisions: entry.decisions || [],
+          people: entry.people || [],
+          actionItems: entry.action_items || [],
+          references: entry.refs || []
+        }));
+        setKgData(transformed);
+        setKgBuilt(true);
+        const supabaseIds = new Set(cachedKg.map(e => e.task_id));
+        markKGExtractedBatch(Array.from(supabaseIds));
+        reconcileKGLedger(supabaseIds);
+      }
+
+      const cachedNotes = await cacheGet<ManualNote[]>(`notes:${userId}`);
+      if (cachedNotes !== null && !cancelled) {
+        setManualNotesList(cachedNotes);
+        setIsLoadingManualNotes(false);
+      }
+
+      await Promise.all([
+        fetchHistory(hadTaskCache),
+        fetchKnowledgeGraph(),
+        refreshManualNotesFromCloud({ silent: cachedNotes !== null }),
+      ]);
+    };
+
+    void run();
+    return () => { cancelled = true; };
+  }, [session?.user?.id]);
 
   const handleFileChange = (e: React.ChangeEvent<HTMLInputElement>) => {
     const selectedFile = e.target.files?.[0];
@@ -3359,6 +3525,9 @@ export default function App() {
                   setCurrentView('notes', task.id);
                 }}
                 onTaskUpdated={handleTaskUpdated}
+                onLoadMore={loadMoreHistory}
+                hasMoreFromServer={hasMoreHistory}
+                totalCount={totalHistoryCount}
               />
             )}
 
@@ -3391,13 +3560,10 @@ export default function App() {
                 history={history}
                 onSelectTask={(task) => {
                   if (task) {
-                    // Resolve from canonical history type to avoid cross-component type drift.
                     const resolvedTask = history.find(h => h.id === task.id) ?? (task as TaskHistory);
                     setSelectedTask(resolvedTask);
-                    fetchChatHistory(resolvedTask.id!);
                   } else {
                     setSelectedTask(null);
-                    fetchChatHistory(null);
                   }
                 }}
                 chatMessages={chatMessages}
@@ -3431,17 +3597,29 @@ export default function App() {
                 {activeNote !== undefined && activeNote !== null ? (
                   <ManualNoteEditor
                     note={activeNote}
-                    onSave={(saved) => setActiveNote(saved)}
-                    onBack={() => {
-                      setActiveNote(null);
-                      setNotebookRefreshKey(k => k + 1);
+                    onSave={(saved) => {
+                      setActiveNote(saved);
+                      setManualNotesList(prev => {
+                        const idx = prev.findIndex(n => n.id === saved.id);
+                        const next =
+                          idx >= 0
+                            ? prev.map((n, i) => (i === idx ? saved : n))
+                            : [...prev, saved];
+                        void getUserId().then(uid => {
+                          if (uid) void cacheSet(`notes:${uid}`, next);
+                        });
+                        return next;
+                      });
                     }}
+                    onBack={() => setActiveNote(null)}
                   />
                 ) : (
                   <ManualNotesList
-                    key={notebookRefreshKey}
+                    notes={manualNotesList}
+                    isLoading={isLoadingManualNotes}
                     onSelectNote={(note) => setActiveNote(note)}
                     onCreateNote={() => setActiveNote({ title: 'Untitled', content: '' })}
+                    onDeleteNote={handleDeleteManualNote}
                   />
                 )}
               </motion.div>
