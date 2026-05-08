@@ -7,7 +7,7 @@ import {
   FileText, Plus, Search, MoreHorizontal, 
   Trash2, Loader2, Calendar
 } from 'lucide-react';
-import { ManualNote, getManualNotes, deleteManualNote } from '../../services/supabaseService';
+import { ManualNote, getManualNotes, deleteManualNote } from '../../services/awsService';
 
 interface ManualNotesListProps {
   onSelectNote: (note: ManualNote) => void;

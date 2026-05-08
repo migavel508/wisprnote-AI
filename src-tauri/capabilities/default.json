@@ -14,7 +14,11 @@
       "identifier": "http:default",
       "allow": [
         { "url": "https://*.turbopuffer.com/**" },
-        { "url": "https://*.supabase.co/**" }
+        { "url": "https://*.supabase.co/**" },
+        { "url": "https://*.execute-api.*.amazonaws.com/**" },
+        { "url": "https://*.amazoncognito.com/**" },
+        { "url": "https://*.s3.*.amazonaws.com/**" },
+        { "url": "https://*.auth.*.amazoncognito.com/**" }
       ]
     }
   ]

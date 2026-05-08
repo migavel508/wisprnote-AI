@@ -1,5 +1,11 @@
 import React, { useEffect, useState } from 'react';
-import { supabase } from '../services/supabaseService';
+import {
+  signUp,
+  signIn,
+  confirmSignUp,
+  getGoogleOAuthUrl,
+  exchangeCodeForSession,
+} from '../services/awsAuthService';
 import { motion, AnimatePresence } from 'motion/react';
 import { Mail, Lock, Loader2, ArrowRight, AlertCircle, CheckCircle2 } from 'lucide-react';
 
@@ -13,9 +19,11 @@ export default function Auth() {
   const [email, setEmail] = useState('');
   const [password, setPassword] = useState('');
   const [isSignUp, setIsSignUp] = useState(false);
+  const [needsConfirmation, setNeedsConfirmation] = useState(false);
+  const [confirmationCode, setConfirmationCode] = useState('');
   const [error, setError] = useState<string | null>(null);
   const [message, setMessage] = useState<string | null>(null);
-  const [focusedField, setFocusedField] = useState<'email' | 'password' | null>(null);
+  const [focusedField, setFocusedField] = useState<'email' | 'password' | 'code' | null>(null);
   const desktopOAuthRedirect = 'wisprnote://auth-callback/';
 
   useEffect(() => {
@@ -37,8 +45,7 @@ export default function Auth() {
 
         if (!code) return;
         setLoading(true);
-        const { error } = await supabase.auth.exchangeCodeForSession(code);
-        if (error) throw error;
+        await exchangeCodeForSession(code, desktopOAuthRedirect);
         setMessage(null);
       } catch (e: any) {
         setError(e?.message || 'Google sign-in callback failed');
@@ -73,36 +80,33 @@ export default function Auth() {
     try {
       if (isTauri) {
         const { open } = await import('@tauri-apps/plugin-shell');
-        const { data, error } = await supabase.auth.signInWithOAuth({
-          provider: 'google',
-          options: {
-            redirectTo: desktopOAuthRedirect,
-            skipBrowserRedirect: true,
-            queryParams: {
-              prompt: 'select_account',
-            },
-          },
-        });
-        if (error) throw error;
-        if (!data?.url) throw new Error('OAuth URL not returned');
-
-        await open(data.url);
+        const oauthUrl = getGoogleOAuthUrl(desktopOAuthRedirect);
+        await open(oauthUrl);
         setMessage('Google sign-in opened in your browser. After selecting account, you will be returned to the app automatically.');
         return;
       }
 
-      const { error } = await supabase.auth.signInWithOAuth({
-        provider: 'google',
-        options: {
-          redirectTo: window.location.origin,
-          queryParams: {
-            prompt: 'select_account',
-          },
-        },
-      });
-      if (error) throw error;
+      const oauthUrl = getGoogleOAuthUrl(window.location.origin);
+      window.location.href = oauthUrl;
     } catch (err: any) {
       setError(err.message || 'Unable to continue with Google');
+    } finally {
+      setLoading(false);
+    }
+  };
+
+  const handleConfirmation = async (e: React.FormEvent) => {
+    e.preventDefault();
+    setLoading(true);
+    setError(null);
+
+    try {
+      await confirmSignUp(email, confirmationCode);
+      setMessage('Email confirmed! Signing you in...');
+      setNeedsConfirmation(false);
+      await signIn(email, password);
+    } catch (err: any) {
+      setError(err.message || 'Confirmation failed');
     } finally {
       setLoading(false);
     }
@@ -116,18 +120,13 @@ export default function Auth() {
 
     try {
       if (isSignUp) {
-        const { error } = await supabase.auth.signUp({
-          email,
-          password,
-        });
-        if (error) throw error;
-        setMessage('Check your email for the confirmation link!');
+        const result = await signUp(email, password);
+        if (result.confirmationRequired) {
+          setNeedsConfirmation(true);
+          setMessage('Check your email for the verification code!');
+        }
       } else {
-        const { error } = await supabase.auth.signInWithPassword({
-          email,
-          password,
-        });
-        if (error) throw error;
+        await signIn(email, password);
       }
     } catch (err: any) {
       setError(err.message || 'An error occurred during authentication');
@@ -135,6 +134,86 @@ export default function Auth() {
       setLoading(false);
     }
   };
+
+  if (needsConfirmation) {
+    return (
+      <div className="min-h-screen bg-app-canvas text-app-fg flex items-center justify-center p-6 font-[system-ui]">
+        <motion.div
+          initial={{ opacity: 0, y: 16 }}
+          animate={{ opacity: 1, y: 0 }}
+          transition={{ duration: 0.6, ease: [0.22, 1, 0.36, 1] }}
+          className="w-full max-w-[400px]"
+        >
+          <div className="text-center mb-10">
+            <div className="inline-flex items-center justify-center w-12 h-12 rounded-2xl bg-app-panel shadow-[0_2px_16px_rgba(0,0,0,0.06)] dark:shadow-[0_2px_16px_rgba(0,0,0,0.35)] border border-app-card-border mb-5">
+              <img src="/logo.png" alt="Logo" className="w-7 h-7 rounded-lg object-cover" />
+            </div>
+            <h1 className="text-[32px] font-serif italic text-app-fg/25 dark:text-app-fg/40 leading-tight mb-2">
+              Verify Email
+            </h1>
+            <p className="text-[13px] text-app-fg/35 dark:text-app-fg/45">
+              Enter the code sent to {email}
+            </p>
+          </div>
+
+          <motion.div className="bg-app-panel rounded-2xl shadow-[0_2px_24px_rgba(0,0,0,0.06)] dark:shadow-[0_2px_24px_rgba(0,0,0,0.4)] border border-app-card-border p-7">
+            <form onSubmit={handleConfirmation} className="space-y-5">
+              <AnimatePresence>
+                {error && (
+                  <motion.div initial={{ opacity: 0, height: 0 }} animate={{ opacity: 1, height: 'auto' }} exit={{ opacity: 0, height: 0 }} className="overflow-hidden">
+                    <div className="bg-red-50/80 dark:bg-red-950/30 border border-red-200/50 dark:border-red-900/50 rounded-xl px-4 py-3 flex items-start gap-2.5">
+                      <AlertCircle className="w-4 h-4 text-red-400 mt-0.5 flex-shrink-0" />
+                      <p className="text-[12px] text-red-600 dark:text-red-400/90 leading-relaxed">{error}</p>
+                    </div>
+                  </motion.div>
+                )}
+              </AnimatePresence>
+
+              <AnimatePresence>
+                {message && (
+                  <motion.div initial={{ opacity: 0, height: 0 }} animate={{ opacity: 1, height: 'auto' }} exit={{ opacity: 0, height: 0 }} className="overflow-hidden">
+                    <div className="bg-green-50/80 dark:bg-emerald-950/25 border border-green-200/50 dark:border-emerald-900/40 rounded-xl px-4 py-3 flex items-start gap-2.5">
+                      <CheckCircle2 className="w-4 h-4 text-green-600 dark:text-emerald-400 mt-0.5 flex-shrink-0" />
+                      <p className="text-[12px] text-green-700 dark:text-emerald-400/90 leading-relaxed">{message}</p>
+                    </div>
+                  </motion.div>
+                )}
+              </AnimatePresence>
+
+              <div>
+                <label className="text-[11px] font-medium text-app-fg-muted ml-0.5 mb-1.5 block">Verification Code</label>
+                <div className={`relative rounded-xl border transition-all duration-200 ${
+                  focusedField === 'code'
+                    ? 'border-zinc-400 dark:border-zinc-500 shadow-[0_0_0_3px_rgba(26,26,26,0.04)] dark:shadow-[0_0_0_3px_rgba(255,255,255,0.06)]'
+                    : 'border-zinc-200/90 dark:border-zinc-600/80 hover:border-zinc-300 dark:hover:border-zinc-500'
+                }`}>
+                  <input
+                    type="text"
+                    required
+                    value={confirmationCode}
+                    onChange={(e) => setConfirmationCode(e.target.value)}
+                    onFocus={() => setFocusedField('code')}
+                    onBlur={() => setFocusedField(null)}
+                    className="w-full bg-transparent rounded-xl py-3 px-4 text-[14px] text-app-fg placeholder:text-app-fg-subtle focus:outline-none text-center tracking-widest"
+                    placeholder="000000"
+                    maxLength={6}
+                  />
+                </div>
+              </div>
+
+              <button
+                type="submit"
+                disabled={loading}
+                className="w-full bg-zinc-900 text-white dark:bg-zinc-100 dark:text-zinc-900 py-3 rounded-xl text-[13px] font-semibold hover:bg-zinc-800 dark:hover:bg-zinc-200 active:scale-[0.98] transition-all flex items-center justify-center gap-2 shadow-sm disabled:opacity-50"
+              >
+                {loading ? <Loader2 className="w-4 h-4 animate-spin" /> : <>Verify & Sign In<ArrowRight className="w-3.5 h-3.5" /></>}
+              </button>
+            </form>
+          </motion.div>
+        </motion.div>
+      </div>
+    );
+  }
 
   return (
     <div className="min-h-screen bg-app-canvas text-app-fg flex items-center justify-center p-6 font-[system-ui]">
@@ -144,7 +223,6 @@ export default function Auth() {
         transition={{ duration: 0.6, ease: [0.22, 1, 0.36, 1] }}
         className="w-full max-w-[400px]"
       >
-        {/* Logo + Title */}
         <motion.div 
           initial={{ opacity: 0, y: 8 }}
           animate={{ opacity: 1, y: 0 }}
@@ -162,7 +240,6 @@ export default function Auth() {
           </p>
         </motion.div>
 
-        {/* Card */}
         <motion.div 
           initial={{ opacity: 0, y: 12 }}
           animate={{ opacity: 1, y: 0 }}
@@ -170,7 +247,6 @@ export default function Auth() {
           className="bg-app-panel rounded-2xl shadow-[0_2px_24px_rgba(0,0,0,0.06)] dark:shadow-[0_2px_24px_rgba(0,0,0,0.4)] border border-app-card-border p-7"
         >
           <form onSubmit={handleAuth} className="space-y-5">
-            {/* Error */}
             <AnimatePresence>
               {error && (
                 <motion.div 
@@ -187,7 +263,6 @@ export default function Auth() {
               )}
             </AnimatePresence>
 
-            {/* Success */}
             <AnimatePresence>
               {message && (
                 <motion.div 
@@ -205,7 +280,6 @@ export default function Auth() {
             </AnimatePresence>
 
             <div className="space-y-3.5">
-              {/* Email */}
               <div>
                 <label className="text-[11px] font-medium text-app-fg-muted ml-0.5 mb-1.5 block">
                   Email
@@ -229,7 +303,6 @@ export default function Auth() {
                 </div>
               </div>
 
-              {/* Password */}
               <div>
                 <label className="text-[11px] font-medium text-app-fg-muted ml-0.5 mb-1.5 block">
                   Password
@@ -254,7 +327,6 @@ export default function Auth() {
               </div>
             </div>
 
-            {/* Google OAuth */}
             <button
               type="button"
               onClick={handleGoogleAuth}
@@ -276,7 +348,6 @@ export default function Auth() {
               </div>
             </div>
 
-            {/* Submit */}
             <button 
               type="submit"
               disabled={loading}
@@ -293,7 +364,6 @@ export default function Auth() {
             </button>
           </form>
 
-          {/* Toggle */}
           <div className="mt-6 pt-5 border-t border-app-card-border text-center">
             <button 
               onClick={() => { setIsSignUp(!isSignUp); setError(null); setMessage(null); }}
@@ -308,7 +378,6 @@ export default function Auth() {
           </div>
         </motion.div>
 
-        {/* Footer */}
         <motion.div 
           initial={{ opacity: 0 }}
           animate={{ opacity: 1 }}

@@ -6,7 +6,7 @@ import {
   markTurbopufferIndexed,
   isTurbopufferIndexed,
   clearTurbopufferLedgerState,
-} from './userLedgerService';
+} from './awsLedgerService';
 
 const log = logger.scope('Turbopuffer');
 

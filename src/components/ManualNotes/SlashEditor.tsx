@@ -19,7 +19,7 @@ import {
   Loader2, CheckSquare, Bold, Italic, UnderlineIcon, Highlighter,
   Link as LinkIcon, Strikethrough, AlignLeft, AlignCenter, AlignRight,
 } from 'lucide-react';
-import { uploadNoteImage } from '../../services/supabaseService';
+import { uploadNoteImage } from '../../services/awsService';
 
 // ─── Helpers ──────────────────────────────────────────────────────────────────
 

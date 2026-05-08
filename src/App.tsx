@@ -69,7 +69,6 @@ import {
 } from './services/chatRetrievalService';
 import { indexMeetingTranscription, backfillExistingMeetings } from './services/turbopufferService';
 import { 
-  supabase, 
   saveTask, 
   queuePendingTask,
   flushPendingTasks,
@@ -90,8 +89,8 @@ import {
   ManualNote,
   updateTaskSummary,
   updateTaskNotes,
-} from './services/supabaseService';
-import { Session } from '@supabase/supabase-js';
+} from './services/awsService';
+import { getSession, onAuthStateChange, signOut, getUserId, type AuthSession } from './services/awsAuthService';
 import { splitAudio, AudioBatch, shouldUseFileAPI, FILE_API_THRESHOLD_MB, BlobReadError } from './services/audioService';
 import { 
   progressStorage, 
@@ -133,7 +132,7 @@ import { logger } from './lib/logger';
 import { readKGLedger, markKGExtracted, markKGExtractedBatch, clearKGLedger, reconcileKGLedger } from './lib/kgLedger';
 import { clearArtifactCache } from './lib/kgArtifactCache';
 import { clearAllEmbedCaches } from './lib/knowledgeGraph.utils';
-import { loadUserLedgerState, resetUserLedgers } from './services/userLedgerService';
+import { loadUserLedgerState, resetUserLedgers } from './services/awsLedgerService';
 
 const log = logger.scope('App');
 
@@ -282,7 +281,7 @@ export default function App() {
     }
   };
 
-  const [session, setSession] = useState<Session | null>(null);
+  const [session, setSession] = useState<AuthSession | null>(null);
   const [file, setFile] = useState<File | null>(null);
   const [prompt, setPrompt] = useState('');
   const [status, setStatus] = useState<Status>('idle');
@@ -505,27 +504,24 @@ export default function App() {
   }, []);
 
   useEffect(() => {
-    supabase.auth.getSession().then(({ data: { session } }) => {
-      setSession(session);
-      prevUserIdRef.current = session?.user?.id ?? null;
+    getSession().then((authSession) => {
+      setSession(authSession);
+      prevUserIdRef.current = authSession?.user?.id ?? null;
     });
 
-    const {
-      data: { subscription },
-    } = supabase.auth.onAuthStateChange((_event, session) => {
-      const newUserId = session?.user?.id ?? null;
+    const { unsubscribe } = onAuthStateChange((_event, authSession) => {
+      const newUserId = authSession?.user?.id ?? null;
       const prevUserId = prevUserIdRef.current;
 
-      // Clear state on sign-out OR user switch
       if (!newUserId || (prevUserId && newUserId !== prevUserId)) {
         clearUserState();
       }
 
       prevUserIdRef.current = newUserId;
-      setSession(session);
+      setSession(authSession);
     });
 
-    return () => subscription.unsubscribe();
+    return () => unsubscribe();
   }, [clearUserState]);
 
   // Network status monitoring
@@ -1405,11 +1401,11 @@ export default function App() {
   };
 
 
-  // Load persisted knowledge graph from Supabase
+  // Load persisted knowledge graph
   const fetchKnowledgeGraph = async () => {
     try {
-      const { data: { session: s } } = await supabase.auth.getSession();
-      if (s?.user?.id) await loadUserLedgerState(s.user.id);
+      const uid = await getUserId().catch(() => null);
+      if (uid) await loadUserLedgerState(uid);
 
       const data = await getKnowledgeGraph();
       if (data && data.length > 0) {
@@ -2512,8 +2508,8 @@ export default function App() {
   const fetchHistory = async () => {
     try {
       setIsLoadingHistory(true);
-      const { data: { session: s } } = await supabase.auth.getSession();
-      if (s?.user?.id) await loadUserLedgerState(s.user.id);
+      const uid = await getUserId().catch(() => null);
+      if (uid) await loadUserLedgerState(uid);
 
       const data = await getTasks();
       setHistory(data);
@@ -3211,7 +3207,7 @@ export default function App() {
           isOpen={isSidebarOpen}
           onToggle={() => setIsSidebarOpen(!isSidebarOpen)}
           session={session}
-          onSignOut={() => { clearUserState(); supabase.auth.signOut(); }}
+          onSignOut={() => { clearUserState(); signOut(); }}
           status={status}
         />
       </div>

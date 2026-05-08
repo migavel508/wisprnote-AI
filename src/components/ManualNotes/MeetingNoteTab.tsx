@@ -3,7 +3,7 @@ import { Loader2, Check } from 'lucide-react';
 import { logger } from '../../lib/logger';
 
 const log = logger.scope('MeetingNoteTab');
-import { updatePersonalNote } from '../../services/supabaseService';
+import { updatePersonalNote } from '../../services/awsService';
 import { SlashEditor } from './SlashEditor';
 
 interface MeetingNoteTabProps {

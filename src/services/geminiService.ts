@@ -348,11 +348,10 @@ export async function processAudioBatch(batch: AudioBatch, prompt: string): Prom
   // ─── Fetch User Identity ──────────────────────────────────────────────────
   let userName = "the user";
   try {
-    const { supabase } = await import('./supabaseService');
-    const { data: { session } } = await supabase.auth.getSession();
+    const { getSession } = await import('./awsAuthService');
+    const session = await getSession();
     if (session?.user) {
-      // Use user metadata name if available, else fallback to email prefix
-      const name = session.user.user_metadata?.full_name || session.user.user_metadata?.name;
+      const name = session.user.name;
       const emailName = session.user.email?.split('@')[0];
       if (name || emailName) {
         userName = name || emailName || "the user";
@@ -550,10 +549,10 @@ export async function transcribeViaFileAPI(
   // ─── Fetch User Identity ──────────────────────────────────────────────────
   let userName = "the user";
   try {
-    const { supabase } = await import('./supabaseService');
-    const { data: { session } } = await supabase.auth.getSession();
+    const { getSession } = await import('./awsAuthService');
+    const session = await getSession();
     if (session?.user) {
-      const name = session.user.user_metadata?.full_name || session.user.user_metadata?.name;
+      const name = session.user.name;
       const emailName = session.user.email?.split('@')[0];
       if (name || emailName) {
         userName = name || emailName || "the user";

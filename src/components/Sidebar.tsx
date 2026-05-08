@@ -1,7 +1,7 @@
 import { useState, useEffect } from 'react';
 import { motion } from 'framer-motion';
 import { FileAudio, Plus, ChevronLeft, ChevronRight, MessageSquare } from 'lucide-react';
-import { TaskHistory } from '../services/supabaseService';
+import { TaskHistory } from '../services/awsService';
 
 interface SidebarProps {
   history: TaskHistory[];

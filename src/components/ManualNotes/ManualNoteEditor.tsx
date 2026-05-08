@@ -3,7 +3,7 @@ import { ChevronLeft, Loader2, Check } from 'lucide-react';
 import { logger } from '../../lib/logger';
 
 const log = logger.scope('ManualNoteEditor');
-import { ManualNote, saveManualNote } from '../../services/supabaseService';
+import { ManualNote, saveManualNote } from '../../services/awsService';
 import { SlashEditor } from './SlashEditor';
 
 interface ManualNoteEditorProps {

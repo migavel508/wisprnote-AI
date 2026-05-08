@@ -17,8 +17,8 @@ import {
   Moon,
   Monitor,
 } from 'lucide-react';
-import { Session } from '@supabase/supabase-js';
-import { getPendingTaskCount } from '../services/supabaseService';
+import { AuthSession } from '../services/awsAuthService';
+import { getPendingTaskCount } from '../services/awsService';
 import { useTheme, type ThemePreference } from '../theme/ThemeProvider';
 
 type View = 'process' | 'history' | 'notes' | 'chat' | 'knowledge' | 'notebooks' | 'audio-devices';
@@ -28,7 +28,7 @@ interface MainSidebarProps {
   onViewChange: (view: View) => void;
   isOpen: boolean;
   onToggle: () => void;
-  session: Session | null;
+  session: AuthSession | null;
   onSignOut: () => void;
   status: string;
 }
