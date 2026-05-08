@@ -41,6 +41,7 @@
     "@tiptap/suggestion": "^3.21.0",
     "@turbopuffer/turbopuffer": "^1.22.0",
     "@vitejs/plugin-react": "^5.0.4",
+    "amazon-cognito-identity-js": "^6.3.16",
     "better-sqlite3": "^12.4.1",
     "docx": "^9.6.0",
     "dotenv": "^17.2.3",

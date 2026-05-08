@@ -15,7 +15,7 @@
 
 import type { KGBuildArtifact, ExtractedRelationship } from './knowledgeGraph.utils';
 import { logger } from './logger';
-import { loadKgArtifactFromSupabase, saveKgArtifactToSupabase, clearKgArtifactInSupabase } from '../services/userLedgerService';
+import { loadKgArtifactFromSupabase, saveKgArtifactToSupabase, clearKgArtifactInSupabase } from '../services/awsLedgerService';
 
 const log = logger.scope('KGArtifactCache');
 

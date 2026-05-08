@@ -4,7 +4,7 @@ import { logger } from '../lib/logger';
 const log = logger.scope('HistoryPage');
 import { motion, AnimatePresence } from 'framer-motion';
 import { FileText, Search, ChevronRight, X, Loader2, Sparkles, Calendar, Clock } from 'lucide-react';
-import { TaskHistory, TaskMetadata, getTasksLightweight, getTaskById, updateTaskTitle } from '../services/supabaseService';
+import { TaskHistory, TaskMetadata, getTasksLightweight, getTaskById, updateTaskTitle } from '../services/awsService';
 import { generateMeetingTitle } from '../services/geminiService';
 import { MeetingGridSkeleton } from '../components/Skeleton';
 

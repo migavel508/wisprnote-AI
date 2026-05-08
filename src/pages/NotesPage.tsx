@@ -6,7 +6,7 @@ import { motion, AnimatePresence } from 'framer-motion';
 import { BookOpen, Sparkles, Loader2, Check, RefreshCw, Image as ImageIcon, Share2 } from 'lucide-react';
 import Markdown from 'react-markdown';
 import remarkGfm from 'remark-gfm';
-import { TaskHistory, updateTaskTitle, updateTaskSummary, updateTaskNotes, updateTaskVisualization } from '../services/supabaseService';
+import { TaskHistory, updateTaskTitle, updateTaskSummary, updateTaskNotes, updateTaskVisualization } from '../services/awsService';
 import { generateMeetingTitle, generateSummary, generateNotes, generateNotesVisualization } from '../services/geminiService';
 import { NotesPageSkeleton } from '../components/Skeleton';
 import { MeetingNoteTab } from '../components/ManualNotes/MeetingNoteTab';

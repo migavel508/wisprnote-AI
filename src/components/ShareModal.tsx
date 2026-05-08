@@ -8,7 +8,7 @@ import {
   reactivateShare, addShareEmails, removeShareEmail, getShareEmails,
   copyShareUrl, getShareUrl,
   type SharedMeeting, type SharedMeetingAccess,
-} from '../services/shareService';
+} from '../services/awsShareService';
 
 interface ShareModalProps {
   taskId: string;

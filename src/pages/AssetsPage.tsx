@@ -8,7 +8,7 @@ import {
   Sparkles,
   File as FileIcon
 } from 'lucide-react';
-import { TaskHistory, GeneratedAsset } from '../services/supabaseService';
+import { TaskHistory, GeneratedAsset } from '../services/awsService';
 import { AssetsPageSkeleton } from '../components/Skeleton';
 
 interface AssetsPageProps {

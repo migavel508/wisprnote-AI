@@ -6,8 +6,8 @@ import {
 } from 'lucide-react';
 import Markdown from 'react-markdown';
 import remarkGfm from 'remark-gfm';
-import { verifyShareAccess, type SharedMeetingData, type SharedMeeting } from '../services/shareService';
-import { supabase } from '../services/supabaseService';
+import { verifyShareAccess, type SharedMeetingData, type SharedMeeting } from '../services/awsShareService';
+import { getSession, signIn } from '../services/awsAuthService';
 import {
   sendSharedChatMessage, getSharedChatHistory, getRemainingMessages,
   type SharedChatMessage,
@@ -51,7 +51,7 @@ export default function SharedMeetingPage() {
   async function verifyAccess() {
     setState({ status: 'loading' });
     try {
-      const { data: { session } } = await supabase.auth.getSession();
+      const session = await getSession();
       const viewerEmail = session?.user?.email ?? null;
 
       const result = await verifyShareAccess(shareToken, viewerEmail);
@@ -78,12 +78,9 @@ export default function SharedMeetingPage() {
     setSignInLoading(true);
     setSignInError('');
     try {
-      const { error } = await supabase.auth.signInWithPassword({
-        email: signInEmail,
-        password: signInPassword,
-      });
-      if (error) {
-        setSignInError(error.message);
+      const result = await signIn(signInEmail, signInPassword);
+      if ('error' in result) {
+        setSignInError(result.error);
         return;
       }
       await verifyAccess();
