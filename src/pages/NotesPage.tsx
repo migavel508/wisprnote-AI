@@ -16,6 +16,7 @@ interface NotesPageProps {
   selectedTask: TaskHistory | null;
   onNavigateToAssets?: () => void;
   isLoading?: boolean;
+  isLoadingDetails?: boolean;
   onTaskUpdated?: (task: TaskHistory) => void;
 }
 
@@ -32,8 +33,8 @@ function formatTranscriptionWithBoldSpeakers(text: string): string {
   return text.replace(speakerPattern, (match) => `**${match.trim()}**`);
 }
 
-export default function NotesPage({ selectedTask, onNavigateToAssets, isLoading = false, onTaskUpdated }: NotesPageProps) {
-  const [noteTab, setNoteTab] = useState<NoteTab>('transcription');
+export default function NotesPage({ selectedTask, onNavigateToAssets, isLoading = false, isLoadingDetails = false, onTaskUpdated }: NotesPageProps) {
+  const [noteTab, setNoteTab] = useState<NoteTab>('summary');
   const [isGeneratingTitle, setIsGeneratingTitle] = useState(false);
   const [titleGenerated, setTitleGenerated] = useState(false);
   const [isRegeneratingSummary, setIsRegeneratingSummary] = useState(false);
@@ -54,7 +55,7 @@ export default function NotesPage({ selectedTask, onNavigateToAssets, isLoading 
   }
 
   const handleGenerateTitle = async () => {
-    if (!selectedTask.id || !selectedTask.transcription) return;
+    if (!selectedTask.id || !selectedTask.transcription || isLoadingDetails) return;
     
     setIsGeneratingTitle(true);
     setTitleGenerated(false);
@@ -237,9 +238,16 @@ export default function NotesPage({ selectedTask, onNavigateToAssets, isLoading 
               transition={{ duration: 0.2 }}
             >
               {noteTab === 'transcription' && (
-                <div className="prose prose-sm max-w-none prose-p:text-[14.5px] prose-p:leading-[1.75] prose-p:text-zinc-700 dark:prose-p:text-zinc-300 prose-strong:text-zinc-900 dark:prose-strong:text-zinc-100 prose-headings:text-zinc-900 dark:prose-headings:text-zinc-100 prose-headings:tracking-tight transcription-content markdown-body">
-                  <Markdown remarkPlugins={[remarkGfm]}>{formatTranscriptionWithBoldSpeakers(selectedTask.transcription || '')}</Markdown>
-                </div>
+                isLoadingDetails && !selectedTask.transcription ? (
+                  <div className="flex flex-col items-center justify-center py-16 gap-3">
+                    <Loader2 className="w-5 h-5 animate-spin text-app-fg-subtle" />
+                    <p className="text-[13px] text-app-fg-muted">Loading transcription...</p>
+                  </div>
+                ) : (
+                  <div className="prose prose-sm max-w-none prose-p:text-[14.5px] prose-p:leading-[1.75] prose-p:text-zinc-700 dark:prose-p:text-zinc-300 prose-strong:text-zinc-900 dark:prose-strong:text-zinc-100 prose-headings:text-zinc-900 dark:prose-headings:text-zinc-100 prose-headings:tracking-tight transcription-content markdown-body">
+                    <Markdown remarkPlugins={[remarkGfm]}>{formatTranscriptionWithBoldSpeakers(selectedTask.transcription || '')}</Markdown>
+                  </div>
+                )
               )}
 
               {noteTab === 'summary' && (
