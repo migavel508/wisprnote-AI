@@ -53,7 +53,7 @@ interface Message {
 interface TaskHistory {
   id?: string;
   filename: string;
-  transcription: string;
+  transcription?: string;
   summary?: string;
   notes?: string;
   created_at?: string;

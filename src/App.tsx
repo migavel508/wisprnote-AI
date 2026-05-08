@@ -73,7 +73,10 @@ import {
   queuePendingTask,
   flushPendingTasks,
   getPendingTaskCount,
-  getTasks, 
+  getTasks,
+  getTasksLightweight,
+  getTaskById,
+  getAllTaskIds,
   TaskHistory, 
   saveAsset,
   getAssets,
@@ -336,20 +339,34 @@ export default function App() {
   const [notebookRefreshKey, setNotebookRefreshKey] = useState(0);
 
   const [history, setHistory] = useState<TaskHistory[]>([]);
+  const [hasMoreHistory, setHasMoreHistory] = useState(false);
+  const [totalHistoryCount, setTotalHistoryCount] = useState(0);
+  const historyPageRef = useRef(0);
+  const HISTORY_PAGE_SIZE = 24;
   const [chatMessages, setChatMessages] = useState<Message[]>([]);
   const [allMeetingsChatMessages, setAllMeetingsChatMessages] = useState<Message[]>([]);
   const [selectedTask, setSelectedTask] = useState<TaskHistory | null>(null);
-  const [isLoadingHistory, setIsLoadingHistory] = useState(true); // Start true, set false after first fetch
+  const [isLoadingHistory, setIsLoadingHistory] = useState(true);
   
-  // Extract task ID from URL and load the task
+  // Extract task ID from URL and load the full task on demand
   useEffect(() => {
     const path = location.pathname;
     const match = path.match(/\/(notes|chat)\/([^/]+)/);
     if (match && history.length > 0) {
       const taskId = match[2];
+      if (selectedTask?.id === taskId) return;
       const task = history.find(t => t.id === taskId);
-      if (task && (!selectedTask || selectedTask.id !== taskId)) {
-        setSelectedTask(task);
+      if (task) {
+        if (task.transcription) {
+          setSelectedTask(task);
+        } else {
+          getTaskById(taskId).then(full => {
+            if (full) {
+              setHistory(prev => prev.map(t => t.id === taskId ? { ...t, ...full } : t));
+              setSelectedTask(full);
+            }
+          }).catch(err => log.error('url_task_load_failed', { error: err instanceof Error ? err : undefined }));
+        }
       }
     }
   }, [location.pathname, history]);
@@ -1452,29 +1469,40 @@ export default function App() {
         const ledger = readKGLedger();
         const currentKgData = kgDataRef.current;
         const kgTaskIds = new Set(currentKgData.map(kg => kg.meetingId));
-        // Skip meetings that are either in the KG data OR already in the ledger
-        const missingTasks = history.filter(task =>
+
+        // Use lightweight metadata to find candidates, fetch full list for completeness
+        let allMeta: TaskHistory[];
+        try {
+          const metaResult = await getAllTaskIds();
+          allMeta = metaResult as TaskHistory[];
+        } catch {
+          allMeta = history;
+        }
+
+        const missingMeta = allMeta.filter(task =>
           task.id &&
           !kgTaskIds.has(task.id) &&
           !ledger.has(task.id) &&
-          task.status === 'completed' &&
-          task.transcription &&
-          task.transcription.trim().length > 0
+          task.status === 'completed'
         );
         
-        if (missingTasks.length === 0) return;
+        if (missingMeta.length === 0) return;
         
         autoSyncRanRef.current = true;
-        log.info('kg_auto_sync_started', { missingCount: missingTasks.length, ledgerSize: ledger.size });
+        log.info('kg_auto_sync_started', { missingCount: missingMeta.length, ledgerSize: ledger.size });
         setIsExtractingNewKG(true);
         
         try {
-          for (let i = 0; i < missingTasks.length; i++) {
-            const task = missingTasks[i];
-            log.info('kg_auto_extracting', { filename: task.filename });
+          for (let i = 0; i < missingMeta.length; i++) {
+            const meta = missingMeta[i];
             
             try {
-              const result = await extractKnowledgeGraph(task.id!, task.filename, task.transcription);
+              // Fetch full task with transcription on demand
+              const fullTask = meta.transcription ? meta : await getTaskById(meta.id!);
+              if (!fullTask?.transcription?.trim()) continue;
+
+              log.info('kg_auto_extracting', { filename: fullTask.filename });
+              const result = await extractKnowledgeGraph(fullTask.id!, fullTask.filename, fullTask.transcription!);
               
               const entryToSave: KnowledgeGraphEntry = {
                 task_id: result.meetingId,
@@ -1487,15 +1515,15 @@ export default function App() {
               };
               
               await saveKnowledgeGraphBatch([entryToSave]);
-              markKGExtracted(task.id!);
-              if (!result.meetingDate && task.created_at) result.meetingDate = task.created_at;
+              markKGExtracted(fullTask.id!);
+              if (!result.meetingDate && fullTask.created_at) result.meetingDate = fullTask.created_at;
               setKgData(prevData => [...prevData, result]);
               
-              if (i < missingTasks.length - 1) {
+              if (i < missingMeta.length - 1) {
                 await new Promise(resolve => setTimeout(resolve, 5000));
               }
             } catch (err) {
-              log.error('kg_auto_extract_failed', { filename: task.filename, error: err instanceof Error ? err : undefined });
+              log.error('kg_auto_extract_failed', { filename: meta.filename, error: err instanceof Error ? err : undefined });
             }
           }
         } finally {
@@ -1549,7 +1577,14 @@ export default function App() {
     }
 
     const processedIds = new Set(latestKgData.map((k: any) => k.meetingId));
-    const allCompleted = history.filter(t => t.id && t.status === 'completed');
+    // Use full task list from server for KG build (lightweight metadata is enough to identify candidates)
+    let allCompleted: TaskHistory[];
+    try {
+      const allMeta = await getAllTaskIds();
+      allCompleted = (allMeta as TaskHistory[]).filter(t => t.id && t.status === 'completed');
+    } catch {
+      allCompleted = history.filter(t => t.id && t.status === 'completed');
+    }
 
     // Meetings not yet in the KG go first; already-processed ones are reused as-is
     const toExtract = allCompleted.filter(t => !processedIds.has(t.id!));
@@ -1580,13 +1615,21 @@ export default function App() {
         if (i >= toExtract.length) break;
 
         const task = toExtract[i];
-        const hasTranscription = !!(task.transcription && task.transcription.trim().length > 0);
+        // Fetch full transcription on demand if not already present
+        let transcription = task.transcription;
+        if (!transcription?.trim() && task.id) {
+          try {
+            const fullTask = await getTaskById(task.id);
+            transcription = fullTask?.transcription;
+          } catch { /* proceed without */ }
+        }
+        const hasTranscription = !!(transcription && transcription.trim().length > 0);
 
         let result: any;
         if (hasTranscription) {
-          await rateLimit(); // serialise API slots across all workers
+          await rateLimit();
           try {
-            result = await extractKnowledgeGraph(task.id!, task.filename, task.transcription);
+            result = await extractKnowledgeGraph(task.id!, task.filename, transcription!);
           } catch (err) {
             log.error('kg_extraction_failed', { filename: task.filename, error: err instanceof Error ? err : undefined });
             result = { meetingId: task.id!, meetingTitle: task.filename, meetingDate: task.created_at, topics: [], decisions: [], people: [], actionItems: [], references: [] };
@@ -2511,18 +2554,51 @@ export default function App() {
       const uid = await getUserId().catch(() => null);
       if (uid) await loadUserLedgerState(uid);
 
-      const data = await getTasks();
-      setHistory(data);
+      const result = await getTasksLightweight(0, HISTORY_PAGE_SIZE);
+      setHistory(result.data as TaskHistory[]);
+      setHasMoreHistory(result.hasMore);
+      setTotalHistoryCount(result.total);
+      historyPageRef.current = 0;
 
-      backfillExistingMeetings(
-        data
-          .filter(t => t.id && t.status === 'completed' && t.transcription?.trim())
-          .map(t => ({ id: t.id!, title: t.filename || 'Untitled', transcription: t.transcription! }))
-      ).catch(err => log.warn('turbopuffer_backfill_error', { error: err instanceof Error ? err : undefined }));
+      // Turbopuffer backfill uses lightweight ID list + lazy transcription fetch
+      deferredBackfill().catch(err => log.warn('turbopuffer_backfill_error', { error: err instanceof Error ? err : undefined }));
     } catch (err) {
       log.error('fetch_history_failed', { error: err instanceof Error ? err : undefined });
     } finally {
       setIsLoadingHistory(false);
+    }
+  };
+
+  const loadMoreHistory = async () => {
+    const nextPage = historyPageRef.current + 1;
+    try {
+      const result = await getTasksLightweight(nextPage, HISTORY_PAGE_SIZE);
+      setHistory(prev => [...prev, ...(result.data as TaskHistory[])]);
+      setHasMoreHistory(result.hasMore);
+      setTotalHistoryCount(result.total);
+      historyPageRef.current = nextPage;
+    } catch (err) {
+      log.error('load_more_history_failed', { error: err instanceof Error ? err : undefined });
+    }
+  };
+
+  const deferredBackfill = async () => {
+    try {
+      const allMeta = await getAllTaskIds();
+      const completed = allMeta.filter(t => t.id && t.status === 'completed');
+
+      const toBackfill: { id: string; title: string; transcription: string }[] = [];
+      for (const meta of completed.slice(0, 50)) {
+        const full = await getTaskById(meta.id);
+        if (full?.transcription?.trim()) {
+          toBackfill.push({ id: full.id!, title: full.filename || 'Untitled', transcription: full.transcription });
+        }
+      }
+      if (toBackfill.length > 0) {
+        await backfillExistingMeetings(toBackfill);
+      }
+    } catch (err) {
+      log.warn('deferred_backfill_error', { error: err instanceof Error ? err : undefined });
     }
   };
 
@@ -3286,6 +3362,9 @@ export default function App() {
                     setCurrentView('notes', task.id);
                   }}
                   onTaskUpdated={handleTaskUpdated}
+                  onLoadMore={loadMoreHistory}
+                  hasMoreFromServer={hasMoreHistory}
+                  totalCount={totalHistoryCount}
                 />
               )
             )}
