@@ -20,6 +20,17 @@ interface HistoryPageProps {
 
 // Cache for full task details to avoid re-fetching
 const taskCache = new Map<string, TaskHistory>();
+const prefetchingIds = new Set<string>();
+
+function prefetchTask(taskId: string) {
+  if (taskCache.has(taskId) || prefetchingIds.has(taskId)) return;
+  prefetchingIds.add(taskId);
+  getTaskById(taskId).then(full => {
+    if (full) taskCache.set(taskId, full);
+  }).catch(() => {}).finally(() => {
+    prefetchingIds.delete(taskId);
+  });
+}
 
 // Semantic search function - searches across multiple fields with relevance scoring
 function searchMeetings(meetings: (TaskHistory | TaskMetadata)[], query: string): (TaskHistory | TaskMetadata)[] {
@@ -83,7 +94,6 @@ const PAGE_SIZE = 12; // Number of items to show initially and load more
 
 export default function HistoryPage({ history, onSelectTask, isLoading = false, onTaskUpdated, onLoadMore, hasMoreFromServer = false, totalCount }: HistoryPageProps) {
   const [searchQuery, setSearchQuery] = useState('');
-  const [loadingTaskId, setLoadingTaskId] = useState<string | null>(null);
   const [generatingTitleId, setGeneratingTitleId] = useState<string | null>(null);
   const [visibleCount, setVisibleCount] = useState(PAGE_SIZE);
   const [isLoadingMore, setIsLoadingMore] = useState(false);
@@ -132,10 +142,18 @@ export default function HistoryPage({ history, onSelectTask, isLoading = false, 
   const visibleHistory = useMemo(() => {
     return filteredHistory.slice(0, visibleCount);
   }, [filteredHistory, visibleCount]);
+
+  // Prefetch full data for the first few visible tasks in background
+  useEffect(() => {
+    const toPrefetch = visibleHistory
+      .filter(t => t.id && !t.transcription)
+      .slice(0, 6);
+    toPrefetch.forEach(t => prefetchTask(t.id!));
+  }, [visibleHistory]);
   
+  const hasSearchQuery = searchQuery.trim().length > 0;
   const hasMoreLocal = visibleCount < filteredHistory.length;
   const hasMore = hasMoreLocal || (hasMoreFromServer && !hasSearchQuery);
-  const hasSearchQuery = searchQuery.trim().length > 0;
   
   // Reset visible count when search changes
   useEffect(() => {
@@ -175,35 +193,13 @@ export default function HistoryPage({ history, onSelectTask, isLoading = false, 
     return () => observer.disconnect();
   }, [hasMore, hasMoreLocal, hasMoreFromServer, isLoadingMore, hasSearchQuery, onLoadMore]);
   
-  // Handle task selection - fetch full details if needed
-  const handleSelectTask = useCallback(async (task: TaskHistory) => {
-    // If task already has transcription, use it directly
-    if (task.transcription) {
-      onSelectTask(task);
-      return;
-    }
-    
-    // Check cache first
+  // Navigate immediately -- App.tsx handles fetching full details in background
+  const handleSelectTask = useCallback((task: TaskHistory) => {
     if (task.id && taskCache.has(task.id)) {
       onSelectTask(taskCache.get(task.id)!);
       return;
     }
-    
-    // Fetch full task details
-    if (task.id) {
-      setLoadingTaskId(task.id);
-      try {
-        const fullTask = await getTaskById(task.id);
-        if (fullTask) {
-          taskCache.set(task.id, fullTask);
-          onSelectTask(fullTask);
-        }
-      } catch (error) {
-        log.error('fetch_task_details_failed', { error: error instanceof Error ? error : undefined });
-      } finally {
-        setLoadingTaskId(null);
-      }
-    }
+    onSelectTask(task);
   }, [onSelectTask]);
   
   return (
@@ -296,13 +292,6 @@ export default function HistoryPage({ history, onSelectTask, isLoading = false, 
                   onClick={() => handleSelectTask(task)}
                   className="bg-[#f5f2ef] hover:bg-[#eeebe7] rounded-xl sm:rounded-2xl p-4 sm:p-5 cursor-pointer group relative transition-colors duration-200 border border-[#1a1a1a]/[0.04]"
                 >
-                  {/* Loading overlay */}
-                  {loadingTaskId === task.id && (
-                    <div className="absolute inset-0 bg-app-panel/85 dark:bg-app-panel/90 backdrop-blur-sm rounded-2xl flex items-center justify-center z-10">
-                      <Loader2 className="w-5 h-5 animate-spin text-[#1a1a1a]/40" />
-                    </div>
-                  )}
-
                   <div className="flex justify-between items-start mb-3 sm:mb-4">
                     <div className="w-8 h-8 sm:w-9 sm:h-9 rounded-lg sm:rounded-xl bg-white shadow-[0_1px_4px_rgba(0,0,0,0.06)] flex items-center justify-center">
                       <FileText className="w-3.5 h-3.5 sm:w-4 sm:h-4 text-[#1a1a1a]/50" />

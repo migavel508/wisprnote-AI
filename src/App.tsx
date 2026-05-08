@@ -346,9 +346,10 @@ export default function App() {
   const [chatMessages, setChatMessages] = useState<Message[]>([]);
   const [allMeetingsChatMessages, setAllMeetingsChatMessages] = useState<Message[]>([]);
   const [selectedTask, setSelectedTask] = useState<TaskHistory | null>(null);
+  const [isLoadingTaskDetails, setIsLoadingTaskDetails] = useState(false);
   const [isLoadingHistory, setIsLoadingHistory] = useState(true);
   
-  // Extract task ID from URL and load the full task on demand
+  // Extract task ID from URL and select it immediately (full details load via effect below)
   useEffect(() => {
     const path = location.pathname;
     const match = path.match(/\/(notes|chat)\/([^/]+)/);
@@ -356,20 +357,34 @@ export default function App() {
       const taskId = match[2];
       if (selectedTask?.id === taskId) return;
       const task = history.find(t => t.id === taskId);
-      if (task) {
-        if (task.transcription) {
-          setSelectedTask(task);
-        } else {
-          getTaskById(taskId).then(full => {
-            if (full) {
-              setHistory(prev => prev.map(t => t.id === taskId ? { ...t, ...full } : t));
-              setSelectedTask(full);
-            }
-          }).catch(err => log.error('url_task_load_failed', { error: err instanceof Error ? err : undefined }));
-        }
-      }
+      if (task) setSelectedTask(task);
     }
   }, [location.pathname, history]);
+
+  // Auto-fetch full task details when a lightweight task is selected
+  useEffect(() => {
+    if (!selectedTask?.id || selectedTask.transcription) {
+      setIsLoadingTaskDetails(false);
+      return;
+    }
+
+    let cancelled = false;
+    setIsLoadingTaskDetails(true);
+
+    getTaskById(selectedTask.id).then(full => {
+      if (cancelled || !full) return;
+      // Cache in history array for instant future access
+      setHistory(prev => prev.map(t => t.id === full.id ? { ...t, ...full } : t));
+      setSelectedTask(prev => prev?.id === full.id ? { ...prev, ...full } : prev);
+    }).catch(err => {
+      log.error('fetch_task_details_failed', { error: err instanceof Error ? err : undefined });
+    }).finally(() => {
+      if (!cancelled) setIsLoadingTaskDetails(false);
+    });
+
+    return () => { cancelled = true; };
+  }, [selectedTask?.id]);
+
   const [noteTab, setNoteTab] = useState<NoteTab>('transcription');
   const [isSidebarOpen, setIsSidebarOpen] = useState(true);
   const [chatInput, setChatInput] = useState('');
@@ -1364,7 +1379,7 @@ export default function App() {
 
       if (savedTask && savedTask.id && !savedTask.id.startsWith('pending_')) {
         setIsExtractingNewKG(true);
-        extractKnowledgeGraph(savedTask.id, savedTask.filename, savedTask.transcription)
+        extractKnowledgeGraph(savedTask.id, savedTask.filename, savedTask.transcription!)
           .then(async (result) => {
             if (!result.meetingDate && savedTask.created_at) result.meetingDate = savedTask.created_at;
             const entryToSave: KnowledgeGraphEntry = {
@@ -1387,7 +1402,7 @@ export default function App() {
           .catch(err => log.error('kg_background_extraction_failed', { error: err instanceof Error ? err : undefined }))
           .finally(() => setIsExtractingNewKG(false));
 
-        indexMeetingTranscription(savedTask.id, savedTask.filename, savedTask.transcription)
+        indexMeetingTranscription(savedTask.id, savedTask.filename, savedTask.transcription!)
           .then(() => log.info('turbopuffer_indexing_complete_realtime'))
           .catch(err => log.warn('turbopuffer_indexing_failed', { error: err instanceof Error ? err : undefined }));
       }
@@ -2044,10 +2059,10 @@ export default function App() {
       let filename = '';
       
       if (agentType === 'email') {
-        content = await generateEmailContent(selectedTask.transcription);
+        content = await generateEmailContent(selectedTask.transcription || '');
         filename = `${selectedTask.filename.split('.')[0]}_FollowUp_Email.html`;
       } else {
-        content = await generateWikiContent(selectedTask.transcription, wikiStyle);
+        content = await generateWikiContent(selectedTask.transcription || '', wikiStyle);
         content.style = wikiStyle;
         filename = `${selectedTask.filename.split('.')[0]}_Wiki_${wikiStyle}.docx`;
       }
@@ -3056,7 +3071,7 @@ export default function App() {
 
       if (savedTask && savedTask.id && !savedTask.id.startsWith('pending_')) {
         setIsExtractingNewKG(true);
-        extractKnowledgeGraph(savedTask.id, savedTask.filename, savedTask.transcription)
+        extractKnowledgeGraph(savedTask.id, savedTask.filename, savedTask.transcription!)
           .then(async (result) => {
             const entryToSave: KnowledgeGraphEntry = {
               task_id: result.meetingId,
@@ -3079,7 +3094,7 @@ export default function App() {
           .catch(err => log.error('kg_background_extraction_failed', { error: err instanceof Error ? err : undefined }))
           .finally(() => setIsExtractingNewKG(false));
 
-        indexMeetingTranscription(savedTask.id, savedTask.filename, savedTask.transcription)
+        indexMeetingTranscription(savedTask.id, savedTask.filename, savedTask.transcription!)
           .then(() => log.info('turbopuffer_indexing_complete_upload'))
           .catch(err => log.warn('turbopuffer_indexing_failed', { error: err instanceof Error ? err : undefined }));
       }
@@ -3353,6 +3368,7 @@ export default function App() {
                   selectedTask={selectedTask}
                   onNavigateToAssets={() => {}}
                   onTaskUpdated={handleTaskUpdated}
+                  isLoadingDetails={isLoadingTaskDetails}
                 />
               ) : (
                 <HistoryPage
