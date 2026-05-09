@@ -52,6 +52,7 @@ interface KnowledgePageProps {
   buildKnowledgeGraph: () => void;
   historyLength: number;
   isInitialLoading?: boolean;
+  onReExtractMeeting?: (meetingId: string) => Promise<void>;
 }
 
 export default function KnowledgePage({
@@ -62,7 +63,8 @@ export default function KnowledgePage({
   kgBuilt,
   buildKnowledgeGraph,
   historyLength,
-  isInitialLoading = false
+  isInitialLoading = false,
+  onReExtractMeeting,
 }: KnowledgePageProps) {
   const { resolved: themeResolved } = useTheme();
   const [selectedNode, setSelectedNode] = useState<any>(null);
@@ -90,6 +92,7 @@ export default function KnowledgePage({
   const kgArtifactRef = useRef<KGBuildArtifact | null>(null);
   const [isEmbedding, setIsEmbedding] = useState(false);
   const [embedProgress, setEmbedProgress] = useState({ current: 0, total: 3 });
+  const [isReExtracting, setIsReExtracting] = useState(false);
 
   // Handle container resize
   useEffect(() => {
@@ -350,11 +353,15 @@ export default function KnowledgePage({
               </span>
             </div>
             <div className="text-[10px] text-gray-500 dark:text-zinc-400 truncate flex items-center gap-1.5 flex-wrap">
-              {related.relationships.length > 0 && related.relationships.map((r, rIdx) => (
+              {related.relationships.length > 0 ? related.relationships.map((r, rIdx) => (
                 <span key={rIdx} className={`text-[8px] px-1.5 py-0.5 rounded font-mono ${REL_BADGE_COLORS[r.relationshipType] || 'bg-gray-100 dark:bg-app-chip text-gray-600 dark:text-zinc-300'}`}>
                   {r.relationshipType}
                 </span>
-              ))}
+              )) : (
+                <span className="text-[8px] px-1.5 py-0.5 rounded font-mono bg-indigo-50 dark:bg-indigo-950/50 text-indigo-600 dark:text-indigo-300">
+                  similar content
+                </span>
+              )}
               {related.embeddingScore > 0 && (
                 <span className="flex items-center gap-1 bg-white/60 dark:bg-app-chip/80 px-1.5 py-0.5 rounded text-gray-600 dark:text-zinc-300">
                   sim: {(related.embeddingScore * 100).toFixed(0)}%
@@ -372,8 +379,12 @@ export default function KnowledgePage({
           <div className="p-3 pt-0 border-t border-purple-100 dark:border-purple-900/50 bg-white/40 dark:bg-app-panel/60">
             <div className="pt-3">
               {/* Contextual Relationships */}
-              {related.relationships.length > 0 && (
+              {related.relationships.length > 0 ? (
                 <div className="mb-3 space-y-1.5">
+                  <span className="text-[9px] font-mono uppercase text-purple-700 dark:text-purple-300 block mb-2 flex items-center gap-1">
+                    <Share2 className="w-3 h-3" />
+                    Why Connected:
+                  </span>
                   {related.relationships.map((r, rIdx) => (
                     <div key={rIdx} className="p-2 bg-white/70 dark:bg-app-raised rounded border border-purple-200 dark:border-purple-800/50">
                       <div className="flex items-center gap-2 mb-1">
@@ -382,21 +393,48 @@ export default function KnowledgePage({
                         </span>
                         <span className="text-[8px] text-gray-400 dark:text-zinc-500 font-mono">{r.confidence}</span>
                       </div>
-                      <p className="text-[10px] text-gray-700 dark:text-zinc-200">{r.sharedThread}</p>
+                      <p className="text-[10px] text-gray-700 dark:text-zinc-200">{r.sharedThread || 'Related by shared context'}</p>
                     </div>
                   ))}
+                </div>
+              ) : (
+                <div className="mb-3 p-2 bg-indigo-50/60 dark:bg-indigo-950/40 rounded border border-indigo-100 dark:border-indigo-900/50">
+                  <span className="text-[9px] font-mono uppercase text-indigo-700 dark:text-indigo-300 block mb-1 flex items-center gap-1">
+                    <Share2 className="w-3 h-3" />
+                    Why Connected:
+                  </span>
+                  <p className="text-[10px] text-indigo-800 dark:text-indigo-200">
+                    {(() => {
+                      const currentTopics = (selectedNode?.data?.topics || []).map((t: any) => t.name?.toLowerCase()).filter(Boolean);
+                      const relatedTopics = (relatedMeetingData.topics || []).map((t: any) => t.name?.toLowerCase()).filter(Boolean);
+                      const shared = currentTopics.filter((t: string) => relatedTopics.some((rt: string) => rt.includes(t) || t.includes(rt)));
+                      if (shared.length > 0) {
+                        return `Shares ${shared.length} common topic${shared.length > 1 ? 's' : ''}: ${(relatedMeetingData.topics || []).filter((t: any) => shared.some((s: string) => t.name?.toLowerCase().includes(s) || s.includes(t.name?.toLowerCase()))).map((t: any) => t.name).join(', ')}`;
+                      }
+                      const currentPeople = (selectedNode?.data?.people || []).map((p: string) => p.toLowerCase());
+                      const relatedPeople = (relatedMeetingData.people || []).map((p: string) => p.toLowerCase());
+                      const sharedPeople = currentPeople.filter((p: string) => relatedPeople.includes(p));
+                      if (sharedPeople.length > 0) {
+                        return `${sharedPeople.length} shared participant${sharedPeople.length > 1 ? 's' : ''}: ${(relatedMeetingData.people || []).filter((p: string) => sharedPeople.includes(p.toLowerCase())).join(', ')}`;
+                      }
+                      return `Semantically similar content (${(related.embeddingScore * 100).toFixed(0)}% match)`;
+                    })()}
+                  </p>
                 </div>
               )}
               
               {/* What Was Discussed in That Meeting - All Topics */}
-              {(relatedMeetingData.topics || []).length > 0 && (
+              {(() => {
+                const validRelTopics = (relatedMeetingData.topics || []).filter((t: any) => t?.name?.trim());
+                if (validRelTopics.length === 0) return null;
+                return (
                 <div className="mb-3">
                   <span className="text-[9px] font-mono uppercase text-indigo-700 dark:text-indigo-300 block mb-2 flex items-center gap-1">
                     <MessageSquare className="w-3 h-3" />
                     What Was Discussed:
                   </span>
                   <div className="space-y-1.5">
-                    {(relatedMeetingData.topics || []).map((topic: any, tIdx: number) => (
+                    {validRelTopics.map((topic: any, tIdx: number) => (
                       <div key={tIdx} className="p-2 rounded bg-white/80 dark:bg-app-chip/90">
                         <div className="flex items-start justify-between gap-2 mb-1">
                           <span className="text-[10px] font-semibold text-gray-800 dark:text-app-fg">
@@ -409,12 +447,13 @@ export default function KnowledgePage({
                             topic.status === 'ongoing' ? 'bg-blue-100 text-blue-700' : 'bg-purple-100 text-purple-700'
                           }`}>{topic.status}</span>
                         </div>
-                        <p className="text-[9px] text-gray-600 dark:text-zinc-300 leading-relaxed line-clamp-2 hover:line-clamp-none transition-all">"{topic.summary}"</p>
+                        {topic.summary && <p className="text-[9px] text-gray-600 dark:text-zinc-300 leading-relaxed line-clamp-2 hover:line-clamp-none transition-all">"{topic.summary}"</p>}
                       </div>
                     ))}
                   </div>
                 </div>
-              )}
+                );
+              })()}
               
               {/* Decisions and Actions */}
               <div className="grid grid-cols-1 gap-2 mt-3">
@@ -1220,13 +1259,66 @@ export default function KnowledgePage({
                 
                 {selectedNode.type === 'meeting' && selectedNode.data && (
                   <div className="space-y-4">
-                    {(selectedNode.data.topics || []).length > 0 && (
+                    {/* Show notice when meeting has no extracted data at all */}
+                    {(() => {
+                      const d = selectedNode.data;
+                      const hasValidTopics = (d.topics || []).some((t: any) => t?.name?.trim());
+                      const hasAny = hasValidTopics ||
+                        (d.people || []).length > 0 ||
+                        (d.decisions || []).some((dec: any) => dec?.decision?.trim()) ||
+                        (d.actionItems || []).some((a: any) => a?.task?.trim());
+                      if (hasAny && hasValidTopics) return null;
+                      return (
+                        <div className="p-3 bg-amber-50 dark:bg-amber-950/30 rounded-lg border border-amber-200 dark:border-amber-800/50 text-center">
+                          <p className="text-xs text-amber-800 dark:text-amber-200 font-medium mb-1">
+                            {hasAny ? 'Topics not extracted' : 'No insights extracted'}
+                          </p>
+                          <p className="text-[10px] text-amber-600 dark:text-amber-400 mb-2">
+                            {hasAny
+                              ? 'Topics could not be extracted for this meeting. Click below to retry.'
+                              : 'This meeting may have a very short transcription or the extraction needs to be re-run.'}
+                          </p>
+                          {onReExtractMeeting && (
+                            <button
+                              disabled={isReExtracting}
+                              onClick={async () => {
+                                setIsReExtracting(true);
+                                try {
+                                  await onReExtractMeeting(selectedNode.data.meetingId);
+                                } finally {
+                                  setIsReExtracting(false);
+                                }
+                              }}
+                              className="px-3 py-1.5 bg-amber-600 hover:bg-amber-700 disabled:bg-amber-400 text-white text-[11px] font-medium rounded-lg transition-colors"
+                            >
+                              {isReExtracting ? (
+                                <span className="flex items-center gap-1.5">
+                                  <Loader2 className="w-3 h-3 animate-spin" />
+                                  Re-extracting...
+                                </span>
+                              ) : (
+                                <span className="flex items-center gap-1.5">
+                                  <Sparkles className="w-3 h-3" />
+                                  Re-extract Insights
+                                </span>
+                              )}
+                            </button>
+                          )}
+                        </div>
+                      );
+                    })()}
+                    {(() => {
+                      const validTopics = (selectedNode.data.topics || []).filter(
+                        (t: any) => t && t.name && t.name.trim().length > 0
+                      );
+                      if (validTopics.length === 0) return null;
+                      return (
                       <div>
                         <h4 className="text-[10px] font-mono uppercase text-zinc-500 dark:text-zinc-400 mb-2 flex items-center gap-1">
                           <MessageSquare className="w-3 h-3" /> Topics
                         </h4>
                         <div className="space-y-2">
-                          {selectedNode.data.topics.map((t: any, i: number) => (
+                          {validTopics.map((t: any, i: number) => (
                             <div key={i} className="p-2 bg-zinc-50 dark:bg-app-canvas rounded-lg border border-transparent dark:border-app-border/60">
                               <div className="flex items-center justify-between mb-1">
                                 <span className="text-xs font-semibold text-zinc-900 dark:text-app-fg">{t.name}</span>
@@ -1236,12 +1328,13 @@ export default function KnowledgePage({
                                   t.status === 'ongoing' ? 'bg-blue-100 text-blue-700' : 'bg-purple-100 text-purple-700'
                                 }`}>{t.status}</span>
                               </div>
-                              <p className="text-[11px] text-zinc-600 dark:text-zinc-300">{t.summary}</p>
+                              {t.summary && <p className="text-[11px] text-zinc-600 dark:text-zinc-300">{t.summary}</p>}
                             </div>
                           ))}
                         </div>
                       </div>
-                    )}
+                      );
+                    })()}
                     
                     {(selectedNode.data.people || []).length > 0 && (
                       <div>
