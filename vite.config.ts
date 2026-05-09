@@ -22,6 +22,8 @@ export default defineConfig(({mode}) => {
       'import.meta.env.VITE_COGNITO_USER_POOL_ID': JSON.stringify(getEnv('VITE_COGNITO_USER_POOL_ID')),
       'import.meta.env.VITE_COGNITO_CLIENT_ID': JSON.stringify(getEnv('VITE_COGNITO_CLIENT_ID')),
       'import.meta.env.VITE_COGNITO_DOMAIN': JSON.stringify(getEnv('VITE_COGNITO_DOMAIN')),
+      'import.meta.env.VITE_COGNITO_AUTH_ORIGIN': JSON.stringify(getEnv('VITE_COGNITO_AUTH_ORIGIN')),
+      'import.meta.env.VITE_COGNITO_IDENTITY_PROVIDER': JSON.stringify(getEnv('VITE_COGNITO_IDENTITY_PROVIDER')),
       'import.meta.env.VITE_API_GATEWAY_URL': JSON.stringify(getEnv('VITE_API_GATEWAY_URL')),
       'import.meta.env.VITE_S3_BUCKET': JSON.stringify(getEnv('VITE_S3_BUCKET')),
       'import.meta.env.VITE_CLOUDFRONT_URL': JSON.stringify(getEnv('VITE_CLOUDFRONT_URL')),
