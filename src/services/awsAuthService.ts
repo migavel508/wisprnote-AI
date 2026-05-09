@@ -91,24 +91,27 @@ function takePkceVerifier(): string | null {
   return m;
 }
 
+function base64UrlEncode(buf: Uint8Array): string {
+  let binary = '';
+  for (let i = 0; i < buf.length; i++) {
+    binary += String.fromCharCode(buf[i]!);
+  }
+  return btoa(binary)
+    .replace(/\+/g, '-')
+    .replace(/\//g, '_')
+    .replace(/=/g, '');
+}
+
 function randomPkceVerifier(): string {
   const bytes = new Uint8Array(32);
   crypto.getRandomValues(bytes);
-  const alphabet = 'ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789-._~';
-  let out = '';
-  for (let i = 0; i < bytes.length; i++) {
-    out += alphabet[bytes[i]! % alphabet.length];
-  }
-  return out + alphabet[bytes[31]! % alphabet.length]; // lengthen toward 43+ chars spec
+  return base64UrlEncode(bytes);
 }
 
-async function sha256Base64Url(plain: string): Promise<string> {
-  const data = new TextEncoder().encode(plain);
-  const hash = await crypto.subtle.digest('SHA-256', data);
-  return btoa(String.fromCharCode(...new Uint8Array(hash)))
-    .replace(/\+/g, '-')
-    .replace(/\//g, '_')
-    .replace(/=+$/, '');
+async function pkceChallengeFromVerifier(verifier: string): Promise<string> {
+  const data = new TextEncoder().encode(verifier);
+  const hash = new Uint8Array(await crypto.subtle.digest('SHA-256', data));
+  return base64UrlEncode(hash);
 }
 
 // Clear stale Supabase data that fills Tauri WebView localStorage quota
@@ -335,7 +338,7 @@ export function getWebOAuthRedirectUri(): string {
 export async function getGoogleOAuthUrl(redirectUri: string): Promise<string> {
   const verifier = randomPkceVerifier();
   storePkceVerifier(verifier);
-  const challenge = await sha256Base64Url(verifier);
+  const challenge = await pkceChallengeFromVerifier(verifier);
   const params = new URLSearchParams({
     client_id: clientId,
     response_type: 'code',

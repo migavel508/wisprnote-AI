@@ -9,8 +9,8 @@ import {
 } from '../services/awsAuthService';
 import { motion, AnimatePresence } from 'motion/react';
 import { Mail, Lock, Loader2, ArrowRight, AlertCircle, CheckCircle2 } from 'lucide-react';
-/** Prevents duplicate /oauth2/token calls when React Strict Mode runs effects twice (code + PKCE verifier are single-use). */
-const consumedWebOAuthCodes = new Set<string>();
+/** Prevents duplicate /oauth2/token calls — codes are single-use; survives remounts (sign-out → sign-in cycle). */
+const consumedOAuthCodes = new Set<string>();
 
 export default function Auth() {
   const isTauri = typeof window !== 'undefined' && (
@@ -44,8 +44,8 @@ export default function Auth() {
     }
 
     if (!code) return;
-    if (consumedWebOAuthCodes.has(code)) return;
-    consumedWebOAuthCodes.add(code);
+    if (consumedOAuthCodes.has(code)) return;
+    consumedOAuthCodes.add(code);
 
     let cancelled = false;
     setLoading(true);
@@ -59,7 +59,7 @@ export default function Auth() {
         await exchangeCodeForSession(code, redirectUri);
         setMessage(null);
       } catch (e: any) {
-        consumedWebOAuthCodes.delete(code);
+        consumedOAuthCodes.delete(code);
         if (!cancelled) setError(e?.message || 'Google sign-in failed');
       } finally {
         if (!cancelled) {
@@ -92,6 +92,9 @@ export default function Auth() {
         }
 
         if (!code) return;
+        if (consumedOAuthCodes.has(code)) return;
+        consumedOAuthCodes.add(code);
+
         setLoading(true);
         await exchangeCodeForSession(code, desktopOAuthRedirect);
         setMessage(null);
