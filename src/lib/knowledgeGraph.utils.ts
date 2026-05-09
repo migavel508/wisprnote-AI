@@ -234,6 +234,8 @@ function loadRelCacheFromStorage(): { key: string; value: ExtractedRelationship[
     if (parsed?.version !== REL_CACHE_VERSION) {
       return { key: '', value: [] };
     }
+    // Always load relationships even if key (fingerprint) differs — they'll be
+    // pruned for removed meetings and augmented for new ones at extraction time.
     return { key: parsed.key || '', value: Array.isArray(parsed.value) ? parsed.value : [] };
   } catch {
     return { key: '', value: [] };
@@ -589,18 +591,78 @@ function buildMeetingSummary(m: MeetingRecord): string {
   return lines.join('\n');
 }
 
+/**
+ * Compute deterministic relationships from shared topics, people, and action items.
+ * Zero API calls — runs instantly. Provides baseline connections even if LLM extraction fails.
+ */
+function computeHeuristicRelationships(kgData: MeetingRecord[]): ExtractedRelationship[] {
+  if (kgData.length < 2) return [];
+  const results: ExtractedRelationship[] = [];
+  const seen = new Set<string>();
+
+  for (let i = 0; i < kgData.length; i++) {
+    for (let j = i + 1; j < kgData.length; j++) {
+      const a = kgData[i];
+      const b = kgData[j];
+      const pairKey = [a.meetingId, b.meetingId].sort().join('::');
+      if (seen.has(pairKey)) continue;
+
+      const aTopics = (a.topics || []).map(t => t.name?.toLowerCase().trim()).filter(Boolean);
+      const bTopics = (b.topics || []).map(t => t.name?.toLowerCase().trim()).filter(Boolean);
+      const sharedTopics = aTopics.filter(t => bTopics.some(bt => bt.includes(t) || t.includes(bt)));
+
+      const aPeople = (a.people || []).map(p => p.toLowerCase().trim());
+      const bPeople = (b.people || []).map(p => p.toLowerCase().trim());
+      const sharedPeople = aPeople.filter(p => bPeople.includes(p));
+
+      if (sharedTopics.length >= 2) {
+        seen.add(pairKey);
+        const topicNames = (a.topics || []).filter(t => sharedTopics.some(st => t.name?.toLowerCase().includes(st) || st.includes(t.name?.toLowerCase()))).map(t => t.name);
+        results.push({
+          fromMeetingId: a.meetingId,
+          toMeetingId: b.meetingId,
+          relationshipType: 'continuation',
+          sharedThread: `Both discuss: ${topicNames.slice(0, 3).join(', ')}`,
+          confidence: sharedTopics.length >= 3 ? 'high' : 'medium',
+        });
+      } else if (sharedTopics.length === 1 && sharedPeople.length >= 2) {
+        seen.add(pairKey);
+        results.push({
+          fromMeetingId: a.meetingId,
+          toMeetingId: b.meetingId,
+          relationshipType: 'recurring',
+          sharedThread: `Shared topic "${(a.topics || []).find(t => sharedTopics.includes(t.name?.toLowerCase()))?.name || sharedTopics[0]}" with ${sharedPeople.length} common participants`,
+          confidence: 'medium',
+        });
+      }
+    }
+  }
+  return results;
+}
+
 export async function extractContextualRelationships(
   kgData: MeetingRecord[]
 ): Promise<ExtractedRelationship[]> {
   if (kgData.length < 2) return [];
 
-  const apiKey = getApiKey();
-
   // Return cached relationships if the meeting set is unchanged
   const fingerprint = kgData.map(m => m.meetingId).sort().join('|');
-  if (_relCacheKey === fingerprint) {
+  if (_relCacheKey === fingerprint && _relCacheValue.length > 0) {
     log.debug('relationships_cache_hit');
     return _relCacheValue;
+  }
+
+  // Check if API keys are available — if not, use heuristics only (no token cost)
+  let apiKey = '';
+  try {
+    apiKey = getProvider() === 'gemini' ? getApiKey() : '';
+  } catch {
+    log.info('relationships_heuristic_only', { reason: 'no_api_key' });
+    const heuristic = computeHeuristicRelationships(kgData);
+    _relCacheKey = fingerprint;
+    _relCacheValue = heuristic;
+    saveRelCacheToStorage(fingerprint, heuristic);
+    return heuristic;
   }
 
   // Determine if we can do an incremental extraction (much cheaper)
@@ -608,10 +670,19 @@ export async function extractContextualRelationships(
   const currentIds = new Set(kgData.map(m => m.meetingId));
   const newMeetings = kgData.filter(m => !cachedIds.has(m.meetingId));
   const removedIds = [...cachedIds].filter(id => !currentIds.has(id));
+
+  // Prune relationships for removed meetings from cache
+  if (removedIds.length > 0 && _relCacheValue.length > 0) {
+    const removedSet = new Set(removedIds);
+    _relCacheValue = _relCacheValue.filter(
+      r => !removedSet.has(r.fromMeetingId) && !removedSet.has(r.toMeetingId)
+    );
+  }
+
+  // Can do incremental: have existing relationships, no meetings removed (or already pruned), and new meetings to process
   const canIncremental = _relCacheValue.length > 0
-    && removedIds.length === 0
     && newMeetings.length > 0
-    && newMeetings.length <= Math.max(3, kgData.length * 0.3);
+    && newMeetings.length <= Math.max(5, kgData.length * 0.5);
 
   let prompt: string;
 
@@ -639,11 +710,13 @@ ${newSummaries}
 
 Find relationships between the NEW meetings and ANY other meeting (existing or new). Do NOT re-generate relationships that are already listed above.
 
+CRITICAL: You MUST use the EXACT meeting ID values shown above. Do NOT modify or shorten them.
+
 Return a JSON array of NEW relationship objects only. Each object must have exactly these fields:
-- "fromMeetingId": string (the earlier/source meeting ID)
-- "toMeetingId": string (the later/target meeting ID)
+- "fromMeetingId": string (copy the EXACT ID — the earlier/source meeting)
+- "toMeetingId": string (copy the EXACT ID — the later/target meeting)
 - "relationshipType": one of "continuation", "resolution", "escalation", "recurring", "reference"
-- "sharedThread": string (one sentence describing what connects them)
+- "sharedThread": string (one clear sentence explaining WHY these meetings are connected — be specific about what topic, decision, or thread links them)
 - "confidence": one of "high", "medium", "low"
 
 Return ONLY the JSON array, no markdown fences, no explanation.
@@ -661,16 +734,20 @@ Look for:
 - An issue raised in one meeting being escalated or resolved in a later one
 - A recurring theme that appears across genuinely separate contexts (not just the same topic name)
 - One meeting explicitly referencing outcomes or discussions from another
+- Shared participants discussing related work across different meetings
+- Action items from one meeting being addressed in another
 
 Here are the meetings:
 
 ${meetingSummaries}
 
+CRITICAL: You MUST use the EXACT meeting ID values from the "ID:" field above. Do NOT modify or shorten them.
+
 Return a JSON array of relationship objects. Each object must have exactly these fields:
-- "fromMeetingId": string (the earlier/source meeting ID)
-- "toMeetingId": string (the later/target meeting ID)
+- "fromMeetingId": string (copy the EXACT ID from above — the earlier/source meeting)
+- "toMeetingId": string (copy the EXACT ID from above — the later/target meeting)
 - "relationshipType": one of "continuation", "resolution", "escalation", "recurring", "reference"
-- "sharedThread": string (one sentence describing what connects them)
+- "sharedThread": string (one clear sentence explaining WHY these meetings are connected — be specific about what topic, decision, or thread links them)
 - "confidence": one of "high", "medium", "low"
 
 Return ONLY the JSON array, no markdown fences, no explanation.
@@ -683,7 +760,14 @@ If no relationships are found, return an empty array [].`;
 
     if (provider === 'openrouter') {
       const orKey = getOpenRouterKey();
-      if (!orKey) { log.warn('openrouter_key_missing'); return []; }
+      if (!orKey) {
+        log.warn('openrouter_key_missing');
+        const heuristic = computeHeuristicRelationships(kgData);
+        _relCacheKey = fingerprint;
+        _relCacheValue = heuristic;
+        saveRelCacheToStorage(fingerprint, heuristic);
+        return heuristic;
+      }
 
       response = await fetchWithRetry(
         'https://openrouter.ai/api/v1/chat/completions',
@@ -725,7 +809,13 @@ If no relationships are found, return an empty array [].`;
     if (!response.ok) {
       const body = await response.text();
       log.warn('relationship_extraction_api_error', { status: response.status, provider, body: body.slice(0, 200) });
-      return [];
+      const heuristicFallback = computeHeuristicRelationships(kgData);
+      const existing = canIncremental ? _relCacheValue : [];
+      const merged = [...existing, ...heuristicFallback.filter(h => !existing.some(e => e.fromMeetingId === h.fromMeetingId && e.toMeetingId === h.toMeetingId))];
+      _relCacheKey = fingerprint;
+      _relCacheValue = merged;
+      saveRelCacheToStorage(fingerprint, merged);
+      return merged;
     }
 
     const data = await response.json();
@@ -780,9 +870,13 @@ If no relationships are found, return an empty array [].`;
         meetingIds.has(r.fromMeetingId) &&
         meetingIds.has(r.toMeetingId) &&
         validTypes.has(r.relationshipType) &&
-        validConf.has(r.confidence) &&
-        typeof r.sharedThread === 'string'
-    );
+        validConf.has(r.confidence)
+    ).map(r => ({
+      ...r,
+      sharedThread: (typeof r.sharedThread === 'string' && r.sharedThread.trim())
+        ? r.sharedThread.trim()
+        : `${r.relationshipType} relationship between meetings`,
+    }));
 
     // Merge: incremental → append new to cached; full → replace entirely
     let merged: ExtractedRelationship[];
@@ -798,6 +892,14 @@ If no relationships are found, return an empty array [].`;
       merged = validated;
     }
 
+    // Also merge in heuristic relationships for pairs not covered by LLM
+    const heuristic = computeHeuristicRelationships(kgData);
+    const llmPairs = new Set(merged.map(r => [r.fromMeetingId, r.toMeetingId].sort().join('::')));
+    const heuristicNew = heuristic.filter(r => !llmPairs.has([r.fromMeetingId, r.toMeetingId].sort().join('::')));
+    if (heuristicNew.length > 0) {
+      merged = [...merged, ...heuristicNew];
+    }
+
     // Populate cache so subsequent renders skip this API call
     _relCacheKey = fingerprint;
     _relCacheValue = merged;
@@ -805,7 +907,14 @@ If no relationships are found, return an empty array [].`;
     return merged;
   } catch (err) {
     log.warn('relationship_extraction_failed', { error: err instanceof Error ? err : undefined });
-    return [];
+    // Fallback to heuristic relationships — always provides some connections
+    const heuristicFallback = computeHeuristicRelationships(kgData);
+    if (heuristicFallback.length > 0) {
+      _relCacheKey = fingerprint;
+      _relCacheValue = heuristicFallback;
+      saveRelCacheToStorage(fingerprint, heuristicFallback);
+    }
+    return heuristicFallback;
   }
 }
 
@@ -924,7 +1033,7 @@ export function buildGraphData(
   // ----- Pass 1: build canonical topic map -----
   kgData.forEach(meeting => {
     (meeting.topics || []).forEach(topic => {
-      if (!topic || !topic.name) return;
+      if (!topic || !topic.name || !topic.name.trim()) return;
       const embedKey = `topic_${meeting.meetingId}_${topic.name.toLowerCase().replace(/\s+/g, '_')}`;
       const vec = topicEmbeddings.get(embedKey)?.vector || [];
       findCanonicalTopicIdByEmbedding(
@@ -949,7 +1058,7 @@ export function buildGraphData(
     });
 
     (meeting.topics || []).forEach(topic => {
-      if (!topic || !topic.name) return;
+      if (!topic || !topic.name || !topic.name.trim()) return;
       const embedKey = `topic_${meeting.meetingId}_${topic.name.toLowerCase().replace(/\s+/g, '_')}`;
       const vec = topicEmbeddings.get(embedKey)?.vector || [];
       const topicId = findCanonicalTopicIdByEmbedding(
@@ -1175,9 +1284,9 @@ export async function buildKnowledgeGraphPipeline(
       text: buildMeetingEmbedText(meeting),
     });
 
-    // Per-topic embeddings
+    // Per-topic embeddings (skip empty/blank names)
     (meeting.topics || []).forEach(topic => {
-      if (!topic?.name) return;
+      if (!topic?.name || !topic.name.trim()) return;
       embedItems.push({
         id: `topic_${meeting.meetingId}_${topic.name.toLowerCase().replace(/\s+/g, '_')}`,
         text: buildTopicEmbedText(topic),

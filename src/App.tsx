@@ -1497,24 +1497,51 @@ export default function App() {
       if (uid) await cacheSet(`kg:${uid}`, data ?? []);
 
       if (data && data.length > 0) {
-        // Transform DB format to app format
+        // Transform DB format to app format — validate topics to prevent blank entries
         const transformed = data.map(entry => ({
           meetingId: entry.task_id,
           meetingTitle: entry.meeting_title,
           meetingDate: entry.created_at,
-          topics: entry.topics || [],
-          decisions: entry.decisions || [],
-          people: entry.people || [],
-          actionItems: entry.action_items || [],
+          topics: (entry.topics || []).filter(
+            (t: any) => t && t.name && t.name.trim().length > 0
+          ),
+          decisions: (entry.decisions || []).filter(
+            (d: any) => d && d.decision && d.decision.trim().length > 0
+          ),
+          people: (entry.people || []).filter(
+            (p: any) => typeof p === 'string' && p.trim().length > 0
+          ),
+          actionItems: (entry.action_items || []).filter(
+            (a: any) => a && a.task && a.task.trim().length > 0
+          ),
           references: entry.refs || []
         }));
         setKgData(transformed);
         setKgBuilt(true);
 
-        // Populate ledger with all IDs that already have KG data in Supabase
-        const supabaseIds = new Set(data.map(e => e.task_id));
-        markKGExtractedBatch(Array.from(supabaseIds));
-        reconcileKGLedger(supabaseIds);
+        // Only mark meetings as "extracted" if they have meaningful data (valid topics).
+        // Meetings with corrupt/empty topics should NOT be ledger-marked so they get re-extracted.
+        const validIds: string[] = [];
+        const corruptIds: string[] = [];
+        for (const entry of data) {
+          const hasValidTopics = (entry.topics || []).some(
+            (t: any) => t && t.name && t.name.trim().length > 0
+          );
+          const hasAnyData = hasValidTopics ||
+            (entry.decisions || []).some((d: any) => d?.decision?.trim()) ||
+            (entry.people || []).length > 0 ||
+            (entry.action_items || []).some((a: any) => a?.task?.trim());
+          if (hasAnyData) {
+            validIds.push(entry.task_id);
+          } else {
+            corruptIds.push(entry.task_id);
+          }
+        }
+        markKGExtractedBatch(validIds);
+        reconcileKGLedger(new Set(validIds));
+        if (corruptIds.length > 0) {
+          log.info('kg_corrupt_entries_detected', { count: corruptIds.length, ids: corruptIds });
+        }
       }
     } catch (err) {
       log.error('fetch_knowledge_graph_failed', { error: err instanceof Error ? err : undefined });
@@ -1534,6 +1561,21 @@ export default function App() {
         const currentKgData = kgDataRef.current;
         const kgTaskIds = new Set(currentKgData.map(kg => kg.meetingId));
 
+        // Detect meetings already in KG but with corrupt/empty topics — need re-extraction
+        const corruptKgIds = new Set(
+          currentKgData
+            .filter(kg => {
+              const hasValidTopics = (kg.topics || []).some(
+                (t: any) => t && t.name && t.name.trim().length > 0
+              );
+              const hasAnyMeaningfulData = hasValidTopics ||
+                (kg.decisions || []).some((d: any) => d?.decision?.trim()) ||
+                (kg.actionItems || []).some((a: any) => a?.task?.trim());
+              return !hasAnyMeaningfulData;
+            })
+            .map(kg => kg.meetingId)
+        );
+
         // Use lightweight metadata to find candidates, fetch full list for completeness
         let allMeta: TaskHistory[];
         try {
@@ -1545,9 +1587,13 @@ export default function App() {
 
         const missingMeta = allMeta.filter(task =>
           task.id &&
-          !kgTaskIds.has(task.id) &&
-          !ledger.has(task.id) &&
-          task.status === 'completed'
+          task.status === 'completed' &&
+          (
+            // Truly missing from KG
+            (!kgTaskIds.has(task.id) && !ledger.has(task.id)) ||
+            // In KG but with corrupt/empty data — needs re-extraction
+            corruptKgIds.has(task.id)
+          )
         );
         
         if (missingMeta.length === 0) return;
@@ -1578,10 +1624,18 @@ export default function App() {
                 refs: result.references || []
               };
               
-              await saveKnowledgeGraphBatch([entryToSave]);
-              markKGExtracted(fullTask.id!);
+              // Only save if extraction produced meaningful data
+              const hasExtractedData = (result.topics?.length > 0) || (result.decisions?.length > 0) || (result.people?.length > 0) || (result.actionItems?.length > 0);
+              if (hasExtractedData) {
+                await saveKnowledgeGraphBatch([entryToSave]);
+                markKGExtracted(fullTask.id!);
+              }
               if (!result.meetingDate && fullTask.created_at) result.meetingDate = fullTask.created_at;
-              setKgData(prevData => [...prevData, result]);
+              // Replace existing corrupt entry or append new
+              setKgData(prevData => {
+                const filtered = prevData.filter(d => d.meetingId !== result.meetingId);
+                return [...filtered, result];
+              });
               
               if (i < missingMeta.length - 1) {
                 await new Promise(resolve => setTimeout(resolve, 5000));
@@ -1707,20 +1761,25 @@ export default function App() {
           result.meetingDate = task.created_at;
         }
 
-        // Checkpoint-save immediately — progress is durable even if interrupted
-        try {
-          await saveKnowledgeGraph({
-            task_id: result.meetingId,
-            meeting_title: result.meetingTitle,
-            topics: result.topics || [],
-            decisions: result.decisions || [],
-            people: result.people || [],
-            action_items: result.actionItems || [],
-            refs: result.references || [],
-          });
-          markKGExtracted(task.id!);
-        } catch (saveErr) {
-          log.error('kg_checkpoint_save_failed', { filename: task.filename, error: saveErr instanceof Error ? saveErr : undefined });
+        // Only persist if extraction produced meaningful data — skip empty entries so they can be re-tried later
+        const hasData = (result.topics?.length > 0) || (result.decisions?.length > 0) || (result.people?.length > 0) || (result.actionItems?.length > 0);
+        if (hasData) {
+          try {
+            await saveKnowledgeGraph({
+              task_id: result.meetingId,
+              meeting_title: result.meetingTitle,
+              topics: result.topics || [],
+              decisions: result.decisions || [],
+              people: result.people || [],
+              action_items: result.actionItems || [],
+              refs: result.references || [],
+            });
+            markKGExtracted(task.id!);
+          } catch (saveErr) {
+            log.error('kg_checkpoint_save_failed', { filename: task.filename, error: saveErr instanceof Error ? saveErr : undefined });
+          }
+        } else {
+          log.warn('kg_extraction_empty', { filename: task.filename, meetingId: task.id });
         }
 
         accumulated.push(result);
@@ -3634,6 +3693,33 @@ export default function App() {
                 kgBuilt={kgBuilt}
                 buildKnowledgeGraph={buildKnowledgeGraph}
                 historyLength={history.length}
+                onReExtractMeeting={async (meetingId: string) => {
+                  try {
+                    const fullTask = await getTaskById(meetingId);
+                    if (!fullTask?.transcription?.trim()) return;
+                    const result = await extractKnowledgeGraph(fullTask.id!, fullTask.filename, fullTask.transcription!);
+                    const hasData = (result.topics?.length > 0) || (result.decisions?.length > 0) || (result.people?.length > 0) || (result.actionItems?.length > 0);
+                    if (hasData) {
+                      await saveKnowledgeGraphBatch([{
+                        task_id: result.meetingId,
+                        meeting_title: result.meetingTitle,
+                        topics: result.topics || [],
+                        decisions: result.decisions || [],
+                        people: result.people || [],
+                        action_items: result.actionItems || [],
+                        refs: result.references || [],
+                      }]);
+                      markKGExtracted(fullTask.id!);
+                    }
+                    if (!result.meetingDate && fullTask.created_at) result.meetingDate = fullTask.created_at;
+                    setKgData(prev => {
+                      const filtered = prev.filter(d => d.meetingId !== result.meetingId);
+                      return [...filtered, result];
+                    });
+                  } catch (err) {
+                    log.error('manual_re_extract_failed', { meetingId, error: err instanceof Error ? err : undefined });
+                  }
+                }}
               />
             )}
 

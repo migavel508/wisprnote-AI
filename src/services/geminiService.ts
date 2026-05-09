@@ -1286,22 +1286,35 @@ function cleanTranscriptionForKG(raw: string, maxChars = 8000): string {
 }
 
 export async function extractKnowledgeGraph(meetingId: string, meetingTitle: string, text: string): Promise<any> {
+  const emptyResult = { meetingId, meetingTitle, topics: [], decisions: [], people: [], actionItems: [], references: [] };
+
+  if (!text || text.trim().length < 50) {
+    log.warn('kg_extraction_skipped_short_text', { meetingId, textLength: text?.length || 0 });
+    return emptyResult;
+  }
+
   const provider = getProvider();
   const geminiApiKey = (import.meta as any).env?.VITE_GEMINI_API_KEY || (import.meta as any).env?.GEMINI_API_KEY || process.env.GEMINI_API_KEY;
   const openRouterKey = getOpenRouterKey();
   
   if (provider === 'gemini' && !geminiApiKey) {
     log.error('api_key_missing');
-    return { meetingId, meetingTitle, topics: [], decisions: [], people: [], actionItems: [], references: [] };
+    return emptyResult;
   }
   if (provider === 'openrouter' && !openRouterKey) {
     log.error('openrouter_key_missing');
-    return { meetingId, meetingTitle, topics: [], decisions: [], people: [], actionItems: [], references: [] };
+    return emptyResult;
   }
   
   const combinedPrompt = `You are a JSON-only API. You MUST respond with ONLY valid JSON, no text before or after. Never include explanations, greetings, or markdown. Output raw JSON only.
 
-Extract knowledge graph data from this meeting transcription. For each topic discussed, carefully analyze the conversation to determine its status:
+Extract knowledge graph data from this meeting transcription. You MUST extract AT LEAST one topic from any meeting transcription — even brief meetings have at least one discussion point.
+
+TOPIC RULES:
+- Every topic MUST have a non-empty "name" field (2-5 words describing the topic)
+- Every topic MUST have a non-empty "summary" field (1-2 sentences about what was discussed)
+- Every topic MUST have a valid "status" field (one of the values below)
+- NEVER return a topic with an empty or blank "name" — this is a critical error
 
 TOPIC STATUS RULES (you MUST use one of these exact values):
 - "new" = Topic mentioned for the first time, just introduced, no prior discussion implied
@@ -1311,7 +1324,7 @@ TOPIC STATUS RULES (you MUST use one of these exact values):
 - "revisited" = Topic was discussed before and is being brought up again. Look for phrases like "coming back to", "revisiting", "as we discussed before", "following up on", "update on"
 
 Return ONLY this JSON structure:
-{"topics":[{"name":"short topic name","summary":"1-2 sentence summary of what was said about this topic","status":"new|ongoing|resolved|off-track|revisited"}],"decisions":[{"decision":"what was decided","relatedTopic":"related topic name"}],"people":["Person Name"],"actionItems":[{"task":"what needs to be done","owner":"who is responsible","relatedTopic":"related topic name"}],"references":["any documents, tools, or resources mentioned"]}
+{"topics":[{"name":"short topic name (REQUIRED, non-empty)","summary":"1-2 sentence summary (REQUIRED, non-empty)","status":"new|ongoing|resolved|off-track|revisited"}],"decisions":[{"decision":"what was decided","relatedTopic":"related topic name"}],"people":["Person Name"],"actionItems":[{"task":"what needs to be done","owner":"who is responsible","relatedTopic":"related topic name"}],"references":["any documents, tools, or resources mentioned"]}
 
 IMPORTANT: Do NOT default all statuses to "new". Carefully read the tone and context of the discussion for each topic. Most real meetings have a mix of statuses.
 
@@ -1445,7 +1458,124 @@ Transcription: ${cleanTranscriptionForKG(text)}`;
       }
     }
     
-    return { meetingId, meetingTitle, ...parsed };
+    // Validate and sanitize extracted data — filter out malformed entries
+    const validTopics = (parsed.topics || []).filter(
+      (t: any) => t && typeof t.name === 'string' && t.name.trim().length > 0
+    ).map((t: any) => ({
+      name: t.name.trim(),
+      summary: (t.summary || '').trim(),
+      status: ['new', 'ongoing', 'resolved', 'off-track', 'revisited'].includes(t.status) ? t.status : 'new',
+    }));
+
+    const validDecisions = (parsed.decisions || []).filter(
+      (d: any) => d && typeof d.decision === 'string' && d.decision.trim().length > 0
+    ).map((d: any) => ({
+      decision: d.decision.trim(),
+      relatedTopic: (d.relatedTopic || '').trim(),
+    }));
+
+    const validPeople = (parsed.people || []).filter(
+      (p: any) => typeof p === 'string' && p.trim().length > 0
+    ).map((p: string) => p.trim());
+
+    const validActionItems = (parsed.actionItems || parsed.action_items || []).filter(
+      (a: any) => a && typeof a.task === 'string' && a.task.trim().length > 0
+    ).map((a: any) => ({
+      task: a.task.trim(),
+      owner: (a.owner || 'Unassigned').trim(),
+      relatedTopic: (a.relatedTopic || '').trim(),
+    }));
+
+    const validReferences = (parsed.references || []).filter(
+      (r: any) => typeof r === 'string' && r.trim().length > 0
+    );
+
+    // If extraction produced zero valid topics despite having text, attempt one retry with a simpler prompt
+    if (validTopics.length === 0 && text.trim().length >= 100) {
+      log.warn('kg_zero_topics_retry', { meetingId, meetingTitle });
+      try {
+        const retryPrompt = `Extract the main discussion topics from this meeting transcription. Return ONLY a JSON object.
+
+RULES:
+- You MUST find at least 1 topic. Every meeting discusses something.
+- Each topic needs: "name" (2-5 word title, NEVER empty), "summary" (1 sentence), "status" (one of: new, ongoing, resolved, off-track, revisited)
+
+Return: {"topics":[{"name":"Topic Name","summary":"What was discussed","status":"new"}],"decisions":[],"people":[],"actionItems":[],"references":[]}
+
+Meeting: ${meetingTitle}
+Text: ${cleanTranscriptionForKG(text, 4000)}`;
+
+        const retryModel = 'gemini-3-flash-preview';
+        let retryResp: Response;
+        if (provider === 'openrouter') {
+          retryResp = await fetch('https://openrouter.ai/api/v1/chat/completions', {
+            method: 'POST',
+            headers: {
+              'Authorization': `Bearer ${openRouterKey}`,
+              'Content-Type': 'application/json',
+              'HTTP-Referer': typeof window !== 'undefined' ? window.location.origin : 'https://lumina-ai.app',
+              'X-Title': 'Lumina AI',
+            },
+            body: JSON.stringify({
+              model: toOpenRouterModel(retryModel),
+              messages: [{ role: 'user', content: retryPrompt }],
+              temperature: 0.2,
+              response_format: { type: 'json_object' },
+            })
+          });
+        } else {
+          retryResp = await fetch(`https://generativelanguage.googleapis.com/v1beta/models/${retryModel}:generateContent?key=${geminiApiKey}`, {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({
+              contents: [{ role: 'user', parts: [{ text: retryPrompt }] }],
+              generationConfig: { temperature: 0.2, responseMimeType: "application/json" }
+            })
+          });
+        }
+
+        if (retryResp.ok) {
+          const retryData = await retryResp.json();
+          const retryContent = provider === 'openrouter'
+            ? retryData.choices?.[0]?.message?.content || '{}'
+            : retryData.candidates?.[0]?.content?.parts?.[0]?.text || '{}';
+          let retryClean = retryContent.trim().replace(/```json\s*/gi, '').replace(/```\s*/g, '').trim();
+          const retryJsonMatch = retryClean.match(/\{[\s\S]*\}/);
+          if (retryJsonMatch) retryClean = retryJsonMatch[0];
+          const retryParsed = JSON.parse(retryClean);
+          const retryTopics = (retryParsed.topics || []).filter(
+            (t: any) => t && typeof t.name === 'string' && t.name.trim().length > 0
+          ).map((t: any) => ({
+            name: t.name.trim(),
+            summary: (t.summary || '').trim(),
+            status: ['new', 'ongoing', 'resolved', 'off-track', 'revisited'].includes(t.status) ? t.status : 'new',
+          }));
+          if (retryTopics.length > 0) {
+            log.info('kg_retry_recovered_topics', { meetingId, topicCount: retryTopics.length });
+            return {
+              meetingId, meetingTitle,
+              topics: retryTopics,
+              decisions: validDecisions,
+              people: validPeople,
+              actionItems: validActionItems,
+              references: validReferences,
+            };
+          }
+        }
+      } catch (retryErr) {
+        log.warn('kg_retry_failed', { meetingId, error: retryErr instanceof Error ? retryErr : undefined });
+      }
+    }
+
+    return {
+      meetingId,
+      meetingTitle,
+      topics: validTopics,
+      decisions: validDecisions,
+      people: validPeople,
+      actionItems: validActionItems,
+      references: validReferences,
+    };
   } catch (e) {
     log.error('kg_extraction_failed', { error: e instanceof Error ? e : undefined });
     return { meetingId, meetingTitle, topics: [], decisions: [], people: [], actionItems: [], references: [] };
