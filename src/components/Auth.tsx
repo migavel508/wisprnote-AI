@@ -12,6 +12,22 @@ import { Mail, Lock, Loader2, ArrowRight, AlertCircle, CheckCircle2 } from 'luci
 /** Prevents duplicate /oauth2/token calls when React Strict Mode runs effects twice (code + PKCE verifier are single-use). */
 const consumedWebOAuthCodes = new Set<string>();
 
+/**
+ * Cognito Hosted UI redirect_uri — must exactly match App client callback URL(s).
+ * In production set VITE_WEB_OAUTH_REDIRECT_URI=https://www.wisprnote.com so it matches Cognito/Vercel (www vs apex, trailing slash).
+ */
+function webCognitoRedirectUri(): string {
+  const configured =
+    typeof import.meta.env.VITE_WEB_OAUTH_REDIRECT_URI === 'string'
+      ? import.meta.env.VITE_WEB_OAUTH_REDIRECT_URI.trim()
+      : '';
+  if (configured) {
+    const noTrail = configured.replace(/\/+$/, '');
+    return /^https?:\/\//i.test(noTrail) ? noTrail : `https://${noTrail}`;
+  }
+  return typeof window !== 'undefined' ? window.location.origin : '';
+}
+
 export default function Auth() {
   const isTauri = typeof window !== 'undefined' && (
     !!(window as any).__TAURI_INTERNALS__ ||
@@ -52,7 +68,7 @@ export default function Auth() {
     setError(null);
     setMessage(null);
 
-    const redirectUri = window.location.origin;
+    const redirectUri = webCognitoRedirectUri();
 
     (async () => {
       try {
@@ -134,7 +150,7 @@ export default function Auth() {
         return;
       }
 
-      const oauthUrl = await getGoogleOAuthUrl(window.location.origin);
+      const oauthUrl = await getGoogleOAuthUrl(webCognitoRedirectUri());
       window.location.href = oauthUrl;
     } catch (err: any) {
       setError(err.message || 'Unable to continue with Google');
