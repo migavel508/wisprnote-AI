@@ -3,9 +3,13 @@ import {
   CognitoUser,
   AuthenticationDetails,
   CognitoUserSession,
+  CognitoIdToken,
+  CognitoAccessToken,
+  CognitoRefreshToken,
   CognitoUserAttribute,
   ISignUpResult,
   ICognitoStorage,
+  ICognitoUserSessionData,
 } from 'amazon-cognito-identity-js';
 import { logger } from '../lib/logger';
 
@@ -15,6 +19,97 @@ const userPoolId = import.meta.env.VITE_COGNITO_USER_POOL_ID || '';
 const clientId = import.meta.env.VITE_COGNITO_CLIENT_ID || '';
 const cognitoDomain = import.meta.env.VITE_COGNITO_DOMAIN || '';
 const region = import.meta.env.VITE_AWS_REGION || 'us-east-1';
+const cognitoClientSecret = import.meta.env.VITE_COGNITO_CLIENT_SECRET || '';
+/** If unset, Hosted UI opens without forcing IdP → Cognito shows all enabled buttons (recommended until pool is wired). If set (e.g. Google), skips straight to that provider — must match Cognito Identity provider name exactly. */
+const cognitoForcedIdentityProvider =
+  typeof import.meta.env.VITE_COGNITO_IDENTITY_PROVIDER === 'string'
+    ? import.meta.env.VITE_COGNITO_IDENTITY_PROVIDER.trim()
+    : '';
+
+function normalizeCognitoOrigin(raw: string): string {
+  let o = raw.trim().replace(/\/+$/, '');
+  if (!o) return '';
+  if (!/^https?:\/\//i.test(o)) o = `https://${o}`;
+  return o;
+}
+
+/**
+ * Base URL for Hosted UI / Managed login OAuth (no trailing slash).
+ * - Prefer VITE_COGNITO_AUTH_ORIGIN (custom domain or regional domain).
+ * - If VITE_COGNITO_DOMAIN is a full URL (common misconfig), use it as the origin.
+ * - Else treat VITE_COGNITO_DOMAIN as the pool **prefix** only (e.g. wisprnote-auth), not https://auth.example.com.
+ */
+function cognitoHostedUiOrigin(): string {
+  const explicit = normalizeCognitoOrigin(
+    typeof import.meta.env.VITE_COGNITO_AUTH_ORIGIN === 'string'
+      ? import.meta.env.VITE_COGNITO_AUTH_ORIGIN
+      : '',
+  );
+  if (explicit) return explicit;
+
+  const dom = (cognitoDomain || '').trim();
+  if (/^https?:\/\//i.test(dom)) {
+    const u = normalizeCognitoOrigin(dom);
+    if (u) return u;
+  }
+
+  // Bare host without pool prefix pattern, e.g. auth.wisprnote.com
+  if (dom && dom.includes('.') && !/\.auth\.[^.]+\.amazoncognito\.com$/i.test(dom) && !/\s/.test(dom)) {
+    return normalizeCognitoOrigin(dom);
+  }
+
+  const prefix = dom.replace(/^https?:\/\//i, '').split('/')[0]?.replace(/\.auth\..*$/, '') || '';
+  if (!prefix) {
+    log.error('cognito_hosted_ui_origin_unconfigured', {});
+    return '';
+  }
+  return `https://${prefix}.auth.${region}.amazoncognito.com`;
+}
+
+/** PKCE verifier for Hosted UI flows (stored until /oauth2/token exchange). */
+const PKCE_STORAGE_KEY = 'wisprnote_cognito_pkce_verifier';
+
+let pkceVerifierMemory: string | null = null;
+
+function storePkceVerifier(verifier: string): void {
+  pkceVerifierMemory = verifier;
+  try {
+    sessionStorage.setItem(PKCE_STORAGE_KEY, verifier);
+  } catch {
+    /* sessionStorage unavailable – memory fallback only */
+  }
+}
+
+function takePkceVerifier(): string | null {
+  try {
+    const v = sessionStorage.getItem(PKCE_STORAGE_KEY);
+    if (v) sessionStorage.removeItem(PKCE_STORAGE_KEY);
+    if (v) return v;
+  } catch { /* ignore */ }
+  const m = pkceVerifierMemory;
+  pkceVerifierMemory = null;
+  return m;
+}
+
+function randomPkceVerifier(): string {
+  const bytes = new Uint8Array(32);
+  crypto.getRandomValues(bytes);
+  const alphabet = 'ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789-._~';
+  let out = '';
+  for (let i = 0; i < bytes.length; i++) {
+    out += alphabet[bytes[i]! % alphabet.length];
+  }
+  return out + alphabet[bytes[31]! % alphabet.length]; // lengthen toward 43+ chars spec
+}
+
+async function sha256Base64Url(plain: string): Promise<string> {
+  const data = new TextEncoder().encode(plain);
+  const hash = await crypto.subtle.digest('SHA-256', data);
+  return btoa(String.fromCharCode(...new Uint8Array(hash)))
+    .replace(/\+/g, '-')
+    .replace(/\//g, '_')
+    .replace(/=+$/, '');
+}
 
 // Clear stale Supabase data that fills Tauri WebView localStorage quota
 try {
@@ -62,6 +157,24 @@ const userPool = new CognitoUserPool({
   ClientId: clientId,
   Storage: cognitoStorage,
 });
+
+function persistHostedUiTokensToUserPool(tokens: {
+  access_token: string;
+  id_token: string;
+  refresh_token?: string;
+}): void {
+  const idPayload = JSON.parse(atob(tokens.id_token.split('.')[1])) as Record<string, string>;
+  const username = idPayload['cognito:username'] || idPayload.sub;
+  const cognitoUser = new CognitoUser({ Username: username, Pool: userPool, Storage: cognitoStorage });
+  const data: ICognitoUserSessionData = {
+    IdToken: new CognitoIdToken({ IdToken: tokens.id_token }),
+    AccessToken: new CognitoAccessToken({ AccessToken: tokens.access_token }),
+  };
+  if (tokens.refresh_token) {
+    data.RefreshToken = new CognitoRefreshToken({ RefreshToken: tokens.refresh_token });
+  }
+  cognitoUser.setSignInUserSession(new CognitoUserSession(data));
+}
 
 export interface AuthSession {
   user: {
@@ -201,19 +314,27 @@ export async function signOut(): Promise<void> {
   notifyListeners('SIGNED_OUT', null);
 }
 
-export function getGoogleOAuthUrl(redirectUri: string): string {
+/** Cognito Hosted UI authorize URL with PKCE. Omit identity_provider unless VITE_COGNITO_IDENTITY_PROVIDER is set to match your pool IdP name. */
+export async function getGoogleOAuthUrl(redirectUri: string): Promise<string> {
+  const verifier = randomPkceVerifier();
+  storePkceVerifier(verifier);
+  const challenge = await sha256Base64Url(verifier);
   const params = new URLSearchParams({
     client_id: clientId,
     response_type: 'code',
     scope: 'openid email profile',
     redirect_uri: redirectUri,
-    identity_provider: 'Google',
+    code_challenge_method: 'S256',
+    code_challenge: challenge,
   });
-  return `https://${cognitoDomain}.auth.${region}.amazoncognito.com/oauth2/authorize?${params.toString()}`;
+  if (cognitoForcedIdentityProvider) {
+    params.set('identity_provider', cognitoForcedIdentityProvider);
+  }
+  return `${cognitoHostedUiOrigin()}/oauth2/authorize?${params.toString()}`;
 }
 
 export async function exchangeCodeForSession(code: string, redirectUri: string): Promise<AuthSession> {
-  const tokenEndpoint = `https://${cognitoDomain}.auth.${region}.amazoncognito.com/oauth2/token`;
+  const tokenEndpoint = `${cognitoHostedUiOrigin()}/oauth2/token`;
 
   const body = new URLSearchParams({
     grant_type: 'authorization_code',
@@ -222,20 +343,42 @@ export async function exchangeCodeForSession(code: string, redirectUri: string):
     redirect_uri: redirectUri,
   });
 
+  const codeVerifier = takePkceVerifier();
+  if (codeVerifier) {
+    body.set('code_verifier', codeVerifier);
+  }
+
+  const headers: Record<string, string> = {
+    'Content-Type': 'application/x-www-form-urlencoded',
+  };
+
+  const secret = cognitoClientSecret.trim();
+  if (secret) {
+    const basic = btoa(`${clientId}:${secret}`);
+    headers.Authorization = `Basic ${basic}`;
+  }
+
   const resp = await fetch(tokenEndpoint, {
     method: 'POST',
-    headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
+    headers,
     body: body.toString(),
   });
 
   if (!resp.ok) {
     const text = await resp.text();
+    log.error('oauth_token_exchange_failed', { status: resp.status, body: text.slice(0, 500) });
     throw new Error(`Token exchange failed: ${text}`);
   }
 
-  const tokens = await resp.json();
+  const tokens = (await resp.json()) as {
+    access_token: string;
+    id_token: string;
+    refresh_token?: string;
+  };
 
-  const idPayload = JSON.parse(atob(tokens.id_token.split('.')[1]));
+  persistHostedUiTokensToUserPool(tokens);
+
+  const idPayload = JSON.parse(atob(tokens.id_token.split('.')[1])) as Record<string, string>;
   const session: AuthSession = {
     user: {
       id: idPayload.sub,
@@ -244,7 +387,7 @@ export async function exchangeCodeForSession(code: string, redirectUri: string):
     },
     accessToken: tokens.access_token,
     idToken: tokens.id_token,
-    refreshToken: tokens.refresh_token,
+    refreshToken: tokens.refresh_token || '',
   };
 
   notifyListeners('SIGNED_IN', session);

@@ -9,6 +9,9 @@ import {
 import { motion, AnimatePresence } from 'motion/react';
 import { Mail, Lock, Loader2, ArrowRight, AlertCircle, CheckCircle2 } from 'lucide-react';
 
+/** Prevents duplicate /oauth2/token calls when React Strict Mode runs effects twice (code + PKCE verifier are single-use). */
+const consumedWebOAuthCodes = new Set<string>();
+
 export default function Auth() {
   const isTauri = typeof window !== 'undefined' && (
     !!(window as any).__TAURI_INTERNALS__ ||
@@ -25,6 +28,51 @@ export default function Auth() {
   const [message, setMessage] = useState<string | null>(null);
   const [focusedField, setFocusedField] = useState<'email' | 'password' | 'code' | null>(null);
   const desktopOAuthRedirect = 'wisprnote://auth-callback/';
+
+  // Web: Cognito redirects here with ?code= — exchange while PKCE verifier is still in sessionStorage
+  useEffect(() => {
+    if (isTauri) return;
+
+    const params = new URLSearchParams(window.location.search);
+    const code = params.get('code');
+    const oauthErr = params.get('error_description') || params.get('error');
+
+    if (oauthErr) {
+      setError(decodeURIComponent(oauthErr.replace(/\+/g, ' ')));
+      window.history.replaceState({}, document.title, window.location.pathname);
+      return;
+    }
+
+    if (!code) return;
+    if (consumedWebOAuthCodes.has(code)) return;
+    consumedWebOAuthCodes.add(code);
+
+    let cancelled = false;
+    setLoading(true);
+    setError(null);
+    setMessage(null);
+
+    const redirectUri = window.location.origin;
+
+    (async () => {
+      try {
+        await exchangeCodeForSession(code, redirectUri);
+        setMessage(null);
+      } catch (e: any) {
+        consumedWebOAuthCodes.delete(code);
+        if (!cancelled) setError(e?.message || 'Google sign-in failed');
+      } finally {
+        if (!cancelled) {
+          setLoading(false);
+          window.history.replaceState({}, document.title, window.location.pathname);
+        }
+      }
+    })();
+
+    return () => {
+      cancelled = true;
+    };
+  }, [isTauri]);
 
   useEffect(() => {
     if (!isTauri) return;
@@ -80,13 +128,13 @@ export default function Auth() {
     try {
       if (isTauri) {
         const { open } = await import('@tauri-apps/plugin-shell');
-        const oauthUrl = getGoogleOAuthUrl(desktopOAuthRedirect);
+        const oauthUrl = await getGoogleOAuthUrl(desktopOAuthRedirect);
         await open(oauthUrl);
         setMessage('Google sign-in opened in your browser. After selecting account, you will be returned to the app automatically.');
         return;
       }
 
-      const oauthUrl = getGoogleOAuthUrl(window.location.origin);
+      const oauthUrl = await getGoogleOAuthUrl(window.location.origin);
       window.location.href = oauthUrl;
     } catch (err: any) {
       setError(err.message || 'Unable to continue with Google');
