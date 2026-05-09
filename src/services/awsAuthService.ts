@@ -314,6 +314,23 @@ export async function signOut(): Promise<void> {
   notifyListeners('SIGNED_OUT', null);
 }
 
+/**
+ * Web OAuth redirect_uri — must exactly match a Cognito App client callback URL.
+ * Set VITE_WEB_OAUTH_REDIRECT_URI in production (e.g. https://www.wisprnote.com).
+ * Falls back to window.location.origin for local dev.
+ */
+export function getWebOAuthRedirectUri(): string {
+  const configured =
+    typeof import.meta.env.VITE_WEB_OAUTH_REDIRECT_URI === 'string'
+      ? (import.meta.env.VITE_WEB_OAUTH_REDIRECT_URI as string).trim()
+      : '';
+  if (configured) {
+    const noTrail = configured.replace(/\/+$/, '');
+    return /^https?:\/\//i.test(noTrail) ? noTrail : `https://${noTrail}`;
+  }
+  return typeof window !== 'undefined' ? window.location.origin : '';
+}
+
 /** Cognito Hosted UI authorize URL with PKCE. Omit identity_provider unless VITE_COGNITO_IDENTITY_PROVIDER is set to match your pool IdP name. */
 export async function getGoogleOAuthUrl(redirectUri: string): Promise<string> {
   const verifier = randomPkceVerifier();
