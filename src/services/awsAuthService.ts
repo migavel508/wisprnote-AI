@@ -20,11 +20,18 @@ const clientId = import.meta.env.VITE_COGNITO_CLIENT_ID || '';
 const cognitoDomain = import.meta.env.VITE_COGNITO_DOMAIN || '';
 const region = import.meta.env.VITE_AWS_REGION || 'us-east-1';
 const cognitoClientSecret = import.meta.env.VITE_COGNITO_CLIENT_SECRET || '';
-/** If unset, Hosted UI opens without forcing IdP → Cognito shows all enabled buttons (recommended until pool is wired). If set (e.g. Google), skips straight to that provider — must match Cognito Identity provider name exactly. */
-const cognitoForcedIdentityProvider =
-  typeof import.meta.env.VITE_COGNITO_IDENTITY_PROVIDER === 'string'
-    ? import.meta.env.VITE_COGNITO_IDENTITY_PROVIDER.trim()
-    : '';
+/**
+ * Cognito federated provider name for “Continue with Google”.
+ * Must match User pool → Sign-in experience → Federated identity provider **name** exactly.
+ * Override if yours is not the default `Google`.
+ */
+function cognitoGoogleIdentityProviderName(): string {
+  const fromEnv =
+    typeof import.meta.env.VITE_COGNITO_IDENTITY_PROVIDER === 'string'
+      ? import.meta.env.VITE_COGNITO_IDENTITY_PROVIDER.trim()
+      : '';
+  return fromEnv || 'Google';
+}
 
 function normalizeCognitoOrigin(raw: string): string {
   let o = raw.trim().replace(/\/+$/, '');
@@ -334,7 +341,11 @@ export function getWebOAuthRedirectUri(): string {
   return typeof window !== 'undefined' ? window.location.origin : '';
 }
 
-/** Cognito Hosted UI authorize URL with PKCE. Omit identity_provider unless VITE_COGNITO_IDENTITY_PROVIDER is set to match your pool IdP name. */
+/**
+ * Cognito Hosted UI authorize URL with PKCE.
+ * Always sets identity_provider so Cognito skips its sign-in page and sends the user straight to Google
+ * (your in-app screen stays the only Wisprnote-branded login step before Google’s consent).
+ */
 export async function getGoogleOAuthUrl(redirectUri: string): Promise<string> {
   const verifier = randomPkceVerifier();
   storePkceVerifier(verifier);
@@ -346,10 +357,8 @@ export async function getGoogleOAuthUrl(redirectUri: string): Promise<string> {
     redirect_uri: redirectUri,
     code_challenge_method: 'S256',
     code_challenge: challenge,
+    identity_provider: cognitoGoogleIdentityProviderName(),
   });
-  if (cognitoForcedIdentityProvider) {
-    params.set('identity_provider', cognitoForcedIdentityProvider);
-  }
   return `${cognitoHostedUiOrigin()}/oauth2/authorize?${params.toString()}`;
 }
 
