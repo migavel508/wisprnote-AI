@@ -290,6 +290,8 @@ export default function App() {
   const ALL_MEETINGS_THREAD_ID = 'all-meetings';
 
   const [session, setSession] = useState<AuthSession | null>(null);
+  /** False until the first `getSession()` finishes — avoids flashing the login screen on cold start when Cognito already has tokens. */
+  const [isAuthSessionResolved, setIsAuthSessionResolved] = useState(false);
   const [file, setFile] = useState<File | null>(null);
   const [prompt, setPrompt] = useState('');
   const [status, setStatus] = useState<Status>('idle');
@@ -560,10 +562,21 @@ export default function App() {
   }, []);
 
   useEffect(() => {
-    getSession().then((authSession) => {
-      setSession(authSession);
-      prevUserIdRef.current = authSession?.user?.id ?? null;
-    });
+    let cancelled = false;
+
+    getSession()
+      .then((authSession) => {
+        if (cancelled) return;
+        setSession(authSession);
+        prevUserIdRef.current = authSession?.user?.id ?? null;
+      })
+      .catch(() => {
+        if (cancelled) return;
+        setSession(null);
+      })
+      .finally(() => {
+        if (!cancelled) setIsAuthSessionResolved(true);
+      });
 
     const { unsubscribe } = onAuthStateChange((_event, authSession) => {
       const newUserId = authSession?.user?.id ?? null;
@@ -575,9 +588,14 @@ export default function App() {
 
       prevUserIdRef.current = newUserId;
       setSession(authSession);
+      // Sign-in/out via Cognito callbacks can land before/without overlapping getSession; always unblock UI.
+      setIsAuthSessionResolved(true);
     });
 
-    return () => unsubscribe();
+    return () => {
+      cancelled = true;
+      unsubscribe();
+    };
   }, [clearUserState]);
 
   // Network status monitoring
@@ -3395,6 +3413,15 @@ export default function App() {
 
   if (currentView === 'shared') {
     return <SharedMeetingPage />;
+  }
+
+  if (!isAuthSessionResolved) {
+    return (
+      <div className="min-h-screen w-full flex flex-col items-center justify-center gap-4 bg-app-canvas text-app-fg">
+        <Loader2 className="w-9 h-9 animate-spin text-app-fg/35" aria-hidden />
+        <p className="text-sm text-app-fg/45">Loading…</p>
+      </div>
+    );
   }
 
   if (!session) {

@@ -89,7 +89,8 @@ export default function KnowledgePage({
   const kgContainerRef = useRef<HTMLDivElement>(null);
   const graphRef = useRef<any>(null);
   const chatEndRef = useRef<HTMLDivElement>(null);
-  const kgArtifactRef = useRef<KGBuildArtifact | null>(null);
+  /** Kept in React state (not a ref) so graph data / related-meeting chips re-render when cache or pipeline finishes. */
+  const [kgBuildArtifact, setKgBuildArtifact] = useState<KGBuildArtifact | null>(null);
   const [isEmbedding, setIsEmbedding] = useState(false);
   const [embedProgress, setEmbedProgress] = useState({ current: 0, total: 3 });
   const [isReExtracting, setIsReExtracting] = useState(false);
@@ -113,30 +114,37 @@ export default function KnowledgePage({
     return () => observer.disconnect();
   }, [kgBuilt]);
 
-  // Fingerprint of the kgData the last artifact was built from
-  const lastBuildKeyRef = useRef('');
-
-  // Clear the artifact when a rebuild is initiated (kgBuilt goes false)
-  useEffect(() => {
-    if (!kgBuilt) {
-      kgArtifactRef.current = null;
-      lastBuildKeyRef.current = '';
-    }
-  }, [kgBuilt]);
-
   // Compute a stable data fingerprint so we can detect actual data changes
   const kgDataKey = useMemo(() => {
     if (kgData.length === 0) return '';
     return kgData.map((m: any) => m.meetingId).sort().join(',');
   }, [kgData]);
 
+  // Fingerprint of the kgData the last artifact was built from
+  const lastBuildKeyRef = useRef('');
+  const kgDataKeyRef = useRef(kgDataKey);
+  kgDataKeyRef.current = kgDataKey;
+
+  // Clear the artifact when a rebuild is initiated (kgBuilt goes false)
+  useEffect(() => {
+    if (!kgBuilt) {
+      setKgBuildArtifact(null);
+      lastBuildKeyRef.current = '';
+    }
+  }, [kgBuilt]);
+
   // Embedding pipeline: runs once when kgData is available after extraction.
   // Checks IndexedDB artifact cache first — if fingerprint matches, hydrates
   // instantly (zero API calls). Otherwise runs the full pipeline and caches result.
+  //
+  // Do NOT gate on `isEmbedding` — React Strict Mode cancels the first in-flight run
+  // while leaving isEmbedding=true, which would permanently skip this effect before
+  // we ever hydrate the cached artifact or reset isEmbedding=false.
   useEffect(() => {
-    if (!kgBuilt || kgData.length === 0 || isEmbedding) return;
-    if (kgArtifactRef.current && lastBuildKeyRef.current === kgDataKey) return;
+    if (!kgBuilt || kgData.length === 0) return;
+    if (lastBuildKeyRef.current === kgDataKey) return;
 
+    const snapshotKey = kgDataKey;
     let cancelled = false;
     const run = async () => {
       setIsEmbedding(true);
@@ -148,9 +156,11 @@ export default function KnowledgePage({
         // Try IndexedDB artifact cache first — instant render, zero API calls
         const cached = await loadCachedArtifact(fingerprint);
         if (cached && !cancelled) {
-          kgArtifactRef.current = cached;
-          lastBuildKeyRef.current = kgDataKey;
-          log.info('artifact_cache_hit_render', { meetings: kgData.length });
+          if (snapshotKey === kgDataKeyRef.current) {
+            setKgBuildArtifact(cached);
+            lastBuildKeyRef.current = snapshotKey;
+            log.info('artifact_cache_hit_render', { meetings: kgData.length });
+          }
           return;
         }
 
@@ -161,9 +171,9 @@ export default function KnowledgePage({
             if (!cancelled) setEmbedProgress({ current, total });
           }
         );
-        if (!cancelled) {
-          kgArtifactRef.current = artifact;
-          lastBuildKeyRef.current = kgDataKey;
+        if (!cancelled && snapshotKey === kgDataKeyRef.current) {
+          setKgBuildArtifact(artifact);
+          lastBuildKeyRef.current = snapshotKey;
           // Persist to IndexedDB so next load is instant
           saveCachedArtifact(fingerprint, artifact).catch(err =>
             log.warn('artifact_cache_save_failed', { error: err instanceof Error ? err : undefined })
@@ -175,7 +185,7 @@ export default function KnowledgePage({
         if (!cancelled) setIsEmbedding(false);
       }
     };
-    run();
+    void run();
     return () => { cancelled = true; };
   }, [kgBuilt, kgDataKey]);
 
@@ -191,13 +201,12 @@ export default function KnowledgePage({
   const graphData = useMemo(() => {
     if (kgData.length === 0) return { nodes: [], links: [] };
 
-    const artifact = kgArtifactRef.current;
-    if (artifact && artifact.embeddings.size) {
+    if (kgBuildArtifact) {
       return buildGraphDataUtil(
         kgData as MeetingRecord[],
-        artifact.embeddings,
-        artifact.meetingEdgeMatrix,
-        artifact.relationships,
+        kgBuildArtifact.embeddings,
+        kgBuildArtifact.meetingEdgeMatrix,
+        kgBuildArtifact.relationships,
         filterType
       );
     }
@@ -205,12 +214,12 @@ export default function KnowledgePage({
     // Fallback: build a basic graph from raw kgData without embeddings
     return buildGraphDataUtil(
       kgData as MeetingRecord[],
-      new Map(),           // empty embeddings
-      new Map(),           // empty edge matrix
-      [],                  // no relationships
+      new Map(),
+      new Map(),
+      [],
       filterType
     );
-  }, [kgDataKey, filterType, isEmbedding]);
+  }, [kgDataKey, filterType, kgBuildArtifact]);
 
   /** Subset / mode passed to ForceGraph — reduces clutter (overview) and optional ego network */
   const displayGraphData = useMemo(() => {
@@ -266,7 +275,7 @@ export default function KnowledgePage({
 
   useEffect(() => {
     shouldAutoFitRef.current = true;
-  }, [kgDataKey, filterType, graphViewMode, egoFocus, selectedNode?.id, isEmbedding]);
+  }, [kgDataKey, filterType, graphViewMode, egoFocus, selectedNode?.id, kgBuildArtifact]);
 
   useEffect(() => {
     const raf0 = requestAnimationFrame(() => {
@@ -317,10 +326,9 @@ export default function KnowledgePage({
 
   // O(1) related meetings lookup from pre-built edge matrix
   const findRelatedMeetings = useCallback((meetingId: string): MeetingEdge[] => {
-    const artifact = kgArtifactRef.current;
-    if (!artifact) return [];
-    return findRelatedMeetingsUtil(meetingId, artifact.meetingEdgeMatrix);
-  }, [isEmbedding]);
+    if (!kgBuildArtifact) return [];
+    return findRelatedMeetingsUtil(meetingId, kgBuildArtifact.meetingEdgeMatrix);
+  }, [kgBuildArtifact]);
 
   // Expandable Meeting Card Component — now receives MeetingEdge
   const ExpandableMeetingCard = ({ related, idx }: { related: MeetingEdge, idx: number }) => {
@@ -498,12 +506,11 @@ export default function KnowledgePage({
     setIsChatting(true);
 
     try {
-      const artifact = kgArtifactRef.current;
-      const systemPrompt = artifact
+      const systemPrompt = kgBuildArtifact
         ? buildChatContext(
             kgData as MeetingRecord[],
-            artifact.meetingEdgeMatrix,
-            artifact.relationships
+            kgBuildArtifact.meetingEdgeMatrix,
+            kgBuildArtifact.relationships
           )
         : `You are a helpful assistant that answers questions about the user's meeting knowledge graph.\n${kgData.map((m: any, i: number) => `Meeting ${i + 1}: ${m.meetingTitle}\n- Topics: ${(m.topics || []).map((t: any) => `${t.name} (${t.status}): ${t.summary}`).join('; ') || 'None'}\n- Decisions: ${(m.decisions || []).map((d: any) => d.decision).join('; ') || 'None'}\n- People: ${(m.people || []).join(', ') || 'None'}\n- Actions: ${(m.actionItems || []).map((a: any) => `${a.owner}: ${a.task}`).join('; ') || 'None'}`).join('\n\n')}\n\nAnswer the user's question based on this data. Be concise and helpful.`;
 
