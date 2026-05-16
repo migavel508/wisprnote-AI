@@ -76,6 +76,63 @@ export async function getDefaultOutput(): Promise<AudioDevice | null> {
   }
 }
 
+/** macOS: set the system default input (Bluetooth / USB / built-in). Native recording uses this device. */
+export async function setDefaultInputDevice(deviceId: string): Promise<void> {
+  if (!isTauri()) {
+    throw new Error('Setting the default microphone is only available in the desktop app.');
+  }
+  await tauriInvoke<void>('set_default_input_device', { deviceId });
+}
+
+/** macOS: set the system default speakers / headphones. */
+export async function setDefaultOutputDevice(deviceId: string): Promise<void> {
+  if (!isTauri()) {
+    throw new Error('Setting the default output is only available in the desktop app.');
+  }
+  await tauriInvoke<void>('set_default_output_device', { deviceId });
+}
+
+const WEB_MIC_DEVICE_KEY = 'wisprnote.webAudioInputDeviceId';
+
+/** Optional persisted Web Audio `deviceId` for browser-only recording (not used by Tauri native capture). */
+export function getSavedWebMicDeviceId(): string | null {
+  try {
+    return localStorage.getItem(WEB_MIC_DEVICE_KEY);
+  } catch {
+    return null;
+  }
+}
+
+export function saveWebMicDeviceId(deviceId: string | null): void {
+  try {
+    if (deviceId) {
+      localStorage.setItem(WEB_MIC_DEVICE_KEY, deviceId);
+    } else {
+      localStorage.removeItem(WEB_MIC_DEVICE_KEY);
+    }
+  } catch {
+    /* ignore */
+  }
+}
+
+/**
+ * Microphone stream for the browser fallback path. Uses a saved device id when set, otherwise
+ * the browser default (matches OS default on most setups).
+ */
+export async function getBrowserMicMediaStream(): Promise<MediaStream> {
+  const deviceId = getSavedWebMicDeviceId();
+  if (deviceId) {
+    try {
+      return await navigator.mediaDevices.getUserMedia({
+        audio: { deviceId: { exact: deviceId } },
+      });
+    } catch {
+      /* stale id — fall back */
+    }
+  }
+  return navigator.mediaDevices.getUserMedia({ audio: true });
+}
+
 // ─── Device Change Listener ──────────────────────────────────────────────────
 
 export async function listenForDeviceChanges(

@@ -23,6 +23,8 @@ import {
   listAudioDevices,
   getDefaultInput,
   getDefaultOutput,
+  setDefaultInputDevice,
+  setDefaultOutputDevice,
   listenForDeviceChanges,
   listenForDeviceRestart,
   type AudioDevice,
@@ -97,6 +99,7 @@ export default function AudioDevicePanel({ isOpen, onClose, isRecording }: Audio
   const [showOutputs, setShowOutputs] = useState(true);
   const [deviceSwitching, setDeviceSwitching] = useState(false);
   const [lastChangeType, setLastChangeType] = useState<string | null>(null);
+  const [busyDeviceId, setBusyDeviceId] = useState<string | null>(null);
 
   const refreshDevices = useCallback(async () => {
     setIsLoading(true);
@@ -117,6 +120,26 @@ export default function AudioDevicePanel({ isOpen, onClose, isRecording }: Audio
       setIsLoading(false);
     }
   }, []);
+
+  const activateDevice = useCallback(
+    async (device: AudioDevice, currentDefaultId: string | undefined) => {
+      if (device.id === currentDefaultId) return;
+      setBusyDeviceId(device.id);
+      try {
+        if (device.direction === 'Input') {
+          await setDefaultInputDevice(device.id);
+        } else {
+          await setDefaultOutputDevice(device.id);
+        }
+        await refreshDevices();
+      } catch (e) {
+        log.error('set_default_device_failed', { error: e instanceof Error ? e : undefined });
+      } finally {
+        setBusyDeviceId(null);
+      }
+    },
+    [refreshDevices],
+  );
 
   useEffect(() => {
     if (isOpen) {
@@ -279,11 +302,15 @@ export default function AudioDevicePanel({ isOpen, onClose, isRecording }: Audio
                       </div>
                     ) : (
                       inputDevices.map((device) => (
-                        <DeviceRow
-                          key={device.id}
-                          device={device}
-                          isDefault={defaultInput?.id === device.id}
-                        />
+                      <DeviceRow
+                        key={device.id}
+                        device={device}
+                        isDefault={defaultInput?.id === device.id}
+                        isBusy={busyDeviceId === device.id}
+                        onActivate={() =>
+                          void activateDevice(device, defaultInput?.id)
+                        }
+                      />
                       ))
                     )}
                   </div>
@@ -332,11 +359,15 @@ export default function AudioDevicePanel({ isOpen, onClose, isRecording }: Audio
                       </div>
                     ) : (
                       outputDevices.map((device) => (
-                        <DeviceRow
-                          key={device.id}
-                          device={device}
-                          isDefault={defaultOutput?.id === device.id}
-                        />
+                      <DeviceRow
+                        key={device.id}
+                        device={device}
+                        isDefault={defaultOutput?.id === device.id}
+                        isBusy={busyDeviceId === device.id}
+                        onActivate={() =>
+                          void activateDevice(device, defaultOutput?.id)
+                        }
+                      />
                       ))
                     )}
                   </div>
@@ -348,7 +379,8 @@ export default function AudioDevicePanel({ isOpen, onClose, isRecording }: Audio
           {/* Footer */}
           <div className="px-4 py-2.5 bg-[#FAFAFA] border-t border-[#141414]/5">
             <p className="text-[10px] text-[#141414]/30 text-center">
-              Devices auto-detected via macOS CoreAudio • Changes handled seamlessly during recording
+              Tap a device to set it as the system default (mic or speakers). Native recording uses the
+              default microphone. CoreAudio detects Bluetooth and USB automatically.
             </p>
           </div>
         </div>
@@ -360,17 +392,35 @@ export default function AudioDevicePanel({ isOpen, onClose, isRecording }: Audio
 function DeviceRow({
   device,
   isDefault,
+  isBusy,
+  onActivate,
 }: {
   device: AudioDevice;
   isDefault: boolean;
+  isBusy: boolean;
+  onActivate: () => void;
 }) {
+  const canTap = !isDefault && !isBusy;
+  const hint =
+    device.direction === 'Input' ? 'Set as default microphone' : 'Set as default output';
+
   return (
     <div
+      role={canTap ? 'button' : undefined}
+      tabIndex={canTap ? 0 : -1}
+      onClick={() => canTap && onActivate()}
+      onKeyDown={(e) => {
+        if (canTap && (e.key === 'Enter' || e.key === ' ')) {
+          e.preventDefault();
+          onActivate();
+        }
+      }}
+      title={isDefault ? undefined : hint}
       className={`flex items-center gap-3 px-3 py-2.5 rounded-xl transition-colors ${
         isDefault
           ? 'bg-[#141414]/[0.04]'
           : 'hover:bg-[#141414]/[0.02]'
-      }`}
+      } ${canTap ? 'cursor-pointer' : ''} ${isBusy ? 'opacity-70 pointer-events-none' : ''}`}
     >
       {/* Device Icon */}
       <div
@@ -402,6 +452,7 @@ function DeviceRow({
               <Check className="w-2.5 h-2.5 text-white" strokeWidth={3} />
             </span>
           )}
+          {isBusy && <RefreshCw className="w-3.5 h-3.5 text-[#141414]/35 animate-spin flex-shrink-0" />}
         </div>
         <div className="flex items-center gap-1.5 mt-0.5">
           {/* Transport Badge */}

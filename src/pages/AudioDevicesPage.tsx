@@ -24,6 +24,8 @@ import {
   listAudioDevices,
   getDefaultInput,
   getDefaultOutput,
+  setDefaultInputDevice,
+  setDefaultOutputDevice,
   listenForDeviceChanges,
   listenForDeviceRestart,
   type AudioDevice,
@@ -93,6 +95,8 @@ export default function AudioDevicesPage({ isRecording, currentInputDevice, devi
   const [deviceSwitching, setDeviceSwitching] = useState(false);
   const [lastChangeType, setLastChangeType] = useState<string | null>(null);
   const [changeCount, setChangeCount] = useState(0);
+  const [busyDeviceId, setBusyDeviceId] = useState<string | null>(null);
+  const [deviceActionError, setDeviceActionError] = useState<string | null>(null);
 
   const refreshDevices = useCallback(async () => {
     setIsLoading(true);
@@ -141,6 +145,34 @@ export default function AudioDevicesPage({ isRecording, currentInputDevice, devi
     };
   }, [refreshDevices]);
 
+  const activateDevice = useCallback(
+    async (device: AudioDevice) => {
+      const isAlreadyDefault =
+        device.direction === 'Input'
+          ? defaultInput?.id === device.id
+          : defaultOutput?.id === device.id;
+      if (isAlreadyDefault) return;
+
+      setBusyDeviceId(device.id);
+      setDeviceActionError(null);
+      try {
+        if (device.direction === 'Input') {
+          await setDefaultInputDevice(device.id);
+        } else {
+          await setDefaultOutputDevice(device.id);
+        }
+        await refreshDevices();
+      } catch (e) {
+        setDeviceActionError(
+          e instanceof Error ? e.message : 'Could not change the default device.',
+        );
+      } finally {
+        setBusyDeviceId(null);
+      }
+    },
+    [defaultInput?.id, defaultOutput?.id, refreshDevices],
+  );
+
   return (
     <div className="flex flex-col h-full bg-white font-[system-ui] overflow-y-auto">
       <div className="w-full max-w-[760px] mx-auto px-3 sm:px-6 md:px-8 pt-5 sm:pt-12 pb-8 sm:pb-12">
@@ -149,8 +181,15 @@ export default function AudioDevicesPage({ isRecording, currentInputDevice, devi
           Audio Devices
         </h1>
         <p className="text-[12px] sm:text-[14px] text-[#141414]/40 mb-5 sm:mb-8">
-          Manage input & output devices. Changes are auto-detected.
+          Manage input and output devices. Tap a device to make it the system default — native recording
+          uses the default microphone (Bluetooth, USB, or built-in). Changes are auto-detected.
         </p>
+
+        {deviceActionError && (
+          <div className="mb-5 rounded-xl border border-red-200 bg-red-50 px-4 py-3 text-[12px] text-red-800">
+            {deviceActionError}
+          </div>
+        )}
 
         {/* Status Cards Row */}
         <div className="grid grid-cols-1 sm:grid-cols-3 gap-3 mb-8">
@@ -326,6 +365,8 @@ export default function AudioDevicesPage({ isRecording, currentInputDevice, devi
                         key={device.id}
                         device={device}
                         isDefault={defaultInput?.id === device.id}
+                        isBusy={busyDeviceId === device.id}
+                        onActivate={() => void activateDevice(device)}
                       />
                     ))
                   )}
@@ -377,6 +418,8 @@ export default function AudioDevicesPage({ isRecording, currentInputDevice, devi
                         key={device.id}
                         device={device}
                         isDefault={defaultOutput?.id === device.id}
+                        isBusy={busyDeviceId === device.id}
+                        onActivate={() => void activateDevice(device)}
                       />
                     ))
                   )}
@@ -394,9 +437,13 @@ export default function AudioDevicesPage({ isRecording, currentInputDevice, devi
               <p className="text-[12px] font-medium text-[#141414]/50 mb-1">How it works</p>
               <ul className="text-[11px] text-[#141414]/35 space-y-1">
                 <li>Devices are auto-detected via macOS CoreAudio property listeners</li>
-                <li>When you connect Bluetooth headphones or plug in a USB mic, the default device updates automatically</li>
-                <li>During active recording, audio capture restarts seamlessly with the new device</li>
-                <li>Device changes are debounced (1 second) to handle rapid Bluetooth pairing transitions</li>
+                <li>
+                  Tap any input or output to set it as the system default — same as Sound settings in System
+                  Preferences
+                </li>
+                <li>When you connect Bluetooth headphones or plug in a USB mic, you can switch defaults here</li>
+                <li>During active recording, audio capture restarts seamlessly when the default mic changes</li>
+                <li>Default-device changes are debounced to handle rapid Bluetooth pairing transitions</li>
               </ul>
             </div>
           </div>
@@ -406,13 +453,39 @@ export default function AudioDevicesPage({ isRecording, currentInputDevice, devi
   );
 }
 
-function DeviceCard({ device, isDefault }: { device: AudioDevice; isDefault: boolean }) {
+function DeviceCard({
+  device,
+  isDefault,
+  isBusy,
+  onActivate,
+}: {
+  device: AudioDevice;
+  isDefault: boolean;
+  isBusy: boolean;
+  onActivate: () => void;
+}) {
+  const canActivate = !isDefault && !isBusy;
+  const activateHint =
+    device.direction === 'Input' ? 'Set as default microphone' : 'Set as default output';
+
   return (
-    <div className={`bg-white rounded-xl border p-4 transition-all ${
-      isDefault
-        ? 'border-[#141414]/15 shadow-sm'
-        : 'border-[#141414]/8 hover:border-[#141414]/12'
-    }`}>
+    <div
+      role={canActivate ? 'button' : undefined}
+      tabIndex={canActivate ? 0 : -1}
+      onClick={() => canActivate && onActivate()}
+      onKeyDown={(e) => {
+        if (canActivate && (e.key === 'Enter' || e.key === ' ')) {
+          e.preventDefault();
+          onActivate();
+        }
+      }}
+      title={isDefault ? 'Current default' : activateHint}
+      className={`bg-white rounded-xl border p-4 transition-all ${
+        isDefault
+          ? 'border-[#141414]/15 shadow-sm'
+          : 'border-[#141414]/8 hover:border-[#141414]/12'
+      } ${canActivate ? 'cursor-pointer' : ''} ${isBusy ? 'opacity-70 pointer-events-none' : ''}`}
+    >
       <div className="flex items-center gap-3.5">
         {/* Icon */}
         <div className={`w-10 h-10 rounded-xl flex items-center justify-center flex-shrink-0 ${
@@ -440,6 +513,9 @@ function DeviceCard({ device, isDefault }: { device: AudioDevice; isDefault: boo
                 <Check className="w-2.5 h-2.5" strokeWidth={3} />
                 Default
               </span>
+            )}
+            {isBusy && (
+              <RefreshCw className="w-3.5 h-3.5 text-[#141414]/40 animate-spin flex-shrink-0" />
             )}
           </div>
 

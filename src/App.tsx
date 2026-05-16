@@ -120,6 +120,7 @@ import {
   listenForDeviceChanges,
   listenForDeviceRestart,
   getDefaultInput,
+  getBrowserMicMediaStream,
   type DeviceChangeType,
 } from './services/audioDeviceService';
 
@@ -909,7 +910,7 @@ export default function App() {
 
   const startRealtimeBackupCapture = async () => {
     try {
-      const stream = await navigator.mediaDevices.getUserMedia({ audio: true });
+      const stream = await getBrowserMicMediaStream();
       const recorder = new MediaRecorder(stream);
       realtimeBackupChunksRef.current = [];
       realtimeBackupStreamRef.current = stream;
@@ -1141,7 +1142,7 @@ export default function App() {
     } else {
       // ── Browser Recording (microphone only via MediaRecorder) ──
       try {
-        const stream = await navigator.mediaDevices.getUserMedia({ audio: true });
+        const stream = await getBrowserMicMediaStream();
         const mediaRecorder = new MediaRecorder(stream);
         mediaRecorderRef.current = mediaRecorder;
         audioChunksRef.current = [];
