@@ -20,7 +20,7 @@ export default async function handler(req: VercelRequest, res: VercelResponse) {
   const title = preview.title;
   const description = preview.description;
 
-  const ogImageUrl = `${siteUrl}/api/og/share/${encodeURIComponent(token)}`;
+  const ogImageUrl = `${siteUrl}/wisprnote_url_share.png`;
 
   const meta = `
     <meta name="description" content="${escapeHtml(description)}" />
