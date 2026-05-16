@@ -4,10 +4,15 @@ import { query, queryOne, queryCount } from './db';
 import { ok, created, noContent, badRequest, notFound, unauthorized, serverError, corsPreflightResponse } from './response';
 import { S3Client, PutObjectCommand } from '@aws-sdk/client-s3';
 import { getSignedUrl } from '@aws-sdk/s3-request-presigner';
+import { SESClient, SendEmailCommand } from '@aws-sdk/client-ses';
 
 const S3_BUCKET = process.env.S3_BUCKET || '';
 const S3_REGION = process.env.AWS_REGION || 'us-east-1';
 const s3 = new S3Client({ region: S3_REGION });
+
+const SES_FROM_EMAIL = process.env.SES_FROM_EMAIL || 'noreply@wisprnote.com';
+const SITE_URL = (process.env.WISPRNOTE_PUBLIC_URL || 'https://www.wisprnote.com').replace(/\/$/, '');
+const ses = new SESClient({ region: S3_REGION });
 
 const COGNITO_USER_POOL_ID = process.env.COGNITO_USER_POOL_ID || '';
 const COGNITO_CLIENT_ID = process.env.COGNITO_CLIENT_ID || '';
@@ -48,9 +53,6 @@ function parseBody(event: APIGatewayProxyEvent): any {
   try { return JSON.parse(event.body); } catch { return {}; }
 }
 
-function getPathParam(event: APIGatewayProxyEvent, segments: string[], index: number): string | undefined {
-  return segments[index];
-}
 
 function generateToken(len = 22): string {
   const chars = 'ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789';
@@ -59,6 +61,110 @@ function generateToken(len = 22): string {
   require('crypto').randomFillSync(bytes);
   for (const b of bytes) result += chars[b % chars.length];
   return result;
+}
+
+async function sendShareInviteEmails(options: {
+  to: string[];
+  meetingTitle: string;
+  shareToken: string;
+  ownerEmail?: string | null;
+}): Promise<void> {
+  if (!options.to.length) return;
+  const shareUrl = `${SITE_URL}/shared/${options.shareToken}`;
+  const sharedBy = options.ownerEmail || 'Someone';
+  const subject = `${sharedBy} shared a meeting with you on Wisprnote AI`;
+
+  const html = `<!DOCTYPE html>
+<html lang="en">
+<head><meta charset="UTF-8" /><meta name="viewport" content="width=device-width,initial-scale=1" /></head>
+<body style="margin:0;padding:0;background:#f5f0eb;font-family:'Inter',system-ui,sans-serif;">
+  <table width="100%" cellpadding="0" cellspacing="0" style="background:#f5f0eb;padding:40px 0;">
+    <tr><td align="center">
+      <table width="520" cellpadding="0" cellspacing="0" style="background:#ffffff;border-radius:16px;overflow:hidden;box-shadow:0 2px 12px rgba(0,0,0,0.06);">
+
+        <!-- Header -->
+        <tr>
+          <td style="background:#f06060;padding:32px 40px;text-align:center;">
+            <p style="margin:0;font-size:22px;font-weight:700;color:#ffffff;letter-spacing:-0.3px;">Wisprnote AI</p>
+            <p style="margin:6px 0 0;font-size:13px;color:rgba(255,255,255,0.8);">Listen once. Remember forever.</p>
+          </td>
+        </tr>
+
+        <!-- Body -->
+        <tr>
+          <td style="padding:36px 40px 28px;">
+            <p style="margin:0 0 8px;font-size:15px;font-weight:600;color:#1c1917;">You've been invited to a meeting</p>
+            <p style="margin:0 0 24px;font-size:13px;color:#78716c;line-height:1.6;">
+              <strong style="color:#1c1917;">${sharedBy}</strong> shared their meeting notes with you.
+            </p>
+
+            <!-- Meeting card -->
+            <table width="100%" cellpadding="0" cellspacing="0" style="background:#faf8f5;border:1px solid #e8e2da;border-radius:12px;margin-bottom:28px;">
+              <tr>
+                <td style="padding:20px 24px;">
+                  <p style="margin:0 0 4px;font-size:11px;font-weight:600;color:#a8a29e;text-transform:uppercase;letter-spacing:0.08em;">Meeting</p>
+                  <p style="margin:0;font-size:17px;font-weight:700;color:#1c1917;line-height:1.3;">${options.meetingTitle}</p>
+                </td>
+              </tr>
+            </table>
+
+            <!-- CTA button -->
+            <table cellpadding="0" cellspacing="0" style="margin:0 auto;">
+              <tr>
+                <td style="background:#f06060;border-radius:999px;">
+                  <a href="${shareUrl}" style="display:inline-block;padding:13px 32px;font-size:14px;font-weight:600;color:#ffffff;text-decoration:none;letter-spacing:-0.1px;">
+                    View Meeting Notes →
+                  </a>
+                </td>
+              </tr>
+            </table>
+
+            <p style="margin:28px 0 0;font-size:11px;color:#a8a29e;text-align:center;line-height:1.6;">
+              Or copy this link: <a href="${shareUrl}" style="color:#f06060;word-break:break-all;">${shareUrl}</a>
+            </p>
+          </td>
+        </tr>
+
+        <!-- Footer -->
+        <tr>
+          <td style="border-top:1px solid #f0ebe4;padding:20px 40px;text-align:center;">
+            <p style="margin:0;font-size:11px;color:#c4bab0;">
+              Shared via <strong style="color:#78716c;">Wisprnote AI</strong> · You received this because your email was added to a shared meeting.
+            </p>
+          </td>
+        </tr>
+
+      </table>
+    </td></tr>
+  </table>
+</body>
+</html>`;
+
+  const text = `${sharedBy} shared a meeting with you on Wisprnote AI\n\nMeeting: ${options.meetingTitle}\n\nView it here: ${shareUrl}`;
+
+  const results = await Promise.allSettled(
+    options.to.map(email =>
+      ses.send(new SendEmailCommand({
+        Source: `Wisprnote AI <${SES_FROM_EMAIL}>`,
+        Destination: { ToAddresses: [email] },
+        Message: {
+          Subject: { Data: subject, Charset: 'UTF-8' },
+          Body: {
+            Html: { Data: html, Charset: 'UTF-8' },
+            Text: { Data: text, Charset: 'UTF-8' },
+          },
+        },
+      }))
+    )
+  );
+
+  results.forEach((result, i) => {
+    if (result.status === 'rejected') {
+      console.error(`SES failed for ${options.to[i]}:`, result.reason?.message || result.reason);
+    } else {
+      console.log(`SES sent to ${options.to[i]}, MessageId:`, result.value?.MessageId);
+    }
+  });
 }
 
 export const handler = async (event: APIGatewayProxyEvent): Promise<APIGatewayProxyResult> => {
@@ -330,11 +436,28 @@ async function handleShares(method: string, segments: string[], userId: string, 
       [body.task_id, userId, token, body.access_type || 'public']
     );
     if (body.emails?.length && row) {
+      const emails: string[] = [];
       for (const email of body.emails) {
+        const clean = email.trim().toLowerCase();
         await query(
           'INSERT INTO shared_meeting_access (share_id, email) VALUES ($1,$2) ON CONFLICT (share_id, email) DO NOTHING',
-          [row.id, email.trim().toLowerCase()]
+          [row.id, clean]
         );
+        emails.push(clean);
+      }
+      if (emails.length) {
+        const task = await queryOne('SELECT filename FROM task_history WHERE id=$1', [body.task_id]);
+        try {
+          await sendShareInviteEmails({
+            to: emails,
+            meetingTitle: task?.filename || 'Meeting Notes',
+            shareToken: token,
+            ownerEmail: getUserEmail(),
+          });
+          console.log('Share invite emails sent to:', emails.join(', '));
+        } catch (err) {
+          console.error('SES send failed:', err);
+        }
       }
     }
     return created(row);
@@ -374,11 +497,31 @@ async function handleShares(method: string, segments: string[], userId: string, 
   if (subResource === 'emails') {
     if (method === 'POST') {
       const body = parseBody(event);
+      const emails: string[] = [];
       for (const email of (body.emails || [])) {
+        const clean = email.trim().toLowerCase();
         await query(
           'INSERT INTO shared_meeting_access (share_id, email) VALUES ($1,$2) ON CONFLICT (share_id, email) DO NOTHING',
-          [shareId, email.trim().toLowerCase()]
+          [shareId, clean]
         );
+        emails.push(clean);
+      }
+      if (emails.length) {
+        const share = await queryOne('SELECT share_token, task_id FROM shared_meetings WHERE id=$1 AND owner_id=$2', [shareId, userId]);
+        if (share) {
+          const task = await queryOne('SELECT filename FROM task_history WHERE id=$1', [share.task_id]);
+          try {
+            await sendShareInviteEmails({
+              to: emails,
+              meetingTitle: task?.filename || 'Meeting Notes',
+              shareToken: share.share_token,
+              ownerEmail: getUserEmail(),
+            });
+            console.log('Share invite emails sent to:', emails.join(', '));
+          } catch (err) {
+            console.error('SES send failed:', err);
+          }
+        }
       }
       return noContent();
     }
