@@ -1,4 +1,9 @@
 {
+  "functions": {
+    "api/share-html.ts": {
+      "includeFiles": "dist/**"
+    }
+  },
   "rewrites": [
     { "source": "/shared/:token", "destination": "/api/share-html?token=:token" },
     { "source": "/(.*)", "destination": "/index.html" }

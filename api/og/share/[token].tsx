@@ -1,5 +1,5 @@
 import { ImageResponse } from '@vercel/og';
-import { loadSharePreview } from '../../_sharePreview';
+import { loadSharePreview } from '../../../lib/sharePreview';
 
 export const config = { runtime: 'edge' };
 
