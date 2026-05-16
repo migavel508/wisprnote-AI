@@ -7,6 +7,8 @@ mod audio_device;
 mod deepgram_transcriber;
 mod device_monitor;
 mod logger;
+#[cfg(target_os = "macos")]
+mod mic_cpal;
 mod permissions;
 mod system_audio;
 use system_audio::SystemAudioRecorder;
@@ -106,6 +108,19 @@ fn get_default_input() -> Result<Option<audio_device::AudioDevice>, String> {
 #[tauri::command]
 fn get_default_output() -> Result<Option<audio_device::AudioDevice>, String> {
     audio_device::get_default_output_device()
+}
+
+/// Set macOS default input device (CoreAudio UID). Recording follows this device, including
+/// Bluetooth and USB headsets, matching anarlog-style audio settings.
+#[tauri::command]
+fn set_default_input_device(device_id: String) -> Result<(), String> {
+    audio_device::set_default_input_device(&device_id)
+}
+
+/// Set macOS default output device (CoreAudio UID).
+#[tauri::command]
+fn set_default_output_device(device_id: String) -> Result<(), String> {
+    audio_device::set_default_output_device(&device_id)
 }
 
 // ─── Permission Commands ─────────────────────────────────────────────────────
@@ -249,6 +264,8 @@ pub fn run() {
             list_audio_devices,
             get_default_input,
             get_default_output,
+            set_default_input_device,
+            set_default_output_device,
             check_permissions,
             request_microphone_permission,
             open_screen_recording_settings,

@@ -40,6 +40,8 @@
     "@tiptap/starter-kit": "^3.21.0",
     "@tiptap/suggestion": "^3.21.0",
     "@turbopuffer/turbopuffer": "^1.22.0",
+    "@vercel/node": "^5.5.16",
+    "@vercel/og": "^0.8.5",
     "@vitejs/plugin-react": "^5.0.4",
     "amazon-cognito-identity-js": "^6.3.16",
     "better-sqlite3": "^12.4.1",

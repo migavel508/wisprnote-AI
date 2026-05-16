@@ -29,3 +29,4 @@ chrono = "0.4"
 [target.'cfg(target_os = "macos")'.dependencies]
 cidre = { git = "https://github.com/yury/cidre", features = ["ca", "av", "cf", "ns", "blocks", "async"] }
 ringbuf = "0.4"
+cpal = "0.17"

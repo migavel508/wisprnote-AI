@@ -8,51 +8,13 @@ pub mod macos {
     use std::sync::{Arc, Mutex};
     use cidre::{av, cat, cf, ns, os};
     use cidre::core_audio as ca;
-    use ringbuf::{HeapRb, traits::Split};
+    use ringbuf::{HeapRb, traits::Split, traits::Consumer};
 
     const BUFFER_SIZE: usize = 65536;
 
     struct Ctx {
         common_format: av::audio::CommonFormat,
         producer: ringbuf::HeapProd<f32>,
-    }
-
-    extern "C" fn mic_io_proc(
-        _device: ca::Device,
-        _now: &cat::AudioTimeStamp,
-        input_data: &cat::AudioBufList<1>,
-        _input_time: &cat::AudioTimeStamp,
-        _output_data: &mut cat::AudioBufList<1>,
-        _output_time: &cat::AudioTimeStamp,
-        ctx: Option<&mut Ctx>,
-    ) -> os::Status {
-        let ctx = ctx.unwrap();
-        let buf = &input_data.buffers[0];
-
-        if buf.data_bytes_size == 0 || buf.data.is_null() {
-            return os::Status::NO_ERR;
-        }
-
-        match ctx.common_format {
-            av::audio::CommonFormat::PcmF32 => {
-                if let Some(samples) = read_samples::<f32>(buf) {
-                    use ringbuf::traits::Producer;
-                    ctx.producer.push_slice(samples);
-                }
-            }
-            av::audio::CommonFormat::PcmF64 => {
-                convert_and_push::<f64>(buf, &mut ctx.producer, |x| x as f32);
-            }
-            av::audio::CommonFormat::PcmI32 => {
-                convert_and_push::<i32>(buf, &mut ctx.producer, |x| x as f32 / i32::MAX as f32);
-            }
-            av::audio::CommonFormat::PcmI16 => {
-                convert_and_push::<i16>(buf, &mut ctx.producer, |x| x as f32 / i16::MAX as f32);
-            }
-            _ => {}
-        }
-
-        os::Status::NO_ERR
     }
 
     extern "C" fn system_io_proc(
@@ -119,6 +81,61 @@ pub mod macos {
         for &s in samples {
             let _ = producer.try_push(convert(s));
         }
+    }
+
+    /// Skip our own aggregate / tap device names so we never capture the system-audio tap as "mic".
+    const CAPTURE_SKIP_NAME_FRAGMENTS: &[&str] =
+        &["WisprnoteAudioCapture", "WisprnoteRealtimeCapture"];
+
+    fn device_name_should_skip_mic(name: &str) -> bool {
+        CAPTURE_SKIP_NAME_FRAGMENTS
+            .iter()
+            .any(|frag| name.contains(frag))
+    }
+
+    fn has_input_streams(device: &ca::Device) -> bool {
+        let addr =
+            ca::PropSelector::DEVICE_STREAMS.addr(ca::PropScope::INPUT, ca::PropElement::MAIN);
+        device
+            .prop_size(&addr)
+            .map(|size| size > 0)
+            .unwrap_or(false)
+    }
+
+    /// Prefer the user-selected default input (Bluetooth / USB / built-in). If the default is
+    /// missing, invalid, or one of our virtual tap aggregates, pick the first real input device
+    /// (same idea as anarlog/cpal fallbacks).
+    fn resolve_capture_input_device() -> Result<ca::Device, anyhow::Error> {
+        if let Ok(default) = ca::System::default_input_device() {
+            if !default.is_unknown() && has_input_streams(&default) {
+                match default.name() {
+                    Ok(name) => {
+                        let n = name.to_string();
+                        if !device_name_should_skip_mic(&n) {
+                            return Ok(default);
+                        }
+                    }
+                    Err(_) => return Ok(default),
+                }
+            }
+        }
+
+        let ca_devices = ca::System::devices()
+            .map_err(|e| anyhow::anyhow!("enumerate devices: {:?}", e))?;
+        for ca_device in ca_devices {
+            if ca_device.is_unknown() || !has_input_streams(&ca_device) {
+                continue;
+            }
+            if let Ok(name) = ca_device.name() {
+                if device_name_should_skip_mic(&name.to_string()) {
+                    continue;
+                }
+            }
+            return Ok(ca_device);
+        }
+
+        ca::System::default_input_device()
+            .map_err(|e| anyhow::anyhow!("default input device: {:?}", e))
     }
 
     /// Global state for the audio recorder
@@ -256,29 +273,36 @@ pub mod macos {
         audio_data: &Arc<Mutex<Vec<f32>>>,
         dev_rx: &std::sync::mpsc::Receiver<crate::device_monitor::DeviceChange>,
     ) -> Result<(), anyhow::Error> {
-        // Setup microphone
-        let mic_device = ca::System::default_input_device()?;
-        let mic_asbd = mic_device.input_asbd()?;
-        let mic_format = av::AudioFormat::with_asbd(&mic_asbd).unwrap();
-        let mic_common_format = mic_format.common_format();
+        // CoreAudio device id + human name (CPAL matches by name — same as anarlog’s device pick).
+        let mic_ca = resolve_capture_input_device()?;
+        let mic_ca_name = mic_ca
+            .name()
+            .map_err(|e| anyhow::anyhow!("mic device name: {:?}", e))?
+            .to_string();
 
-        // Setup system audio tap
+        // System audio tap (dictates the mix timeline sample rate).
         let tap_desc = ca::TapDesc::with_mono_global_tap_excluding_processes(&ns::Array::new());
         let tap = tap_desc.create_process_tap()?;
         let tap_asbd = tap.asbd().unwrap();
+        let out_hz = tap_asbd.sample_rate as u32;
         let tap_format = av::AudioFormat::with_asbd(&tap_asbd).unwrap();
         let tap_common_format = tap_format.common_format();
 
-        // Create ring buffers
+        // Mic via CPAL (Bluetooth-safe); align to tap rate when hardware allows.
         let mic_rb = HeapRb::<f32>::new(BUFFER_SIZE);
         let (mic_producer, mut mic_consumer) = mic_rb.split();
-        let mut mic_ctx = Box::new(Ctx { common_format: mic_common_format, producer: mic_producer });
+        let _mic_cpal = crate::mic_cpal::spawn_cpal_mic(&mic_ca_name, out_hz, mic_producer)?;
+        let mic_cpal_hz = _mic_cpal.mic_sample_hz();
+
+        std::thread::sleep(std::time::Duration::from_millis(50));
 
         let system_rb = HeapRb::<f32>::new(BUFFER_SIZE);
         let (system_producer, mut system_consumer) = system_rb.split();
-        let mut system_ctx = Box::new(Ctx { common_format: tap_common_format, producer: system_producer });
+        let mut system_ctx = Box::new(Ctx {
+            common_format: tap_common_format,
+            producer: system_producer,
+        });
 
-        // Create aggregate device for system audio
         let sub_tap = cf::DictionaryOf::with_keys_values(
             &[ca::sub_device_keys::uid()],
             &[tap.uid().unwrap().as_type_ref()],
@@ -301,15 +325,16 @@ pub mod macos {
             ],
         );
 
-        // Start devices
-        let mic_proc_id = mic_device.create_io_proc_id(mic_io_proc, Some(&mut *mic_ctx))?;
-        let _mic_started = ca::device_start(mic_device, Some(mic_proc_id))?;
-
         let agg_device = ca::AggregateDevice::with_desc(&agg_desc)?;
         let system_proc_id = agg_device.create_io_proc_id(system_io_proc, Some(&mut *system_ctx))?;
         let _system_started = ca::device_start(agg_device, Some(system_proc_id))?;
 
-        eprintln!("System audio recording started (device session)");
+        let mut mic_follower = crate::mic_cpal::MicRateFollower::default();
+
+        eprintln!(
+            "System audio recording started: cpal mic @ {} Hz, tap @ {} Hz",
+            mic_cpal_hz, out_hz
+        );
 
         // Drain any stale device-change events that fired during setup
         // (creating the aggregate device itself triggers HW_DEVICES changes)
@@ -318,8 +343,6 @@ pub mod macos {
 
         // Record loop — also checks for device changes
         while is_recording.load(Ordering::Relaxed) {
-            use ringbuf::traits::Consumer;
-
             // Only react to actual input device changes, NOT device-list changes
             // (we trigger DeviceListChanged ourselves when creating/destroying aggregate devices)
             if let Ok(change) = dev_rx.try_recv() {
@@ -334,23 +357,18 @@ pub mod macos {
 
             let mut samples_to_add = Vec::new();
 
-            // Mix mic and system audio
+            // Mix: advance mic on the system (tap) clock so Bluetooth 16 kHz HFP + 48 kHz tap stay aligned.
             loop {
-                let mic_sample = mic_consumer.try_pop();
-                let system_sample = system_consumer.try_pop();
-
-                match (mic_sample, system_sample) {
-                    (Some(m), Some(s)) => {
-                        // Mix: 60% mic + 40% system
+                match system_consumer.try_pop() {
+                    Some(s) => {
+                        let m = mic_follower.next_mic_for_system_tick(
+                            &mut mic_consumer,
+                            mic_cpal_hz,
+                            out_hz,
+                        );
                         samples_to_add.push((m * 0.6) + (s * 0.4));
                     }
-                    (Some(m), None) => {
-                        samples_to_add.push(m);
-                    }
-                    (None, Some(s)) => {
-                        samples_to_add.push(s);
-                    }
-                    (None, None) => break,
+                    None => break,
                 }
             }
 
@@ -520,13 +538,13 @@ pub mod macos {
     ) -> Result<(), anyhow::Error> {
         use tauri::Emitter;
 
-        // Setup microphone
-        let mic_device = ca::System::default_input_device()?;
-        let mic_asbd = mic_device.input_asbd()?;
-        let mic_format = av::AudioFormat::with_asbd(&mic_asbd).unwrap();
-        let mic_common_format = mic_format.common_format();
+        // CoreAudio name → CPAL mic (Bluetooth / HFP safe).
+        let mic_ca = resolve_capture_input_device()?;
+        let mic_ca_name = mic_ca
+            .name()
+            .map_err(|e| anyhow::anyhow!("mic device name: {:?}", e))?
+            .to_string();
 
-        // Setup system audio tap
         let tap_desc = ca::TapDesc::with_mono_global_tap_excluding_processes(&ns::Array::new());
         let tap = tap_desc.create_process_tap()?;
         let tap_asbd = tap.asbd().unwrap();
@@ -534,20 +552,20 @@ pub mod macos {
         let tap_format = av::AudioFormat::with_asbd(&tap_asbd).unwrap();
         let tap_common_format = tap_format.common_format();
 
-        eprintln!("Realtime: Mic {} Hz {:?}, System {} Hz {:?}",
-            mic_asbd.sample_rate as u32, mic_common_format,
-            sample_rate, tap_common_format);
-
-        // Create ring buffers
         let mic_rb = HeapRb::<f32>::new(BUFFER_SIZE);
         let (mic_producer, mut mic_consumer) = mic_rb.split();
-        let mut mic_ctx = Box::new(Ctx { common_format: mic_common_format, producer: mic_producer });
+        let _mic_cpal = crate::mic_cpal::spawn_cpal_mic(&mic_ca_name, sample_rate, mic_producer)?;
+        let mic_cpal_hz = _mic_cpal.mic_sample_hz();
+
+        std::thread::sleep(std::time::Duration::from_millis(50));
 
         let system_rb = HeapRb::<f32>::new(BUFFER_SIZE);
         let (system_producer, mut system_consumer) = system_rb.split();
-        let mut system_ctx = Box::new(Ctx { common_format: tap_common_format, producer: system_producer });
+        let mut system_ctx = Box::new(Ctx {
+            common_format: tap_common_format,
+            producer: system_producer,
+        });
 
-        // Create aggregate device for system audio
         let sub_tap = cf::DictionaryOf::with_keys_values(
             &[ca::sub_device_keys::uid()],
             &[tap.uid().unwrap().as_type_ref()],
@@ -570,15 +588,16 @@ pub mod macos {
             ],
         );
 
-        // Start devices
-        let mic_proc_id = mic_device.create_io_proc_id(mic_io_proc, Some(&mut *mic_ctx))?;
-        let _mic_started = ca::device_start(mic_device, Some(mic_proc_id))?;
-
         let agg_device = ca::AggregateDevice::with_desc(&agg_desc)?;
         let system_proc_id = agg_device.create_io_proc_id(system_io_proc, Some(&mut *system_ctx))?;
         let _system_started = ca::device_start(agg_device, Some(system_proc_id))?;
 
-        eprintln!("Realtime recording started - streaming to Deepgram");
+        let mut mic_follower = crate::mic_cpal::MicRateFollower::default();
+
+        eprintln!(
+            "Realtime: cpal mic {} Hz, tap {} Hz {:?}",
+            mic_cpal_hz, sample_rate, tap_common_format
+        );
 
         // Drain stale device-change events from setup phase
         // (creating the aggregate device fires HW_DEVICES notifications)
@@ -597,8 +616,6 @@ pub mod macos {
             let mut chunk_buffer = Vec::with_capacity(CHUNK_SIZE);
 
             while is_recording.load(Ordering::Relaxed) {
-                use ringbuf::traits::Consumer;
-
                 // Only react to actual input device changes (e.g. Bluetooth headset connected).
                 // Ignore DeviceListChanged — we trigger those ourselves when creating aggregate devices.
                 if let Ok(change) = dev_rx.try_recv() {
@@ -612,16 +629,18 @@ pub mod macos {
                     }
                 }
 
-                // Read and mix mic + system audio
+                // Read and mix mic + system audio (tap is the master clock).
                 while chunk_buffer.len() < CHUNK_SIZE {
-                    let mic_sample = mic_consumer.try_pop();
-                    let system_sample = system_consumer.try_pop();
-
-                    match (mic_sample, system_sample) {
-                        (Some(m), Some(s)) => chunk_buffer.push((m + s) * 0.5),
-                        (Some(m), None) => chunk_buffer.push(m),
-                        (None, Some(s)) => chunk_buffer.push(s),
-                        (None, None) => break,
+                    match system_consumer.try_pop() {
+                        Some(s) => {
+                            let m = mic_follower.next_mic_for_system_tick(
+                                &mut mic_consumer,
+                                mic_cpal_hz,
+                                sample_rate,
+                            );
+                            chunk_buffer.push((m + s) * 0.5);
+                        }
+                        None => break,
                     }
                 }
 
