@@ -156,7 +156,7 @@ export async function verifyShareAccess(
 // ---------------------------------------------------------------------------
 
 export function getShareUrl(shareToken: string): string {
-  return `https://www.wisprnote.com/shared/${shareToken}`;
+  return `https://wisprnote.com/shared/${shareToken}`;
 }
 
 export function copyShareUrl(shareToken: string): void {
