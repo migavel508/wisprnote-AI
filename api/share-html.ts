@@ -1,28 +1,65 @@
+import { readFileSync } from 'node:fs';
+import { join } from 'node:path';
 import type { VercelRequest, VercelResponse } from '@vercel/node';
-import { escapeHtml, loadSharePreview } from './_sharePreview';
+import { escapeHtml, loadSharePreview } from '../lib/sharePreview';
+
+function readBundledIndexHtml(): string | null {
+  try {
+    const p = join(process.cwd(), 'dist', 'index.html');
+    return readFileSync(p, 'utf8');
+  } catch {
+    return null;
+  }
+}
+
+async function fetchIndexHtml(siteUrl: string): Promise<string | null> {
+  const urls = [`${siteUrl}/`, `${siteUrl}/index.html`];
+  for (const url of urls) {
+    const ctrl = new AbortController();
+    const t = setTimeout(() => ctrl.abort(), 12_000);
+    try {
+      const idxRes = await fetch(url, {
+        redirect: 'follow',
+        signal: ctrl.signal,
+      });
+      if (idxRes.ok) {
+        const html = await idxRes.text();
+        if (html.includes('</head>') && (html.includes('<div id="root"') || html.includes('<script'))) {
+          return html;
+        }
+      }
+    } catch {
+      /* try next */
+    } finally {
+      clearTimeout(t);
+    }
+  }
+  return null;
+}
 
 export default async function handler(req: VercelRequest, res: VercelResponse) {
-  const token = typeof req.query.token === 'string' ? req.query.token : '';
-  if (!token) {
-    res.status(400).send('Missing share token');
-    return;
-  }
+  try {
+    const raw = req.query.token;
+    const token = typeof raw === 'string' ? raw : Array.isArray(raw) ? String(raw[0] ?? '') : '';
+    if (!token) {
+      res.status(400).send('Missing share token');
+      return;
+    }
 
-  const host = (req.headers['x-forwarded-host'] as string) || req.headers.host || '';
-  const proto = (req.headers['x-forwarded-proto'] as string) || 'https';
-  const siteUrl = (process.env.WISPRNOTE_PUBLIC_URL || (host ? `${proto}://${host}` : 'https://www.wisprnote.com')).replace(
-    /\/$/,
-    '',
-  );
+    const host = (req.headers['x-forwarded-host'] as string) || req.headers.host || '';
+    const proto = (req.headers['x-forwarded-proto'] as string) || 'https';
+    const siteUrl = (
+      process.env.WISPRNOTE_PUBLIC_URL || (host ? `${proto}://${host}` : 'https://www.wisprnote.com')
+    ).replace(/\/$/, '');
 
-  const canonical = `${siteUrl}/shared/${encodeURIComponent(token)}`;
-  const preview = await loadSharePreview(token);
-  const title = preview.title;
-  const description = preview.description;
+    const canonical = `${siteUrl}/shared/${encodeURIComponent(token)}`;
+    const preview = await loadSharePreview(token);
+    const title = preview.title || 'Wisprnote';
+    const description = preview.description || '';
 
-  const ogImageUrl = `${siteUrl}/api/og/share/${encodeURIComponent(token)}`;
+    const ogImageUrl = `${siteUrl}/api/og/share/${encodeURIComponent(token)}`;
 
-  const meta = `
+    const meta = `
     <meta name="description" content="${escapeHtml(description)}" />
     <meta property="og:type" content="article" />
     <meta property="og:site_name" content="Wisprnote" />
@@ -38,10 +75,12 @@ export default async function handler(req: VercelRequest, res: VercelResponse) {
     <meta name="twitter:image" content="${escapeHtml(ogImageUrl)}" />
   `;
 
-  try {
-    const idxRes = await fetch(`${siteUrl}/index.html`);
-    if (idxRes.ok) {
-      let html = await idxRes.text();
+    let html = readBundledIndexHtml();
+    if (!html) {
+      html = (await fetchIndexHtml(siteUrl)) ?? '';
+    }
+
+    if (html && html.includes('</head>')) {
       html = html.replace('</head>', `${meta}</head>`);
       html = html.replace(/<title>[^<]*<\/title>/, `<title>${escapeHtml(title)} · Wisprnote</title>`);
       res.setHeader('Content-Type', 'text/html; charset=utf-8');
@@ -49,12 +88,10 @@ export default async function handler(req: VercelRequest, res: VercelResponse) {
       res.status(200).send(html);
       return;
     }
-  } catch {
-    /* use fallback shell */
-  }
 
-  res.setHeader('Content-Type', 'text/html; charset=utf-8');
-  res.status(200).send(`<!DOCTYPE html>
+    res.setHeader('Content-Type', 'text/html; charset=utf-8');
+    res.setHeader('Cache-Control', 'public, s-maxage=60, stale-while-revalidate=300');
+    res.status(200).send(`<!DOCTYPE html>
 <html lang="en">
 <head>
   <meta charset="UTF-8" />
@@ -63,9 +100,11 @@ export default async function handler(req: VercelRequest, res: VercelResponse) {
   <title>${escapeHtml(title)} · Wisprnote</title>
 </head>
 <body>
-  <div id="root"></div>
-  <p style="font-family:system-ui;padding:2rem;color:#666">Loading shared meeting…</p>
-  <script type="module" src="/src/main.tsx"></script>
+  <p style="font-family:system-ui;padding:2rem;color:#666">This shared link is only available in the Wisprnote app or full web build. If you are the site owner, ensure <code>dist/index.html</code> is bundled with <code>api/share-html</code> (see <code>vercel.json</code> includeFiles).</p>
 </body>
 </html>`);
+  } catch (err) {
+    console.error('share-html error', err);
+    res.status(500).send('Share preview failed. Check logs.');
+  }
 }

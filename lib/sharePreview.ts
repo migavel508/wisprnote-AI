@@ -66,8 +66,9 @@ export async function loadSharePreview(token: string): Promise<SharePreview> {
   }
 }
 
-export function escapeHtml(s: string): string {
-  return s
+export function escapeHtml(s: string | undefined | null): string {
+  const t = s == null ? '' : String(s);
+  return t
     .replace(/&/g, '&amp;')
     .replace(/</g, '&lt;')
     .replace(/>/g, '&gt;')
