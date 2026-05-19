@@ -193,9 +193,12 @@ export const handler = async (event: APIGatewayProxyEvent): Promise<APIGatewayPr
       case 'knowledge-graph': return await handleKnowledgeGraph(method, segments, userId, event);
       case 'chat':     return await handleChat(method, userId, event);
       case 'shares':   return await handleShares(method, segments, userId, event);
-      case 'ledger':   return await handleLedger(method, segments, userId, event);
-      case 'storage':  return await handleStorage(method, segments, userId, event);
-      default:         return notFound();
+      case 'ledger':     return await handleLedger(method, segments, userId, event);
+      case 'storage':    return await handleStorage(method, segments, userId, event);
+      case 'workspaces': return await handleWorkspaces(method, segments, userId, event);
+      case 'folders':    return await handleFolders(method, segments, userId, event);
+      case 'contacts':   return await handleContacts(method, userId);
+      default:           return notFound();
     }
   } catch (err: any) {
     if (err.message === 'UNAUTHORIZED') return unauthorized();
@@ -635,4 +638,188 @@ async function handleStorage(method: string, segments: string[], userId: string,
   }
 
   return notFound();
+}
+
+// ─── WORKSPACES ──────────────────────────────────────────────────────────────
+
+async function handleWorkspaces(method: string, segments: string[], userId: string, event: APIGatewayProxyEvent): Promise<APIGatewayProxyResult> {
+  const workspaceId = segments[1];
+  const sub = segments[2]; // 'folders' | 'meetings' | 'members'
+  const subId = segments[3];
+
+  if (method === 'GET' && !workspaceId) {
+    const taskId = event.queryStringParameters?.task_id;
+    if (taskId) {
+      const rows = await query(
+        `SELECT w.*, (tw.task_id IS NOT NULL) AS has_task
+         FROM workspaces w
+         LEFT JOIN task_workspaces tw ON tw.workspace_id = w.id AND tw.task_id = $2
+         WHERE w.user_id = $1
+         ORDER BY w.created_at ASC`,
+        [userId, taskId]
+      );
+      return ok(rows);
+    }
+    const rows = await query('SELECT * FROM workspaces WHERE user_id=$1 ORDER BY created_at ASC', [userId]);
+    return ok(rows);
+  }
+
+  if (method === 'POST' && !workspaceId) {
+    const body = parseBody(event);
+    if (!body.name?.trim()) return badRequest('name is required');
+    const row = await queryOne(
+      'INSERT INTO workspaces (user_id, name, emoji, color) VALUES ($1,$2,$3,$4) RETURNING *',
+      [userId, body.name.trim(), body.emoji || '🗂️', body.color || '#f06060']
+    );
+    return created(row);
+  }
+
+  const ws = workspaceId ? await queryOne('SELECT * FROM workspaces WHERE id=$1 AND user_id=$2', [workspaceId, userId]) : null;
+  if (workspaceId && !ws) return notFound();
+
+  if (method === 'PUT' && !sub) {
+    const body = parseBody(event);
+    const row = await queryOne(
+      `UPDATE workspaces SET name=COALESCE($1,name), emoji=COALESCE($2,emoji), color=COALESCE($3,color) WHERE id=$4 RETURNING *`,
+      [body.name?.trim() || null, body.emoji || null, body.color || null, workspaceId]
+    );
+    return ok(row);
+  }
+
+  if (method === 'DELETE' && !sub) {
+    await query('DELETE FROM workspaces WHERE id=$1', [workspaceId]);
+    return noContent();
+  }
+
+  if (method === 'GET' && sub === 'folders') {
+    const rows = await query('SELECT * FROM folders WHERE workspace_id=$1 ORDER BY created_at ASC', [workspaceId]);
+    return ok(rows);
+  }
+
+  if (method === 'POST' && sub === 'folders') {
+    const body = parseBody(event);
+    if (!body.name?.trim()) return badRequest('name is required');
+    const row = await queryOne(
+      'INSERT INTO folders (workspace_id, user_id, name) VALUES ($1,$2,$3) RETURNING *',
+      [workspaceId, userId, body.name.trim()]
+    );
+    return created(row);
+  }
+
+  if (method === 'GET' && sub === 'meetings') {
+    const rows = await query(
+      `SELECT th.id, th.filename, th.created_at, th.duration, th.status, th.summary
+       FROM task_workspaces tw JOIN task_history th ON th.id=tw.task_id
+       WHERE tw.workspace_id=$1 ORDER BY tw.added_at DESC`,
+      [workspaceId]
+    );
+    return ok(rows);
+  }
+
+  if (method === 'POST' && sub === 'meetings') {
+    const body = parseBody(event);
+    if (!body.task_id) return badRequest('task_id is required');
+    await query('INSERT INTO task_workspaces (task_id, workspace_id) VALUES ($1,$2) ON CONFLICT DO NOTHING', [body.task_id, workspaceId]);
+    return noContent();
+  }
+
+  if (method === 'DELETE' && sub === 'meetings' && subId) {
+    await query('DELETE FROM task_workspaces WHERE task_id=$1 AND workspace_id=$2', [subId, workspaceId]);
+    return noContent();
+  }
+
+  if (method === 'GET' && sub === 'members') {
+    const rows = await query('SELECT * FROM workspace_members WHERE workspace_id=$1 ORDER BY invited_at ASC', [workspaceId]);
+    return ok(rows);
+  }
+
+  if (method === 'POST' && sub === 'members') {
+    const body = parseBody(event);
+    if (!body.email) return badRequest('email is required');
+    const row = await queryOne(
+      'INSERT INTO workspace_members (workspace_id, email, role) VALUES ($1,$2,$3) ON CONFLICT (workspace_id,email) DO UPDATE SET role=EXCLUDED.role RETURNING *',
+      [workspaceId, body.email.toLowerCase().trim(), body.role || 'viewer']
+    );
+    return ok(row);
+  }
+
+  if (method === 'DELETE' && sub === 'members' && subId) {
+    await query('DELETE FROM workspace_members WHERE workspace_id=$1 AND lower(email)=lower($2)', [workspaceId, decodeURIComponent(subId)]);
+    return noContent();
+  }
+
+  return notFound();
+}
+
+// ─── FOLDERS ─────────────────────────────────────────────────────────────────
+
+async function handleFolders(method: string, segments: string[], userId: string, event: APIGatewayProxyEvent): Promise<APIGatewayProxyResult> {
+  const folderId = segments[1];
+  const sub = segments[2];
+  const subId = segments[3];
+
+  if (!folderId) return notFound();
+
+  const folder = await queryOne(
+    'SELECT f.* FROM folders f JOIN workspaces w ON w.id=f.workspace_id WHERE f.id=$1 AND w.user_id=$2',
+    [folderId, userId]
+  );
+  if (!folder) return notFound();
+
+  if (method === 'DELETE' && !sub) {
+    await query('DELETE FROM folders WHERE id=$1', [folderId]);
+    return noContent();
+  }
+
+  if (method === 'PUT' && !sub) {
+    const body = parseBody(event);
+    const row = await queryOne('UPDATE folders SET name=$1 WHERE id=$2 RETURNING *', [body.name?.trim() || folder.name, folderId]);
+    return ok(row);
+  }
+
+  if (method === 'GET' && sub === 'meetings') {
+    const rows = await query(
+      `SELECT th.id, th.filename, th.created_at, th.duration, th.status, th.summary
+       FROM task_folders tf JOIN task_history th ON th.id=tf.task_id
+       WHERE tf.folder_id=$1 ORDER BY tf.added_at DESC`,
+      [folderId]
+    );
+    return ok(rows);
+  }
+
+  if (method === 'POST' && sub === 'meetings') {
+    const body = parseBody(event);
+    if (!body.task_id) return badRequest('task_id is required');
+    await query('INSERT INTO task_folders (task_id, folder_id) VALUES ($1,$2) ON CONFLICT DO NOTHING', [body.task_id, folderId]);
+    return noContent();
+  }
+
+  if (method === 'DELETE' && sub === 'meetings' && subId) {
+    await query('DELETE FROM task_folders WHERE task_id=$1 AND folder_id=$2', [subId, folderId]);
+    return noContent();
+  }
+
+  return notFound();
+}
+
+// ─── CONTACTS ────────────────────────────────────────────────────────────────
+
+async function handleContacts(_method: string, userId: string): Promise<APIGatewayProxyResult> {
+  const rows = await query(
+    `SELECT
+       p->>'name'    AS name,
+       p->>'role'    AS role,
+       p->>'email'   AS email,
+       p->>'company' AS company,
+       COUNT(*)::int AS meeting_count,
+       MAX(kg.created_at) AS last_seen,
+       array_agg(DISTINCT kg.task_id::text) AS task_ids
+     FROM knowledge_graph kg, jsonb_array_elements(kg.people) AS p
+     WHERE kg.user_id=$1
+       AND p->>'name' IS NOT NULL AND (p->>'name') != ''
+     GROUP BY p->>'name', p->>'role', p->>'email', p->>'company'
+     ORDER BY meeting_count DESC, name ASC`,
+    [userId]
+  );
+  return ok(rows);
 }

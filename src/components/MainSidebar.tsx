@@ -1,4 +1,4 @@
-import { useEffect, useState } from 'react';
+import { useEffect, useState, useRef } from 'react';
 import {
   PenLine,
   MessageSquareText,
@@ -9,6 +9,7 @@ import {
   LogOut,
   BookOpen,
   Headphones,
+  Users,
   UserPlus,
   Sparkles,
   Settings,
@@ -16,12 +17,15 @@ import {
   Sun,
   Moon,
   Monitor,
+  Plus,
+  ChevronRight,
 } from 'lucide-react';
 import { AuthSession } from '../services/awsAuthService';
 import { getPendingTaskCount } from '../services/awsService';
 import { useTheme, type ThemePreference } from '../theme/ThemeProvider';
+import { getWorkspaces, getFolders, createWorkspace, type Workspace, type Folder as FolderType } from '../services/workspaceService';
 
-type View = 'process' | 'history' | 'notes' | 'chat' | 'knowledge' | 'notebooks' | 'audio-devices';
+type View = 'process' | 'history' | 'notes' | 'chat' | 'knowledge' | 'notebooks' | 'audio-devices' | 'workspace' | 'people';
 
 interface MainSidebarProps {
   currentView: View;
@@ -33,6 +37,7 @@ interface MainSidebarProps {
   status: string;
 }
 
+// ── Theme picker pill ─────────────────────────────────────────────────────────
 function ThemeAppearancePicker({ collapsed }: { collapsed?: boolean }) {
   const { preference, setPreference } = useTheme();
   const modes: { id: ThemePreference; Icon: typeof Sun; title: string }[] = [
@@ -43,19 +48,14 @@ function ThemeAppearancePicker({ collapsed }: { collapsed?: boolean }) {
 
   if (collapsed) {
     return (
-      <div className="flex flex-col gap-0.5 items-center py-1" role="group" aria-label="Appearance">
+      <div className="flex flex-col gap-0.5 items-center py-1">
         {modes.map(({ id, Icon, title }) => (
           <button
             key={id}
-            type="button"
             title={title}
-            aria-label={title}
-            aria-pressed={preference === id}
             onClick={() => setPreference(id)}
             className={`w-8 h-8 flex items-center justify-center rounded-lg transition-colors ${
-              preference === id
-                ? 'bg-app-theme-active text-app-fg shadow-sm'
-                : 'text-app-fg-subtle hover:bg-app-nav-hover-bg hover:text-app-fg'
+              preference === id ? 'bg-app-theme-active text-app-fg shadow-sm' : 'text-app-fg-subtle hover:bg-app-nav-hover-bg hover:text-app-fg'
             }`}
           >
             <Icon size={15} strokeWidth={1.5} />
@@ -70,23 +70,14 @@ function ThemeAppearancePicker({ collapsed }: { collapsed?: boolean }) {
       <div className="text-[9px] font-mono font-medium text-app-fg-label uppercase tracking-[0.12em] px-2.5 mb-1.5">
         Appearance
       </div>
-      <div
-        className="flex gap-0.5 p-0.5 rounded-xl bg-app-theme-track border border-app-status-border"
-        role="group"
-        aria-label="Appearance"
-      >
+      <div className="flex gap-0.5 p-0.5 rounded-xl bg-app-theme-track border border-app-status-border" role="group">
         {modes.map(({ id, Icon, title }) => (
           <button
             key={id}
-            type="button"
             title={title}
-            aria-label={title}
-            aria-pressed={preference === id}
             onClick={() => setPreference(id)}
             className={`flex-1 flex items-center justify-center py-1.5 rounded-lg transition-colors ${
-              preference === id
-                ? 'bg-app-theme-active text-app-fg shadow-sm'
-                : 'text-app-fg-muted hover:text-app-fg'
+              preference === id ? 'bg-app-theme-active text-app-fg shadow-sm' : 'text-app-fg-muted hover:text-app-fg'
             }`}
           >
             <Icon size={15} strokeWidth={1.5} />
@@ -94,6 +85,47 @@ function ThemeAppearancePicker({ collapsed }: { collapsed?: boolean }) {
         ))}
       </div>
     </div>
+  );
+}
+
+// ── Workspace row with expand ─────────────────────────────────────────────────
+function WorkspaceRow({ ws, isActive, onClick }: { ws: Workspace; isActive: boolean; onClick: () => void }) {
+  const [expanded, setExpanded] = useState(false);
+  const [folders, setFolders] = useState<FolderType[]>([]);
+  const [fetched, setFetched] = useState(false);
+
+  const handleExpand = (e: React.MouseEvent) => {
+    e.stopPropagation();
+    if (!fetched) {
+      getFolders(ws.id).then(f => { setFolders(f); setFetched(true); }).catch(() => setFetched(true));
+    }
+    setExpanded(v => !v);
+  };
+
+  return (
+    <>
+      <div
+        onClick={onClick}
+        className={`w-full flex items-center gap-2.5 px-2.5 py-[7px] text-[13px] rounded-xl transition-all duration-200 cursor-pointer ${
+          isActive ? 'bg-app-nav-active-bg text-app-nav-active-fg font-medium shadow-sm' : 'text-app-nav-fg hover:bg-app-nav-hover-bg hover:text-app-nav-fg-hover'
+        }`}
+      >
+        <button onClick={handleExpand} className="flex-shrink-0 text-app-fg-subtle hover:text-app-fg transition-colors">
+          <ChevronRight size={13} strokeWidth={1.8} className={`transition-transform duration-150 ${expanded ? 'rotate-90' : ''}`} />
+        </button>
+        <span className="text-[15px] leading-none flex-shrink-0">{ws.emoji}</span>
+        <span className="flex-1 truncate tracking-[-0.01em]">{ws.name}</span>
+      </div>
+      {expanded && fetched && folders.map(f => (
+        <div
+          key={f.id}
+          onClick={onClick}
+          className="flex items-center gap-2 pl-9 pr-2.5 py-[5px] text-[12px] text-app-fg-subtle hover:bg-app-nav-hover-bg hover:text-app-nav-fg-hover rounded-xl cursor-pointer transition-colors"
+        >
+          <span className="truncate">{f.name}</span>
+        </div>
+      ))}
+    </>
   );
 }
 
@@ -107,14 +139,33 @@ export default function MainSidebar({
   status,
 }: MainSidebarProps) {
   const [pendingSyncCount, setPendingSyncCount] = useState(0);
+  const [workspaces, setWorkspaces] = useState<Workspace[]>([]);
+  const [creatingWs, setCreatingWs] = useState(false);
+  const [newWsName, setNewWsName] = useState('');
+  const newWsRef = useRef<HTMLInputElement>(null);
 
   useEffect(() => {
-    setPendingSyncCount(getPendingTaskCount());
-    const timer = window.setInterval(() => {
-      setPendingSyncCount(getPendingTaskCount());
-    }, 1500);
+    getPendingTaskCount().then(setPendingSyncCount);
+    const timer = window.setInterval(() => getPendingTaskCount().then(setPendingSyncCount), 1500);
     return () => window.clearInterval(timer);
   }, []);
+
+  useEffect(() => {
+    getWorkspaces().then(setWorkspaces).catch(() => {});
+  }, []);
+
+  useEffect(() => {
+    if (creatingWs) setTimeout(() => newWsRef.current?.focus(), 50);
+  }, [creatingWs]);
+
+  const handleCreateWs = async () => {
+    const name = newWsName.trim();
+    setCreatingWs(false);
+    setNewWsName('');
+    if (!name) return;
+    const ws = await createWorkspace(name).catch(() => null);
+    if (ws) { setWorkspaces(prev => [...prev, ws]); onViewChange('workspace'); }
+  };
 
   const navItems = [
     { id: 'process' as View, label: 'Record', icon: AudioLines },
@@ -122,10 +173,11 @@ export default function MainSidebar({
     { id: 'chat' as View, label: 'Chat', icon: MessageSquareText },
     { id: 'notebooks' as View, label: 'Notebooks', icon: BookOpen },
     { id: 'knowledge' as View, label: 'Knowledge', icon: Network },
+    { id: 'people' as View, label: 'People', icon: Users },
     { id: 'audio-devices' as View, label: 'Devices', icon: Headphones },
   ];
 
-  // ─── Collapsed: icon-only rail ─────────────────────────────────────────────
+  // ── Collapsed: icon rail ────────────────────────────────────────────────────
   if (!isOpen) {
     return (
       <div className="h-screen w-[52px] bg-app-canvas flex flex-col items-center flex-shrink-0 font-sans">
@@ -141,23 +193,20 @@ export default function MainSidebar({
         </div>
 
         <nav className="flex flex-col items-center gap-0.5 px-1.5">
-          {navItems.map((item) => {
-            const Icon = item.icon;
-            const isActive = currentView === item.id;
+          {navItems.map(({ id, label, icon: Icon }) => {
+            const isActive = currentView === id;
             return (
               <button
-                key={item.id}
-                onClick={() => onViewChange(item.id)}
+                key={id}
+                onClick={() => onViewChange(id)}
+                title={label}
                 className={`w-9 h-9 flex items-center justify-center rounded-xl transition-all duration-200 relative group ${
-                  isActive
-                    ? 'bg-app-nav-active-bg text-app-nav-active-fg shadow-sm'
-                    : 'text-app-fg-subtle hover:bg-app-nav-hover-bg hover:text-app-nav-fg-hover'
+                  isActive ? 'bg-app-nav-active-bg text-app-nav-active-fg shadow-sm' : 'text-app-fg-subtle hover:bg-app-nav-hover-bg hover:text-app-nav-fg-hover'
                 }`}
-                title={item.label}
               >
                 <Icon size={17} strokeWidth={isActive ? 1.8 : 1.5} />
                 <div className="absolute left-full ml-2.5 px-2.5 py-1 bg-zinc-900 text-white dark:bg-zinc-100 dark:text-zinc-900 text-[10px] font-medium tracking-wide rounded-lg opacity-0 group-hover:opacity-100 pointer-events-none transition-opacity whitespace-nowrap z-[100]">
-                  {item.label}
+                  {label}
                 </div>
               </button>
             );
@@ -172,9 +221,7 @@ export default function MainSidebar({
           <button
             onClick={() => onViewChange('history')}
             className={`w-9 h-9 flex items-center justify-center rounded-xl transition-all duration-200 relative ${
-              currentView === 'history'
-                ? 'bg-app-nav-active-bg text-app-nav-active-fg shadow-sm'
-                : 'text-app-fg-subtle hover:bg-app-nav-hover-bg hover:text-app-nav-fg-hover'
+              currentView === 'history' ? 'bg-app-nav-active-bg text-app-nav-active-fg shadow-sm' : 'text-app-fg-subtle hover:bg-app-nav-hover-bg hover:text-app-nav-fg-hover'
             }`}
             title="History"
           >
@@ -184,18 +231,6 @@ export default function MainSidebar({
                 {pendingSyncCount > 9 ? '9+' : pendingSyncCount}
               </span>
             )}
-          </button>
-          <button
-            className="w-9 h-9 flex items-center justify-center rounded-xl text-app-fg-subtle hover:bg-app-nav-hover-bg hover:text-app-nav-fg-hover transition-all duration-200"
-            title="Settings"
-          >
-            <Settings size={17} strokeWidth={1.5} />
-          </button>
-          <button
-            className="w-9 h-9 flex items-center justify-center rounded-xl text-app-fg-subtle hover:bg-app-nav-hover-bg hover:text-app-nav-fg-hover transition-all duration-200"
-            title="Help"
-          >
-            <CircleHelp size={17} strokeWidth={1.5} />
           </button>
           <button
             onClick={onSignOut}
@@ -209,18 +244,15 @@ export default function MainSidebar({
     );
   }
 
-  // ─── Expanded: full sidebar with labels ────────────────────────────────────
+  // ── Expanded sidebar ────────────────────────────────────────────────────────
   return (
     <>
-      <div
-        className="fixed inset-0 bg-black/20 dark:bg-black/50 z-[60] md:hidden"
-        onClick={onToggle}
-      />
+      <div className="fixed inset-0 bg-black/20 dark:bg-black/50 z-[60] md:hidden" onClick={onToggle} />
 
       <div className="fixed md:relative h-screen w-[200px] bg-app-canvas flex flex-col flex-shrink-0 font-sans z-[70]">
         <div data-tauri-drag-region className="w-full h-12 flex-shrink-0 cursor-grab" />
 
-        {/* Brand */}
+        {/* Brand header */}
         <div className="flex items-center gap-2 px-4 pt-1 pb-5">
           <button
             onClick={onToggle}
@@ -239,29 +271,26 @@ export default function MainSidebar({
           </div>
         </div>
 
-        {/* Main Navigation */}
+        {/* Main nav */}
         <nav className="px-2.5 space-y-px">
-          {navItems.map((item) => {
-            const Icon = item.icon;
-            const isActive = currentView === item.id;
+          {navItems.map(({ id, label, icon: Icon }) => {
+            const isActive = currentView === id;
             return (
               <button
-                key={item.id}
-                onClick={() => onViewChange(item.id)}
+                key={id}
+                onClick={() => onViewChange(id)}
                 className={`w-full flex items-center gap-2.5 px-2.5 py-[7px] text-[13px] rounded-xl transition-all duration-200 ${
-                  isActive
-                    ? 'bg-app-nav-active-bg text-app-nav-active-fg font-medium shadow-sm'
-                    : 'text-app-nav-fg hover:bg-app-nav-hover-bg hover:text-app-nav-fg-hover'
+                  isActive ? 'bg-app-nav-active-bg text-app-nav-active-fg font-medium shadow-sm' : 'text-app-nav-fg hover:bg-app-nav-hover-bg hover:text-app-nav-fg-hover'
                 }`}
               >
                 <Icon size={15} strokeWidth={isActive ? 1.8 : 1.5} className="flex-shrink-0" />
-                <span className="tracking-[-0.01em]">{item.label}</span>
+                <span className="tracking-[-0.01em]">{label}</span>
               </button>
             );
           })}
         </nav>
 
-        {/* Recent Section */}
+        {/* Recent */}
         <div className="mt-5 px-2.5">
           <div className="text-[9px] font-mono font-medium text-app-fg-label uppercase tracking-[0.12em] px-2.5 mb-1.5">
             Recent
@@ -269,9 +298,7 @@ export default function MainSidebar({
           <button
             onClick={() => onViewChange('history')}
             className={`w-full flex items-center gap-2.5 px-2.5 py-[7px] text-[13px] rounded-xl transition-all duration-200 ${
-              currentView === 'history'
-                ? 'bg-app-nav-active-bg text-app-nav-active-fg font-medium shadow-sm'
-                : 'text-app-nav-fg hover:bg-app-nav-hover-bg hover:text-app-nav-fg-hover'
+              currentView === 'history' ? 'bg-app-nav-active-bg text-app-nav-active-fg font-medium shadow-sm' : 'text-app-nav-fg hover:bg-app-nav-hover-bg hover:text-app-nav-fg-hover'
             }`}
           >
             <Clock size={15} strokeWidth={1.5} className="flex-shrink-0" />
@@ -284,12 +311,61 @@ export default function MainSidebar({
           </button>
         </div>
 
-        {/* Status */}
+        {/* Spaces */}
+        {(workspaces.length > 0 || true) && (
+          <div className="mt-4 px-2.5">
+            <div className="flex items-center px-2.5 mb-1.5">
+              <span className="flex-1 text-[9px] font-mono font-medium text-app-fg-label uppercase tracking-[0.12em]">Spaces</span>
+              <button
+                onClick={() => setCreatingWs(true)}
+                className="w-4 h-4 flex items-center justify-center rounded text-app-fg-subtle hover:text-app-fg transition-colors"
+              >
+                <Plus size={11} strokeWidth={2} />
+              </button>
+            </div>
+
+            <div className="space-y-px">
+              {workspaces.map(ws => (
+                <WorkspaceRow
+                  key={ws.id}
+                  ws={ws}
+                  isActive={currentView === 'workspace'}
+                  onClick={() => onViewChange('workspace')}
+                />
+              ))}
+
+              {creatingWs && (
+                <div className="flex items-center gap-2 px-2.5 py-[6px] rounded-xl bg-app-nav-hover-bg">
+                  <span className="text-[14px] leading-none">🗂️</span>
+                  <input
+                    ref={newWsRef}
+                    value={newWsName}
+                    onChange={e => setNewWsName(e.target.value)}
+                    onKeyDown={e => { if (e.key === 'Enter') handleCreateWs(); if (e.key === 'Escape') { setCreatingWs(false); setNewWsName(''); } }}
+                    onBlur={handleCreateWs}
+                    placeholder="Space name…"
+                    className="flex-1 text-[12.5px] bg-transparent outline-none text-app-fg placeholder:text-app-fg-subtle"
+                  />
+                </div>
+              )}
+
+              {workspaces.length === 0 && !creatingWs && (
+                <button
+                  onClick={() => setCreatingWs(true)}
+                  className="w-full flex items-center gap-2.5 px-2.5 py-[6px] text-[12.5px] rounded-xl text-app-fg-subtle hover:bg-app-nav-hover-bg hover:text-app-nav-fg-hover transition-all duration-200"
+                >
+                  <Plus size={13} strokeWidth={1.5} />
+                  <span>New space</span>
+                </button>
+              )}
+            </div>
+          </div>
+        )}
+
+        {/* Status pill */}
         <div className="mt-4 mx-4">
           <div className="flex items-center gap-2 px-2.5 py-2 bg-app-status-bg rounded-xl border border-app-status-border">
-            <div
-              className={`w-[5px] h-[5px] rounded-full ${status === 'idle' ? 'bg-emerald-500' : 'bg-amber-500 animate-pulse'}`}
-            />
+            <div className={`w-[5px] h-[5px] rounded-full ${status === 'idle' ? 'bg-emerald-500' : 'bg-amber-500 animate-pulse'}`} />
             <span className="text-[10px] font-mono font-medium text-app-status-fg uppercase tracking-wider">
               {status !== 'idle' ? status.charAt(0).toUpperCase() + status.slice(1) : 'Ready'}
             </span>
@@ -321,7 +397,7 @@ export default function MainSidebar({
 
           <div className="h-px bg-app-divider w-full my-2" />
 
-          {/* User profile */}
+          {/* User row */}
           <div className="flex items-center justify-between">
             <div className="flex items-center gap-2 px-2 py-1.5 flex-1 min-w-0">
               <div className="w-6 h-6 rounded-full bg-zinc-900 text-white dark:bg-zinc-100 dark:text-zinc-900 flex items-center justify-center flex-shrink-0">
