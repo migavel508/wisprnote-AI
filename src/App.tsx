@@ -132,6 +132,8 @@ import SharedMeetingPage from './pages/SharedMeetingPage';
 import KnowledgePage from './pages/KnowledgePage';
 import ProcessPage from './pages/ProcessPage';
 import AudioDevicesPage from './pages/AudioDevicesPage';
+import WorkspacePage from './pages/WorkspacePage';
+import PeoplePage from './pages/PeoplePage';
 import MainSidebar from './components/MainSidebar';
 import { ManualNotesList } from './components/ManualNotes/ManualNotesList';
 import { ManualNoteEditor } from './components/ManualNotes/ManualNoteEditor';
@@ -152,7 +154,7 @@ declare global {
   }
 }
 
-type View = 'process' | 'history' | 'notes' | 'chat' | 'knowledge' | 'notebooks' | 'audio-devices' | 'shared';
+type View = 'process' | 'history' | 'notes' | 'chat' | 'knowledge' | 'notebooks' | 'audio-devices' | 'shared' | 'workspace' | 'people';
 type Status = 'idle' | 'splitting' | 'processing' | 'finalizing' | 'completed' | 'error';
 type NoteTab = 'transcription' | 'summary' | 'notes';
 
@@ -256,6 +258,8 @@ export default function App() {
     if (path === '/knowledge') return 'knowledge';
     if (path === '/notebooks') return 'notebooks';
     if (path === '/audio-devices') return 'audio-devices';
+    if (path === '/workspace') return 'workspace';
+    if (path === '/people') return 'people';
     return 'process';
   };
   
@@ -284,6 +288,12 @@ export default function App() {
         break;
       case 'audio-devices':
         navigate('/audio-devices');
+        break;
+      case 'workspace':
+        navigate('/workspace');
+        break;
+      case 'people':
+        navigate('/people');
         break;
     }
   };
@@ -3622,9 +3632,9 @@ export default function App() {
               selectedTask ? (
                 <NotesPage
                   selectedTask={selectedTask}
-                  onNavigateToAssets={() => {}}
                   onTaskUpdated={handleTaskUpdated}
                   isLoadingDetails={isLoadingTaskDetails}
+                  session={session}
                 />
               ) : (
                 <HistoryPage
@@ -3763,6 +3773,36 @@ export default function App() {
                   isRecording={isRecording}
                   currentInputDevice={currentInputDevice}
                   deviceRestartNotice={deviceRestartNotice}
+                />
+              </motion.div>
+            )}
+
+            {currentView === 'workspace' && (
+              <motion.div
+                key="workspace"
+                initial={{ opacity: 0 }}
+                animate={{ opacity: 1 }}
+                exit={{ opacity: 0 }}
+                className="h-full"
+              >
+                <WorkspacePage
+                  allTasks={history}
+                  onSelectTask={(task) => setCurrentView('notes', task.id)}
+                />
+              </motion.div>
+            )}
+
+            {currentView === 'people' && (
+              <motion.div
+                key="people"
+                initial={{ opacity: 0 }}
+                animate={{ opacity: 1 }}
+                exit={{ opacity: 0 }}
+                className="h-full"
+              >
+                <PeoplePage
+                  allTasks={history}
+                  onSelectTask={(task) => setCurrentView('notes', task.id)}
                 />
               </motion.div>
             )}
