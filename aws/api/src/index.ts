@@ -4,15 +4,25 @@ import { query, queryOne, queryCount } from './db';
 import { ok, created, noContent, badRequest, notFound, unauthorized, serverError, corsPreflightResponse } from './response';
 import { S3Client, PutObjectCommand } from '@aws-sdk/client-s3';
 import { getSignedUrl } from '@aws-sdk/s3-request-presigner';
-import { SESClient, SendEmailCommand } from '@aws-sdk/client-ses';
 
 const S3_BUCKET = process.env.S3_BUCKET || '';
 const S3_REGION = process.env.AWS_REGION || 'us-east-1';
 const s3 = new S3Client({ region: S3_REGION });
 
-const SES_FROM_EMAIL = process.env.SES_FROM_EMAIL || 'noreply@wisprnote.com';
+// Run idempotent migrations on cold start
+void (async () => {
+  try {
+    await query(`ALTER TABLE task_history ADD COLUMN IF NOT EXISTS attendees JSONB NOT NULL DEFAULT '[]'::jsonb`);
+    await query(`CREATE INDEX IF NOT EXISTS idx_task_history_attendees ON task_history USING GIN (attendees)`);
+    console.log('Migrations OK');
+  } catch (e) {
+    console.error('Migration error:', e);
+  }
+})();
+
+const FROM_EMAIL = process.env.SES_FROM_EMAIL || 'noreply@wisprnote.com';
+const RESEND_API_KEY = process.env.RESEND_API_KEY || '';
 const SITE_URL = (process.env.WISPRNOTE_PUBLIC_URL || 'https://www.wisprnote.com').replace(/\/$/, '');
-const ses = new SESClient({ region: S3_REGION });
 
 const COGNITO_USER_POOL_ID = process.env.COGNITO_USER_POOL_ID || '';
 const COGNITO_CLIENT_ID = process.env.COGNITO_CLIENT_ID || '';
@@ -144,25 +154,25 @@ async function sendShareInviteEmails(options: {
 
   const results = await Promise.allSettled(
     options.to.map(email =>
-      ses.send(new SendEmailCommand({
-        Source: `Wisprnote AI <${SES_FROM_EMAIL}>`,
-        Destination: { ToAddresses: [email] },
-        Message: {
-          Subject: { Data: subject, Charset: 'UTF-8' },
-          Body: {
-            Html: { Data: html, Charset: 'UTF-8' },
-            Text: { Data: text, Charset: 'UTF-8' },
-          },
+      fetch('https://api.resend.com/emails', {
+        method: 'POST',
+        headers: {
+          'Authorization': `Bearer ${RESEND_API_KEY}`,
+          'Content-Type': 'application/json',
         },
-      }))
+        body: JSON.stringify({ from: `Wisprnote AI <${FROM_EMAIL}>`, to: [email], subject, html, text }),
+      }).then(async r => {
+        if (!r.ok) throw new Error(await r.text());
+        return r.json() as Promise<{ id: string }>;
+      })
     )
   );
 
   results.forEach((result, i) => {
     if (result.status === 'rejected') {
-      console.error(`SES failed for ${options.to[i]}:`, result.reason?.message || result.reason);
+      console.error(`Resend failed for ${options.to[i]}:`, result.reason?.message || result.reason);
     } else {
-      console.log(`SES sent to ${options.to[i]}, MessageId:`, result.value?.MessageId);
+      console.log(`Resend sent to ${options.to[i]}, id:`, result.value?.id);
     }
   });
 }
@@ -218,9 +228,9 @@ async function handleTasks(method: string, segments: string[], userId: string, e
   if (method === 'POST' && !taskId) {
     const body = parseBody(event);
     const row = await queryOne(
-      `INSERT INTO task_history (user_id, filename, transcription, summary, notes, audio_url, status, duration, prompt, personal_note, visualization_image)
-       VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11) RETURNING *`,
-      [userId, body.filename, body.transcription, body.summary, body.notes, body.audio_url, body.status, body.duration || 0, body.prompt, body.personal_note, body.visualization_image]
+      `INSERT INTO task_history (user_id, filename, transcription, summary, notes, audio_url, status, duration, prompt, personal_note, visualization_image, attendees)
+       VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12) RETURNING *`,
+      [userId, body.filename, body.transcription, body.summary, body.notes, body.audio_url, body.status, body.duration || 0, body.prompt, body.personal_note, body.visualization_image, JSON.stringify(body.attendees ?? [])]
     );
     return created(row);
   }
@@ -260,6 +270,10 @@ async function handleTasks(method: string, segments: string[], userId: string, e
     let idx = 1;
     for (const key of ['filename', 'summary', 'notes', 'personal_note', 'visualization_image']) {
       if (body[key] !== undefined) { sets.push(`${key}=$${idx++}`); vals.push(body[key]); }
+    }
+    if (body.attendees !== undefined) {
+      sets.push(`attendees=$${idx++}::jsonb`);
+      vals.push(JSON.stringify(body.attendees));
     }
     if (!sets.length) return badRequest('No fields to update');
     vals.push(taskId, userId);
@@ -807,17 +821,41 @@ async function handleFolders(method: string, segments: string[], userId: string,
 async function handleContacts(_method: string, userId: string): Promise<APIGatewayProxyResult> {
   const rows = await query(
     `SELECT
-       p->>'name'    AS name,
-       p->>'role'    AS role,
-       p->>'email'   AS email,
-       p->>'company' AS company,
-       COUNT(*)::int AS meeting_count,
-       MAX(kg.created_at) AS last_seen,
-       array_agg(DISTINCT kg.task_id::text) AS task_ids
-     FROM knowledge_graph kg, jsonb_array_elements(kg.people) AS p
-     WHERE kg.user_id=$1
-       AND p->>'name' IS NOT NULL AND (p->>'name') != ''
-     GROUP BY p->>'name', p->>'role', p->>'email', p->>'company'
+       name,
+       MAX(role)    AS role,
+       MAX(email)   AS email,
+       MAX(company) AS company,
+       COUNT(DISTINCT task_id)::int AS meeting_count,
+       MAX(last_seen) AS last_seen,
+       array_agg(DISTINCT task_id::text) AS task_ids
+     FROM (
+       -- from knowledge graph (AI-extracted people with rich metadata)
+       SELECT
+         p->>'name'    AS name,
+         p->>'role'    AS role,
+         p->>'email'   AS email,
+         p->>'company' AS company,
+         kg.task_id    AS task_id,
+         kg.created_at AS last_seen
+       FROM knowledge_graph kg, jsonb_array_elements(kg.people) AS p
+       WHERE kg.user_id=$1
+         AND p->>'name' IS NOT NULL AND (p->>'name') != ''
+
+       UNION ALL
+
+       -- from manually-added attendees in task_history
+       SELECT
+         a.value::text AS name,
+         NULL          AS role,
+         NULL          AS email,
+         NULL          AS company,
+         t.id          AS task_id,
+         t.created_at  AS last_seen
+       FROM task_history t, jsonb_array_elements_text(t.attendees) AS a
+       WHERE t.user_id=$1
+         AND a.value IS NOT NULL AND a.value != ''
+     ) combined
+     GROUP BY name
      ORDER BY meeting_count DESC, name ASC`,
     [userId]
   );

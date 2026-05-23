@@ -117,7 +117,7 @@ export default function SharedMeetingPage() {
     setSignInError('');
     try {
       const result = await signIn(signInEmail, signInPassword);
-      if ('error' in result) { setSignInError(result.error); return; }
+      if ('error' in result) { setSignInError(String(result.error)); return; }
       await verifyAccess();
     } catch { setSignInError('Sign in failed. Please try again.'); }
     finally { setSignInLoading(false); }

@@ -14,18 +14,264 @@ import {
   Download,
   Loader2,
   X,
+  ChevronDown,
   ChevronRight,
+  Search,
+  Clock,
+  History,
 } from 'lucide-react';
 import Markdown from 'react-markdown';
 import remarkGfm from 'remark-gfm';
 import { ChatPageSkeleton } from '../components/Skeleton';
-import { ShiningText } from '../components/ui/shining-text';
+
+// Custom markdown components — matches anarlog's clean per-element approach
+// instead of relying on the @tailwindcss/typography prose plugin
+const assistantMarkdownComponents = {
+  h1: ({ children }: { children?: React.ReactNode }) => (
+    <h1 className="mt-4 mb-2 text-[16px] font-semibold text-zinc-900 dark:text-zinc-100 first:mt-0">{children}</h1>
+  ),
+  h2: ({ children }: { children?: React.ReactNode }) => (
+    <h2 className="mt-3 mb-1.5 text-[14px] font-semibold text-zinc-900 dark:text-zinc-100 first:mt-0">{children}</h2>
+  ),
+  h3: ({ children }: { children?: React.ReactNode }) => (
+    <h3 className="mt-2.5 mb-1 text-[13px] font-semibold text-zinc-800 dark:text-zinc-200 first:mt-0">{children}</h3>
+  ),
+  ul: ({ children }: { children?: React.ReactNode }) => (
+    <ul className="my-2 list-disc pl-5 space-y-0.5">{children}</ul>
+  ),
+  ol: ({ children }: { children?: React.ReactNode }) => (
+    <ol className="my-2 list-decimal pl-5 space-y-0.5">{children}</ol>
+  ),
+  li: ({ children }: { children?: React.ReactNode }) => (
+    <li className="text-[13px] leading-[1.7] text-zinc-700 dark:text-zinc-300">{children}</li>
+  ),
+  p: ({ children }: { children?: React.ReactNode }) => (
+    <p className="mb-2 last:mb-0 text-[13px] leading-[1.75] text-zinc-700 dark:text-zinc-300">{children}</p>
+  ),
+  strong: ({ children }: { children?: React.ReactNode }) => (
+    <strong className="font-semibold text-zinc-900 dark:text-zinc-100">{children}</strong>
+  ),
+  em: ({ children }: { children?: React.ReactNode }) => (
+    <em className="italic text-zinc-600 dark:text-zinc-400">{children}</em>
+  ),
+  blockquote: ({ children }: { children?: React.ReactNode }) => (
+    <blockquote className="my-2 border-l-2 border-zinc-300 dark:border-zinc-600 pl-3 text-zinc-500 dark:text-zinc-400 text-[13px]">{children}</blockquote>
+  ),
+  code: ({ children, className }: { children?: React.ReactNode; className?: string }) => {
+    const isBlock = className?.includes('language-');
+    return isBlock
+      ? <pre className="my-2 rounded-lg bg-zinc-100 dark:bg-zinc-800 p-3 overflow-x-auto"><code className="text-[12px] text-zinc-800 dark:text-zinc-200">{children}</code></pre>
+      : <code className="rounded bg-zinc-100 dark:bg-zinc-800 px-1 py-0.5 text-[12px] text-zinc-800 dark:text-zinc-200">{children}</code>;
+  },
+  hr: () => <hr className="my-3 border-zinc-200 dark:border-zinc-700" />,
+};
 
 interface AgentStep {
   id: string;
   label: string;
   status: 'pending' | 'running' | 'done' | 'error';
   detail?: string;
+  type?: 'search-tool';
+  searchQuery?: string;
+  searchResults?: Array<{ meetingId: string; meetingTitle: string; score: number }>;
+}
+
+// ─── Step icon ────────────────────────────────────────────────────────────────
+function StepIcon({ status, type }: { status: AgentStep['status']; type?: string }) {
+  if (status === 'running') {
+    return (
+      <span className="relative flex-shrink-0 w-[18px] h-[18px] flex items-center justify-center">
+        <Clock className="w-[14px] h-[14px] text-zinc-500 dark:text-zinc-400 animate-pulse" />
+      </span>
+    );
+  }
+  if (status === 'done') {
+    if (type === 'search-tool') {
+      return (
+        <span className="flex-shrink-0 w-[18px] h-[18px] flex items-center justify-center">
+          <Search className="w-[13px] h-[13px] text-zinc-500 dark:text-zinc-400" />
+        </span>
+      );
+    }
+    return (
+      <span className="flex-shrink-0 w-[18px] h-[18px] flex items-center justify-center">
+        <CheckCircle2 className="w-[14px] h-[14px] text-zinc-500 dark:text-zinc-400" />
+      </span>
+    );
+  }
+  if (status === 'error') {
+    return (
+      <span className="flex-shrink-0 w-[18px] h-[18px] flex items-center justify-center">
+        <X className="w-[13px] h-[13px] text-red-400" />
+      </span>
+    );
+  }
+  // pending
+  return (
+    <span className="flex-shrink-0 w-[18px] h-[18px] flex items-center justify-center">
+      <Clock className="w-[13px] h-[13px] text-zinc-300 dark:text-zinc-600" />
+    </span>
+  );
+}
+
+// ─── Thought process timeline ──────────────────────────────────────────────────
+function ThoughtProcess({ steps, isLive }: { steps: AgentStep[]; isLive: boolean }) {
+  const [collapsed, setCollapsed] = useState(false);
+
+  return (
+    <div className="mb-3">
+      {/* Header */}
+      <button
+        onClick={() => setCollapsed(c => !c)}
+        className="flex items-center gap-1.5 text-[12px] text-zinc-500 dark:text-zinc-400 hover:text-zinc-700 dark:hover:text-zinc-200 transition-colors group mb-1"
+      >
+        {isLive
+          ? <Loader2 className="w-3.5 h-3.5 animate-spin text-zinc-400" />
+          : <Clock className="w-3.5 h-3.5 text-zinc-400" />
+        }
+        <span className="font-medium">Thought process</span>
+        <motion.span
+          animate={{ rotate: collapsed ? -90 : 0 }}
+          transition={{ duration: 0.18 }}
+          className="inline-flex"
+        >
+          <ChevronDown className="w-3.5 h-3.5 text-zinc-400" />
+        </motion.span>
+      </button>
+
+      {/* Steps chain */}
+      <AnimatePresence initial={false}>
+        {!collapsed && (
+          <motion.div
+            initial={{ opacity: 0, height: 0 }}
+            animate={{ opacity: 1, height: 'auto' }}
+            exit={{ opacity: 0, height: 0 }}
+            transition={{ duration: 0.2, ease: 'easeInOut' }}
+            className="overflow-hidden"
+          >
+            <div className="pl-1 pt-0.5">
+              {steps.map((step, idx) => {
+                const isLast = idx === steps.length - 1;
+                const hasResults = (step.searchResults?.length ?? 0) > 0;
+                return (
+                  <motion.div
+                    key={step.id}
+                    initial={{ opacity: 0, x: -4 }}
+                    animate={{ opacity: 1, x: 0 }}
+                    transition={{ duration: 0.18, delay: idx * 0.04 }}
+                    className="flex gap-2.5 relative"
+                  >
+                    {/* Vertical connector line */}
+                    {!isLast && (
+                      <div className="absolute left-[8px] top-[18px] bottom-0 w-px bg-zinc-200 dark:bg-zinc-700/60" />
+                    )}
+
+                    {/* Icon */}
+                    <div className="mt-[3px]">
+                      <StepIcon status={step.status} type={step.type} />
+                    </div>
+
+                    {/* Content */}
+                    <div className="flex-1 min-w-0 pb-3">
+                      <span className={`text-[13px] leading-snug ${
+                        step.status === 'running'
+                          ? 'text-zinc-800 dark:text-zinc-200 font-medium'
+                          : 'text-zinc-500 dark:text-zinc-400'
+                      }`}>
+                        {step.type === 'search-tool'
+                          ? (step.status === 'running' ? 'Searching notes' : 'Searched notes')
+                          : step.label}
+                        {step.type === 'search-tool' && step.searchQuery && (
+                          <span className="ml-1.5 text-zinc-400 dark:text-zinc-500 font-normal">
+                            for &ldquo;{step.searchQuery.length > 45 ? step.searchQuery.slice(0, 45) + '…' : step.searchQuery}&rdquo;
+                          </span>
+                        )}
+                      </span>
+
+                      {/* Result sub-row */}
+                      {step.status === 'done' && step.detail && (
+                        <motion.div
+                          initial={{ opacity: 0, y: -2 }}
+                          animate={{ opacity: 1, y: 0 }}
+                          transition={{ duration: 0.14 }}
+                          className="mt-1 flex items-start gap-2"
+                        >
+                          <div className="w-px h-4 bg-zinc-200 dark:bg-zinc-700/60 ml-[1px] mt-1 flex-shrink-0" />
+                          <div className="rounded-md bg-zinc-100 dark:bg-zinc-800/60 border border-zinc-200/70 dark:border-zinc-700/50 px-2.5 py-1 text-[11px] text-zinc-500 dark:text-zinc-400 leading-snug">
+                            <span className="font-medium text-zinc-400 dark:text-zinc-500 mr-1.5">Result</span>
+                            {step.detail}
+                          </div>
+                        </motion.div>
+                      )}
+
+                      {/* Search results expandable */}
+                      {step.status === 'done' && hasResults && (
+                        <ExpandableResults results={step.searchResults!} />
+                      )}
+                    </div>
+                  </motion.div>
+                );
+              })}
+
+              {/* Done row */}
+              {!isLive && steps.length > 0 && (
+                <motion.div
+                  initial={{ opacity: 0, x: -4 }}
+                  animate={{ opacity: 1, x: 0 }}
+                  transition={{ duration: 0.18, delay: steps.length * 0.04 }}
+                  className="flex gap-2.5"
+                >
+                  <div className="mt-[3px]">
+                    <span className="flex-shrink-0 w-[18px] h-[18px] flex items-center justify-center">
+                      <CheckCircle2 className="w-[14px] h-[14px] text-zinc-400 dark:text-zinc-500" />
+                    </span>
+                  </div>
+                  <span className="text-[13px] text-zinc-400 dark:text-zinc-500 pb-2">Done</span>
+                </motion.div>
+              )}
+            </div>
+          </motion.div>
+        )}
+      </AnimatePresence>
+    </div>
+  );
+}
+
+function ExpandableResults({ results }: { results: Array<{ meetingId: string; meetingTitle: string; score: number }> }) {
+  const [open, setOpen] = useState(false);
+  const maxScore = Math.max(...results.map(r => r.score), 0.001);
+  return (
+    <div className="mt-1">
+      <button
+        onClick={() => setOpen(o => !o)}
+        className="flex items-center gap-1 text-[11px] text-zinc-400 dark:text-zinc-500 hover:text-zinc-600 dark:hover:text-zinc-300 transition-colors"
+      >
+        <ChevronRight className={`w-3 h-3 transition-transform ${open ? 'rotate-90' : ''}`} />
+        {results.length} meeting{results.length !== 1 ? 's' : ''} found
+      </button>
+      <AnimatePresence>
+        {open && (
+          <motion.div
+            initial={{ opacity: 0, height: 0 }}
+            animate={{ opacity: 1, height: 'auto' }}
+            exit={{ opacity: 0, height: 0 }}
+            transition={{ duration: 0.16 }}
+            className="overflow-hidden mt-1.5 ml-4 space-y-1"
+          >
+            {results.map(r => {
+              const pct = Math.min(Math.round((r.score / maxScore) * 100), 100);
+              return (
+                <div key={r.meetingId} className="flex items-center justify-between gap-3">
+                  <span className="text-[11px] text-zinc-600 dark:text-zinc-300 truncate">{r.meetingTitle}</span>
+                  <span className="text-[10px] text-zinc-400 tabular-nums flex-shrink-0">{pct}%</span>
+                </div>
+              );
+            })}
+          </motion.div>
+        )}
+      </AnimatePresence>
+    </div>
+  );
 }
 
 interface Message {
@@ -87,6 +333,16 @@ const SLASH_COMMANDS = [
   },
 ];
 
+interface ChatThread {
+  id: string;
+  title: string;
+  taskId: string | null;
+  taskTitle?: string;
+  createdAt: string;
+  updatedAt: string;
+  preview: string;
+}
+
 interface ChatPageProps {
   selectedTask: TaskHistory | null;
   chatMessages: Message[];
@@ -107,6 +363,40 @@ interface ChatPageProps {
   downloadExistingAsset?: (a: GeneratedAsset) => void | Promise<void>;
   history?: TaskHistory[];
   onSelectTask?: (task: TaskHistory | null) => void;
+  chatThreads?: ChatThread[];
+  activeChatThreadId?: string | null;
+  onNewThread?: () => void;
+  onSwitchThread?: (thread: ChatThread) => void;
+  session?: { user: { id: string; email: string; name?: string } } | null;
+}
+
+function groupThreadsByTime(threads: ChatThread[], taskId?: string | null): { label: string; items: ChatThread[] }[] {
+  const filtered = taskId !== undefined
+    ? threads.filter(t => t.taskId === taskId)
+    : threads;
+  const now = Date.now();
+  const groups: { label: string; items: ChatThread[] }[] = [];
+  const addGroup = (label: string, items: ChatThread[]) => { if (items.length) groups.push({ label, items }); };
+  const msDay = 86400000;
+  addGroup('Today', filtered.filter(t => now - new Date(t.updatedAt).getTime() < msDay));
+  addGroup('Yesterday', filtered.filter(t => {
+    const age = now - new Date(t.updatedAt).getTime();
+    return age >= msDay && age < 2 * msDay;
+  }));
+  addGroup('Last 3 days', filtered.filter(t => {
+    const age = now - new Date(t.updatedAt).getTime();
+    return age >= 2 * msDay && age < 3 * msDay;
+  }));
+  addGroup('Last week', filtered.filter(t => {
+    const age = now - new Date(t.updatedAt).getTime();
+    return age >= 3 * msDay && age < 7 * msDay;
+  }));
+  addGroup('Last month', filtered.filter(t => {
+    const age = now - new Date(t.updatedAt).getTime();
+    return age >= 7 * msDay && age < 30 * msDay;
+  }));
+  addGroup('Older', filtered.filter(t => now - new Date(t.updatedAt).getTime() >= 30 * msDay));
+  return groups;
 }
 
 export default function ChatPage({
@@ -124,22 +414,40 @@ export default function ChatPage({
   wikiStyle = 'MECE',
   setWikiStyle,
   agentAssetHistory = [],
-  selectedAgentAsset = null,
-  setSelectedAgentAsset,
+  selectedAgentAsset: _selectedAgentAsset = null,
+  setSelectedAgentAsset: _setSelectedAgentAsset,
   downloadExistingAsset,
   history = [],
   onSelectTask,
+  chatThreads,
+  activeChatThreadId,
+  onNewThread,
+  onSwitchThread,
+  session,
 }: ChatPageProps) {
   const chatEndRef = useRef<HTMLDivElement>(null);
   const textareaRef = useRef<HTMLTextAreaElement>(null);
+  const historyDropdownRef = useRef<HTMLDivElement>(null);
 
   const [showSlashMenu, setShowSlashMenu] = useState(false);
   const [slashFilter, setSlashFilter] = useState('');
   const [pendingSlashCmd, setPendingSlashCmd] = useState<'email' | 'wiki' | null>(null);
+  const [showThreadHistory, setShowThreadHistory] = useState(false);
+  const [showAllRecents, setShowAllRecents] = useState(false);
 
   useEffect(() => {
     chatEndRef.current?.scrollIntoView({ behavior: 'smooth' });
   }, [chatMessages, isChatting, agentAssetHistory]);
+
+  useEffect(() => {
+    const handler = (e: MouseEvent) => {
+      if (historyDropdownRef.current && !historyDropdownRef.current.contains(e.target as Node)) {
+        setShowThreadHistory(false);
+      }
+    };
+    document.addEventListener('mousedown', handler);
+    return () => document.removeEventListener('mousedown', handler);
+  }, []);
 
   const handleInputChange = (value: string) => {
     setChatInput(value);
@@ -181,16 +489,15 @@ export default function ChatPage({
   return (
     <div className="h-full w-full bg-app-panel text-app-fg flex flex-col overflow-hidden font-[system-ui]">
       {/* Header */}
-      <div className="flex-none flex items-center gap-2 sm:gap-2.5 px-3 sm:px-6 md:px-8 py-3 sm:py-4 overflow-x-auto no-scrollbar whitespace-nowrap z-10 border-b border-transparent dark:border-app-border">
+      <div className="flex-none flex items-center gap-2 sm:gap-2.5 px-3 sm:px-6 md:px-8 py-3 sm:py-4 z-20 border-b border-zinc-200/70 dark:border-app-border">
         <MessageSquare className="w-4 h-4 flex-shrink-0 text-zinc-400 dark:text-zinc-500" />
-        
+
         {onSelectTask ? (
-          <select 
+          <select
             value={selectedTask?.id || 'all'}
             onChange={(e) => {
-              if (e.target.value === 'all') {
-                onSelectTask(null);
-              } else {
+              if (e.target.value === 'all') onSelectTask(null);
+              else {
                 const task = taskOptions.find(t => t.id === e.target.value);
                 if (task) onSelectTask(task);
               }
@@ -207,7 +514,82 @@ export default function ChatPage({
         )}
 
         <span className="text-zinc-400 dark:text-zinc-600">/</span>
-        <span className="text-[13px] font-semibold text-zinc-700 dark:text-zinc-300">AI Chat</span>
+        <span className="text-[13px] font-semibold text-zinc-700 dark:text-zinc-300 flex-1">AI Chat</span>
+
+        {/* Thread history dropdown */}
+        <div className="relative flex-shrink-0" ref={historyDropdownRef}>
+          <button
+            onClick={() => setShowThreadHistory(v => !v)}
+            className="flex items-center gap-1.5 px-2.5 py-1.5 rounded-lg text-[12px] text-zinc-500 dark:text-zinc-400 hover:bg-zinc-100 dark:hover:bg-app-raised transition-colors"
+            title="Chat history"
+          >
+            <History className="w-3.5 h-3.5" />
+            <ChevronDown className={`w-3 h-3 transition-transform ${showThreadHistory ? 'rotate-180' : ''}`} />
+          </button>
+          <AnimatePresence>
+            {showThreadHistory && (() => {
+              const taskFilter = selectedTask?.id ?? null;
+              const groups = groupThreadsByTime(chatThreads ?? [], taskFilter);
+              return (
+                <motion.div
+                  initial={{ opacity: 0, y: -4, scale: 0.97 }}
+                  animate={{ opacity: 1, y: 0, scale: 1 }}
+                  exit={{ opacity: 0, y: -4, scale: 0.97 }}
+                  transition={{ duration: 0.15 }}
+                  className="absolute top-full right-0 mt-1 w-72 bg-white dark:bg-app-raised border border-zinc-200/80 dark:border-app-border rounded-2xl shadow-xl z-50 overflow-hidden"
+                >
+                  <div className="px-3 pt-3 pb-1 flex items-center justify-between">
+                    <span className="text-[12px] font-semibold text-zinc-700 dark:text-zinc-300">Chat history</span>
+                    {onNewThread && (
+                      <button
+                        onClick={() => { onNewThread(); setShowThreadHistory(false); }}
+                        className="flex items-center gap-1 text-[11px] text-zinc-500 hover:text-zinc-700 dark:hover:text-zinc-300 transition-colors"
+                      >
+                        <Plus className="w-3 h-3" /> New chat
+                      </button>
+                    )}
+                  </div>
+                  <div className="max-h-80 overflow-y-auto py-1">
+                    {groups.length === 0 ? (
+                      <p className="px-4 py-3 text-[12px] text-zinc-400 dark:text-zinc-500">No past chats yet</p>
+                    ) : groups.map(g => (
+                      <div key={g.label}>
+                        <p className="px-3 pt-2 pb-1 text-[10.5px] font-semibold text-zinc-400 dark:text-zinc-500 uppercase tracking-wide">{g.label}</p>
+                        {g.items.map(thread => (
+                          <button
+                            key={thread.id}
+                            onClick={() => { onSwitchThread?.(thread); setShowThreadHistory(false); }}
+                            className={`w-full flex items-start gap-2.5 px-3 py-2 hover:bg-zinc-50 dark:hover:bg-app-chip transition-colors text-left ${activeChatThreadId === thread.id ? 'bg-zinc-50 dark:bg-app-chip' : ''}`}
+                          >
+                            <MessageSquare className="w-3.5 h-3.5 text-zinc-400 mt-0.5 flex-shrink-0" />
+                            <div className="flex-1 min-w-0">
+                              <p className="text-[12.5px] font-medium text-zinc-700 dark:text-zinc-300 truncate">{thread.title}</p>
+                              {thread.taskTitle && (
+                                <p className="text-[11px] text-zinc-400 dark:text-zinc-500 truncate">{thread.taskTitle}</p>
+                              )}
+                            </div>
+                          </button>
+                        ))}
+                      </div>
+                    ))}
+                  </div>
+                </motion.div>
+              );
+            })()}
+          </AnimatePresence>
+        </div>
+
+        {/* New chat button — only show when there's an active conversation */}
+        {!isEmpty && onNewThread && (
+          <button
+            onClick={onNewThread}
+            className="flex items-center gap-1.5 px-2.5 py-1.5 rounded-lg text-[12px] text-zinc-500 dark:text-zinc-400 hover:bg-zinc-100 dark:hover:bg-app-raised transition-colors flex-shrink-0"
+            title="New chat"
+          >
+            <Plus className="w-3.5 h-3.5" />
+            <span className="hidden sm:inline">New</span>
+          </button>
+        )}
       </div>
 
       {/* Scrollable messages area */}
@@ -216,39 +598,85 @@ export default function ChatPage({
 
           {/* Empty state */}
           {isEmpty && (
-            <div className="flex flex-col items-center justify-center text-center py-8 sm:py-14">
-              <h1 className="text-[22px] sm:text-[32px] font-serif italic text-zinc-700 dark:text-zinc-300 leading-tight mb-2">Chat</h1>
-              <p className="text-[13px] sm:text-[14px] text-zinc-600 dark:text-zinc-400 max-w-xl mb-6 sm:mb-10 px-2">
-                Ask anything about <span className="font-semibold text-zinc-800 dark:text-zinc-200">{currentTaskLabel}</span>.
-                Type <kbd className="px-1.5 py-0.5 bg-zinc-200/80 dark:bg-app-chip border border-zinc-300/80 dark:border-app-border rounded-md text-[12px] font-medium text-zinc-800 dark:text-app-fg">/</kbd> for AI commands.
-              </p>
-              <div className="grid grid-cols-1 sm:grid-cols-2 gap-2 sm:gap-3 w-full max-w-2xl mb-6 sm:mb-8">
-                {[
-                  { label: 'Summarize decisions', prompt: 'Summarize the key decisions made in this meeting.', icon: FileText, bg: 'bg-amber-50 text-amber-500' },
-                  { label: 'List action items', prompt: 'What are my action items from this discussion?', icon: CheckCircle2, bg: 'bg-blue-50 text-blue-500' },
-                  { label: 'Map key concepts', prompt: 'Extract all the main topics discussed.', icon: Network, bg: 'bg-violet-50 text-violet-500' },
-                  { label: 'Draft follow-up email', prompt: '', slash: SLASH_COMMANDS[0], icon: Mail, bg: 'bg-emerald-50 text-emerald-500' },
-                ].map((item, i) => (
-                  <button key={i}
-                    onClick={() => item.slash ? selectSlashCommand(item.slash) : setChatInput(item.prompt)}
-                    className="flex items-center justify-between p-3 sm:p-4 bg-[#f5f2ef] dark:bg-app-chip hover:bg-[#eeebe7] dark:hover:bg-app-raised rounded-xl sm:rounded-2xl transition-all group text-left">
-                    <div className="flex items-center gap-3">
-                      <div className={`w-9 h-9 rounded-xl flex items-center justify-center ${item.bg}`}>
-                        <item.icon className="w-4 h-4" />
-                      </div>
-                      <span className="text-[13px] font-medium text-zinc-800 dark:text-zinc-200">{item.label}</span>
-                    </div>
-                    <Plus className="w-4 h-4 text-zinc-400 dark:text-zinc-600 group-hover:text-zinc-500 dark:text-zinc-400 transition-colors" />
-                  </button>
-                ))}
+            <div className="flex flex-col items-center px-4 pt-6 pb-4 w-full max-w-2xl mx-auto">
+              {/* Greeting */}
+              <div className="w-full mb-8">
+                <h1 className="text-[28px] sm:text-[34px] font-serif italic text-zinc-900 dark:text-zinc-100 leading-tight mb-1">
+                  Hi {session?.user?.name?.split(' ')[0] || session?.user?.email?.split('@')[0] || 'there'}, ask anything
+                </h1>
               </div>
-              <div className="flex flex-wrap gap-2 justify-center">
-                {SLASH_COMMANDS.map(cmd => (
-                  <button key={cmd.id} onClick={() => selectSlashCommand(cmd)}
-                    className="flex items-center gap-2 px-4 py-2 bg-zinc-200/60 dark:bg-app-raised hover:bg-zinc-300/50 dark:hover:bg-app-chip rounded-full text-[12px] font-medium text-zinc-700 dark:text-zinc-200 transition-all">
-                    <cmd.icon className="w-3.5 h-3.5" />{cmd.label}
-                  </button>
-                ))}
+
+              {/* Recents */}
+              {(chatThreads ?? []).length > 0 && (
+                <div className="w-full mb-6">
+                  <div className="flex items-center justify-between mb-2.5">
+                    <span className="text-[13px] font-semibold text-zinc-800 dark:text-zinc-200">Recents</span>
+                    {(chatThreads ?? []).length > 5 && (
+                      <button
+                        onClick={() => setShowAllRecents(v => !v)}
+                        className="text-[12px] text-zinc-500 hover:text-zinc-700 dark:hover:text-zinc-300 flex items-center gap-1"
+                      >
+                        {showAllRecents ? 'Show less' : 'See all +'}
+                      </button>
+                    )}
+                  </div>
+                  <div className="space-y-0.5">
+                    {groupThreadsByTime(chatThreads ?? [], selectedTask ? selectedTask.id : null)
+                      .flatMap(g => g.items)
+                      .slice(0, showAllRecents ? 50 : 5)
+                      .map(thread => {
+                        const age = Date.now() - new Date(thread.updatedAt).getTime();
+                        const msDay = 86400000;
+                        const ageLabel = age < msDay ? `${Math.round(age / 3600000)}h` :
+                          age < 7 * msDay ? `${Math.round(age / msDay)}d` :
+                          age < 30 * msDay ? `${Math.round(age / (7 * msDay))}w` :
+                          `${Math.round(age / (30 * msDay))}mo`;
+                        return (
+                          <button
+                            key={thread.id}
+                            onClick={() => onSwitchThread?.(thread)}
+                            className="w-full flex items-center gap-3 px-3 py-2.5 rounded-xl hover:bg-zinc-100 dark:hover:bg-app-raised transition-colors text-left group"
+                          >
+                            <div className="w-7 h-7 rounded-lg bg-zinc-100 dark:bg-app-raised group-hover:bg-zinc-200 dark:group-hover:bg-app-chip flex items-center justify-center flex-shrink-0 transition-colors">
+                              <MessageSquare className="w-3.5 h-3.5 text-zinc-500 dark:text-zinc-400" />
+                            </div>
+                            <div className="flex-1 min-w-0">
+                              <p className="text-[13px] font-medium text-zinc-800 dark:text-zinc-200 truncate">{thread.title}</p>
+                              {thread.taskTitle && (
+                                <p className="text-[11px] text-zinc-400 dark:text-zinc-500 truncate">{thread.taskTitle}</p>
+                              )}
+                            </div>
+                            <span className="text-[11.5px] text-zinc-400 dark:text-zinc-500 flex-shrink-0">{ageLabel}</span>
+                          </button>
+                        );
+                      })}
+                  </div>
+                </div>
+              )}
+
+              {/* Recipes */}
+              <div className="w-full mb-6">
+                <div className="flex items-center justify-between mb-2.5">
+                  <span className="text-[13px] font-semibold text-zinc-800 dark:text-zinc-200">Recipes</span>
+                </div>
+                <div className="flex flex-wrap gap-2">
+                  {[
+                    { label: 'List recent todos', prompt: 'What are my action items from recent meetings?' },
+                    { label: 'Who did I meet with?', prompt: 'Who did I meet with this week?' },
+                    { label: 'Write weekly recap', prompt: 'Write a summary of my week based on all meetings.' },
+                    { label: 'What was decided?', prompt: 'What key decisions were made in recent meetings?' },
+                    { label: 'Draft follow-up email', slash: SLASH_COMMANDS[0] },
+                  ].map((recipe, i) => (
+                    <button
+                      key={i}
+                      onClick={() => 'slash' in recipe && recipe.slash ? selectSlashCommand(recipe.slash) : setChatInput((recipe as any).prompt)}
+                      className="flex items-center gap-2 px-3.5 py-2 bg-zinc-100 dark:bg-app-raised hover:bg-zinc-200 dark:hover:bg-app-chip rounded-full text-[12.5px] font-medium text-zinc-700 dark:text-zinc-300 transition-colors border border-zinc-200/70 dark:border-app-border"
+                    >
+                      <FileText className="w-3 h-3 text-zinc-400 dark:text-zinc-500 flex-shrink-0" />
+                      {recipe.label}
+                    </button>
+                  ))}
+                </div>
               </div>
             </div>
           )}
@@ -266,8 +694,17 @@ export default function ChatPage({
                     <span className="text-[13px] font-semibold text-zinc-800 dark:text-zinc-200">Lumina AI</span>
                   </div>
                 )}
-                <div className={`prose prose-sm sm:prose-base max-w-none w-full ${msg.role === 'model' ? 'pl-10 prose-p:leading-[1.8] prose-p:mb-4 prose-headings:font-semibold prose-headings:mt-6 prose-headings:mb-3 prose-ul:my-4 prose-li:my-1.5 prose-strong:text-zinc-900 dark:prose-strong:text-zinc-100 prose-p:text-zinc-700 dark:prose-p:text-zinc-300 prose-headings:text-zinc-900 dark:prose-headings:text-zinc-100 prose-li:text-zinc-700 dark:prose-li:text-zinc-300 text-zinc-800 dark:text-zinc-200' : 'prose-p:leading-relaxed prose-p:text-zinc-700 dark:prose-p:text-zinc-300 text-zinc-800 dark:text-zinc-200'}`}>
-                  <Markdown remarkPlugins={[remarkGfm]}>{msg.text}</Markdown>
+                {msg.role === 'model' && msg.agentStatus === 'done' && msg.agentPlan && msg.agentPlan.length > 0 && (
+                  <div className="pl-10 mb-2">
+                    <ThoughtProcess steps={msg.agentPlan} isLive={false} />
+                  </div>
+                )}
+                <div className={msg.role === 'model' ? 'pl-10 w-full min-w-0' : 'text-[13px] leading-relaxed text-zinc-700 dark:text-zinc-300'}>
+                  {msg.role === 'model' ? (
+                    <Markdown remarkPlugins={[remarkGfm]} components={assistantMarkdownComponents as any}>{msg.text}</Markdown>
+                  ) : (
+                    <Markdown remarkPlugins={[remarkGfm]}>{msg.text}</Markdown>
+                  )}
                 </div>
                 {msg.image && (
                   <div className={`mt-4 rounded-2xl overflow-hidden border border-zinc-200/80 dark:border-white/10 ${msg.role === 'model' ? 'ml-10' : ''}`}>
@@ -296,7 +733,7 @@ export default function ChatPage({
                     {typeof msg.retrievalMeta.confidence === 'number'
                       ? ` • Confidence ${Math.round(msg.retrievalMeta.confidence * 100)}%`
                       : ''}
-                    {typeof msg.retrievalMeta.tokenUsageTotal === 'number'
+                    {typeof msg.retrievalMeta.tokenUsageTotal === 'number' && msg.retrievalMeta.tokenUsageTotal > 0
                       ? ` • Context ${msg.retrievalMeta.tokenUsageTotal} tok`
                       : ''}
                     {typeof msg.retrievalMeta.coveredMeetingsCount === 'number' &&
@@ -317,59 +754,37 @@ export default function ChatPage({
             </motion.div>
           ))}
 
-          {/* Agentic execution status — shows plan steps in real time */}
+          {/* Agentic execution status — live thought process */}
           {isChatting && (() => {
             const lastModel = [...chatMessages].reverse().find(m => m.role === 'model' && m.agentStatus);
             const agentMsg = lastModel?.agentStatus ? lastModel : null;
             if (agentMsg?.agentPlan?.length) {
               return (
                 <motion.div initial={{ opacity: 0, y: 8 }} animate={{ opacity: 1, y: 0 }} className="flex justify-start">
-                  <div className="max-w-[88%] sm:max-w-[80%]">
+                  <div className="max-w-[88%] sm:max-w-[80%] w-full">
                     <div className="flex items-center gap-2.5 mb-3">
                       <div className="w-7 h-7 rounded-full bg-[#1a1a1a] flex items-center justify-center flex-shrink-0">
                         <Sparkles className="w-3.5 h-3.5 text-white" />
                       </div>
-                      <span className="text-[13px] font-semibold text-zinc-800 dark:text-zinc-200">
-                        {agentMsg.agentStatus === 'thinking' ? 'Understanding your request...' :
-                         agentMsg.agentStatus === 'planning' ? 'Planning approach...' :
-                         agentMsg.agentStatus === 'executing' ? 'Working on it...' :
-                         'Finishing up...'}
-                      </span>
+                      <span className="text-[13px] font-semibold text-zinc-800 dark:text-zinc-200">Lumina AI</span>
                     </div>
-                    <div className="pl-10 space-y-2">
-                      {agentMsg.agentPlan.map((step) => (
-                        <div key={step.id} className="flex items-start gap-2.5">
-                          {step.status === 'done' ? (
-                            <CheckCircle2 className="w-4 h-4 text-emerald-500 mt-0.5 flex-shrink-0" />
-                          ) : step.status === 'running' ? (
-                            <Loader2 className="w-4 h-4 text-blue-500 animate-spin mt-0.5 flex-shrink-0" />
-                          ) : step.status === 'error' ? (
-                            <X className="w-4 h-4 text-red-400 mt-0.5 flex-shrink-0" />
-                          ) : (
-                            <div className="w-4 h-4 rounded-full border-2 border-zinc-300 dark:border-zinc-600 mt-0.5 flex-shrink-0" />
-                          )}
-                          <div className="min-w-0">
-                            <span className={`text-[13px] ${step.status === 'done' ? 'text-zinc-600 dark:text-zinc-300' : step.status === 'running' ? 'text-zinc-800 dark:text-zinc-200 font-medium' : 'text-zinc-500 dark:text-zinc-500'}`}>
-                              {step.label}
-                            </span>
-                            {step.detail && (step.status === 'done' || step.status === 'running') && (
-                              <span className={`text-[11px] ml-2 ${step.status === 'running' ? 'text-blue-400' : 'text-zinc-500 dark:text-zinc-400'}`}>{step.detail}</span>
-                            )}
-                          </div>
-                        </div>
-                      ))}
+                    <div className="pl-10">
+                      <ThoughtProcess steps={agentMsg.agentPlan} isLive={true} />
                     </div>
                   </div>
                 </motion.div>
               );
             }
             return (
-              <motion.div initial={{ opacity: 0 }} animate={{ opacity: 1 }} className="flex justify-start">
+              <motion.div initial={{ opacity: 0 }} animate={{ opacity: 1 }} className="flex justify-start py-2">
                 <div className="flex items-center gap-2.5">
-                  <div className="w-7 h-7 rounded-full bg-[#1a1a1a] flex items-center justify-center">
+                  <div className="w-7 h-7 rounded-full bg-[#1a1a1a] flex items-center justify-center flex-shrink-0">
                     <Sparkles className="w-3.5 h-3.5 text-white" />
                   </div>
-                  <ShiningText text="Lumina is thinking..." />
+                  <div className="flex items-center gap-1.5 text-[13px] text-zinc-500 dark:text-zinc-400">
+                    <Loader2 className="w-3.5 h-3.5 animate-spin" />
+                    <span>Thinking…</span>
+                  </div>
                 </div>
               </motion.div>
             );
