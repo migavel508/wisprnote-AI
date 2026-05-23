@@ -1,6 +1,7 @@
 import { GoogleGenAI, GenerateContentResponse, Type } from "@google/genai";
 import { AudioBatch, blobToBase64, BlobReadError } from "./audioService";
 import { logger } from '../lib/logger';
+import { formatDisplayName } from '../lib/displayName';
 
 const log = logger.scope('Gemini');
 
@@ -351,16 +352,12 @@ export async function processAudioBatch(batch: AudioBatch, prompt: string): Prom
     const { getSession } = await import('./awsAuthService');
     const session = await getSession();
     if (session?.user) {
-      const name = session.user.name;
-      const emailName = session.user.email?.split('@')[0];
-      if (name || emailName) {
-        userName = name || emailName || "the user";
-      }
+      userName = formatDisplayName(session.user.email, session.user.name, 'the user');
     }
   } catch (e) {
     log.warn('get_user_session_failed', { error: e instanceof Error ? e : undefined });
   }
-  
+
   // Calculate overlap info for the prompt
   const overlapInfo = batch.overlapStart && batch.overlapStart > 0
     ? `\nNOTE: The first ~${batch.overlapStart} seconds of this chunk overlap with the previous chunk for continuity. This is intentional to ensure no content is lost at boundaries.`
@@ -552,11 +549,7 @@ export async function transcribeViaFileAPI(
     const { getSession } = await import('./awsAuthService');
     const session = await getSession();
     if (session?.user) {
-      const name = session.user.name;
-      const emailName = session.user.email?.split('@')[0];
-      if (name || emailName) {
-        userName = name || emailName || "the user";
-      }
+      userName = formatDisplayName(session.user.email, session.user.name, 'the user');
     }
   } catch (e) {
     log.warn('get_user_session_failed', { error: e instanceof Error ? e : undefined });

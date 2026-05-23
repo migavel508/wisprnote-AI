@@ -23,6 +23,7 @@ import {
 import Markdown from 'react-markdown';
 import remarkGfm from 'remark-gfm';
 import { ChatPageSkeleton } from '../components/Skeleton';
+import { formatDisplayName } from '../lib/displayName';
 
 // Custom markdown components — matches anarlog's clean per-element approach
 // instead of relying on the @tailwindcss/typography prose plugin
@@ -602,7 +603,7 @@ export default function ChatPage({
               {/* Greeting */}
               <div className="w-full mb-8">
                 <h1 className="text-[28px] sm:text-[34px] font-serif italic text-zinc-900 dark:text-zinc-100 leading-tight mb-1">
-                  Hi {session?.user?.name?.split(' ')[0] || session?.user?.email?.split('@')[0] || 'there'}, ask anything
+                  Hi {formatDisplayName(session?.user?.email, session?.user?.name, 'there')}, ask anything
                 </h1>
               </div>
 

@@ -10,10 +10,6 @@ import {
   BookOpen,
   Headphones,
   Users,
-  UserPlus,
-  Sparkles,
-  Settings,
-  CircleHelp,
   Sun,
   Moon,
   Monitor,
@@ -24,8 +20,9 @@ import { AuthSession } from '../services/awsAuthService';
 import { getPendingTaskCount } from '../services/awsService';
 import { useTheme, type ThemePreference } from '../theme/ThemeProvider';
 import { getWorkspaces, getFolders, createWorkspace, type Workspace, type Folder as FolderType } from '../services/workspaceService';
+import WorkspaceSwitcher from './WorkspaceSwitcher';
 
-type View = 'process' | 'history' | 'notes' | 'chat' | 'knowledge' | 'notebooks' | 'audio-devices' | 'workspace' | 'people';
+type View = 'process' | 'history' | 'notes' | 'chat' | 'knowledge' | 'notebooks' | 'audio-devices' | 'workspace' | 'people' | 'settings';
 
 interface MainSidebarProps {
   currentView: View;
@@ -375,48 +372,23 @@ export default function MainSidebar({
         <div className="flex-1 min-h-0" />
 
         {/* Bottom section */}
-        <div className="px-2.5 pb-3 space-y-px">
+        <div className="px-2.5 pb-3 space-y-1">
           <ThemeAppearancePicker />
 
-          <button className="w-full flex items-center gap-2.5 px-2.5 py-[7px] text-[12.5px] rounded-xl text-app-nav-fg hover:bg-app-nav-hover-bg hover:text-app-nav-fg-hover transition-all duration-200">
-            <UserPlus size={14} strokeWidth={1.5} className="flex-shrink-0" />
-            <span className="tracking-[-0.01em]">Invite your team</span>
-          </button>
-          <button className="w-full flex items-center gap-2.5 px-2.5 py-[7px] text-[12.5px] rounded-xl text-app-nav-fg hover:bg-app-nav-hover-bg hover:text-app-nav-fg-hover transition-all duration-200">
-            <Sparkles size={14} strokeWidth={1.5} className="flex-shrink-0" />
-            <span className="tracking-[-0.01em]">Get a free month</span>
-          </button>
-          <button className="w-full flex items-center gap-2.5 px-2.5 py-[7px] text-[12.5px] rounded-xl text-app-nav-fg hover:bg-app-nav-hover-bg hover:text-app-nav-fg-hover transition-all duration-200">
-            <Settings size={14} strokeWidth={1.5} className="flex-shrink-0" />
-            <span className="tracking-[-0.01em]">Settings</span>
-          </button>
-          <button className="w-full flex items-center gap-2.5 px-2.5 py-[7px] text-[12.5px] rounded-xl text-app-nav-fg hover:bg-app-nav-hover-bg hover:text-app-nav-fg-hover transition-all duration-200">
-            <CircleHelp size={14} strokeWidth={1.5} className="flex-shrink-0" />
-            <span className="tracking-[-0.01em]">Help</span>
-          </button>
+          <div className="h-px bg-app-divider w-full my-1" />
 
-          <div className="h-px bg-app-divider w-full my-2" />
-
-          {/* User row */}
-          <div className="flex items-center justify-between">
-            <div className="flex items-center gap-2 px-2 py-1.5 flex-1 min-w-0">
-              <div className="w-6 h-6 rounded-full bg-zinc-900 text-white dark:bg-zinc-100 dark:text-zinc-900 flex items-center justify-center flex-shrink-0">
-                <span className="text-[8px] font-mono font-medium uppercase tracking-wider">
-                  {session?.user?.email?.substring(0, 2).toUpperCase() || 'AI'}
-                </span>
-              </div>
-              <span className="text-[12px] font-medium text-app-nav-fg-hover truncate tracking-[-0.01em]">
-                {session?.user?.email?.split('@')[0] || 'User'}
-              </span>
-            </div>
-            <button
-              onClick={onSignOut}
-              className="p-1.5 text-app-fg-label hover:text-red-500 hover:bg-red-50 dark:hover:bg-red-950/40 rounded-lg transition-all duration-200 flex-shrink-0"
-              title="Sign Out"
-            >
-              <LogOut size={13} strokeWidth={1.5} />
-            </button>
-          </div>
+          <WorkspaceSwitcher
+            workspaces={workspaces}
+            activeWorkspaceId={workspaces[0]?.id ?? null}
+            session={session}
+            onSwitchWorkspace={() => onViewChange('workspace')}
+            onCreateWorkspace={() => setCreatingWs(true)}
+            onInvite={() => onViewChange('workspace')}
+            onManageTemplates={() => onViewChange('settings')}
+            onOpenHelp={() => onViewChange('settings')}
+            onOpenSettings={() => onViewChange('settings')}
+            onSignOut={onSignOut}
+          />
         </div>
       </div>
     </>

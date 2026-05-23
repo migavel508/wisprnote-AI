@@ -9,6 +9,7 @@ import {
 } from '../services/awsAuthService';
 import { motion, AnimatePresence } from 'motion/react';
 import { Mail, Lock, Loader2, ArrowRight, AlertCircle, CheckCircle2 } from 'lucide-react';
+import { formatDisplayName } from '../lib/displayName';
 /** Prevents duplicate /oauth2/token calls — codes are single-use; survives remounts (sign-out → sign-in cycle). */
 const consumedOAuthCodes = new Set<string>();
 
@@ -171,7 +172,8 @@ export default function Auth() {
 
     try {
       if (isSignUp) {
-        const result = await signUp(email, password);
+        const derivedName = formatDisplayName(email, null, '');
+        const result = await signUp(email, password, derivedName || undefined);
         if (result.confirmationRequired) {
           setNeedsConfirmation(true);
           setMessage('Check your email for the verification code!');

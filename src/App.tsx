@@ -141,6 +141,7 @@ import ProcessPage from './pages/ProcessPage';
 import AudioDevicesPage from './pages/AudioDevicesPage';
 import WorkspacePage from './pages/WorkspacePage';
 import PeoplePage from './pages/PeoplePage';
+import SettingsPage from './pages/SettingsPage';
 import MainSidebar from './components/MainSidebar';
 import { ManualNotesList } from './components/ManualNotes/ManualNotesList';
 import { ManualNoteEditor } from './components/ManualNotes/ManualNoteEditor';
@@ -161,7 +162,7 @@ declare global {
   }
 }
 
-type View = 'process' | 'history' | 'notes' | 'chat' | 'knowledge' | 'notebooks' | 'audio-devices' | 'shared' | 'workspace' | 'people';
+type View = 'process' | 'history' | 'notes' | 'chat' | 'knowledge' | 'notebooks' | 'audio-devices' | 'shared' | 'workspace' | 'people' | 'settings';
 type Status = 'idle' | 'splitting' | 'processing' | 'finalizing' | 'completed' | 'error';
 type NoteTab = 'transcription' | 'summary' | 'notes';
 
@@ -270,6 +271,7 @@ export default function App() {
     if (path === '/audio-devices') return 'audio-devices';
     if (path === '/workspace') return 'workspace';
     if (path === '/people') return 'people';
+    if (path.startsWith('/settings')) return 'settings';
     return 'process';
   };
   
@@ -304,6 +306,9 @@ export default function App() {
         break;
       case 'people':
         navigate('/people');
+        break;
+      case 'settings':
+        navigate('/settings');
         break;
     }
   };
@@ -4018,6 +4023,21 @@ export default function App() {
                 <PeoplePage
                   allTasks={history}
                   onSelectTask={(task) => setCurrentView('notes', task.id)}
+                />
+              </motion.div>
+            )}
+            {currentView === 'settings' && (
+              <motion.div
+                key="settings"
+                initial={{ opacity: 0 }}
+                animate={{ opacity: 1 }}
+                exit={{ opacity: 0 }}
+                className="h-full"
+              >
+                <SettingsPage
+                  session={session}
+                  onClose={() => setCurrentView('process')}
+                  onSignOut={() => { clearUserState(); signOut(); }}
                 />
               </motion.div>
             )}
