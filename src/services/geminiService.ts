@@ -142,8 +142,8 @@ async function callOpenRouter(requestOptions: any): Promise<GenerateContentRespo
     headers: {
       'Authorization': `Bearer ${apiKey}`,
       'Content-Type': 'application/json',
-      'HTTP-Referer': typeof window !== 'undefined' ? window.location.origin : 'https://lumina-ai.app',
-      'X-Title': 'Lumina AI',
+      'HTTP-Referer': typeof window !== 'undefined' ? window.location.origin : 'https://wisprnote.app',
+      'X-Title': 'WisprNote AI',
     },
     body: JSON.stringify(body),
   });
@@ -247,8 +247,8 @@ async function generateImageWithOpenRouter(prompt: string): Promise<string | nul
           headers: {
             'Authorization': `Bearer ${apiKey}`,
             'Content-Type': 'application/json',
-            'HTTP-Referer': typeof window !== 'undefined' ? window.location.origin : 'https://lumina-ai.app',
-            'X-Title': 'Lumina AI',
+            'HTTP-Referer': typeof window !== 'undefined' ? window.location.origin : 'https://wisprnote.app',
+            'X-Title': 'WisprNote AI',
           },
           body: JSON.stringify({
             model,
@@ -301,7 +301,7 @@ async function generateWithFallback(
   fallbackModels: string[] = ["gemini-3.1-flash-lite-preview", "gemini-3-flash-preview"]
 ): Promise<GenerateContentResponse> {
   const provider = getProvider();
-  let lastError;
+  let lastError: Error | null = null;
   const modelsToTry = [requestOptions.model, ...fallbackModels];
 
   for (let mi = 0; mi < modelsToTry.length; mi++) {
@@ -939,7 +939,7 @@ export async function agentPlanQuery(
     model: 'gemini-3-flash-preview',
     contents: [{ role: 'user', parts: [{ text: userQuery }] }],
     config: {
-      systemInstruction: `You are a precise intent classifier for a meeting AI assistant called Lumina.
+      systemInstruction: `You are a precise intent classifier for a meeting AI assistant called WisprNote AI.
 
 The user has ${isSingleMeeting ? '1 meeting selected' : `${meetingTitles.length} meetings available`}.
 
@@ -1054,12 +1054,13 @@ export async function chatWithNotes(
 
   const systemInstruction = `Current date: ${today}
 
-You are Lumina AI, a helpful meeting assistant. Your purpose is to help users understand their meeting content better.
+You are WisprNote AI, a helpful meeting assistant. Your purpose is to help users understand their meeting content better.
 
 - Always keep your responses concise, professional, and directly relevant to the user's questions.
 - Your primary source of truth is the meeting transcript. Generate responses primarily from the transcript, then the summary or notes.
 - Only state facts that appear in the context. If information is not there, say so explicitly — never guess or infer.
 - Do NOT print citation markers like [M1-E2], [2], [Summary], or [Source].
+- Do NOT add any source references, citation blocks, or footnotes at the end of your response.
 - If the answer is genuinely absent from all sources, say: "I couldn't find that information in this meeting's records."
 
 ${formatGuide}
@@ -1101,7 +1102,7 @@ export async function agentSynthesizeFromEvidence(params: {
 
   const systemInstruction = `Current date: ${today}
 
-You are Lumina AI, a helpful meeting assistant searching across ${params.meetingsVisited} of ${params.totalMeetings} available meetings.
+You are WisprNote AI, a helpful meeting assistant searching across ${params.meetingsVisited} of ${params.totalMeetings} available meetings.
 
 User's request: "${params.userQuery}"
 Task: ${params.intent}
@@ -1111,6 +1112,7 @@ Task: ${params.intent}
 - If the user asked to cover all meetings, group findings by meeting using ## [Meeting Title] headings.
 - If evidence is missing for a meeting, write "No relevant evidence found" for that meeting.
 - Do NOT print citation markers like [1], [M1-E2], [Source], etc.
+- Do NOT add any source references, citation blocks, or footnotes at the end of your response.
 - Begin with a one-line coverage note: "Found relevant information in X of Y meetings."
 
 ${crossMeetingFormat}
@@ -1254,7 +1256,7 @@ export async function agentChatAllMeetings(
 
   const systemInstruction = `Today's date: ${today}
 
-You are Lumina AI, a meeting intelligence assistant.
+You are WisprNote AI, a meeting intelligence assistant.
 You have access to ${meetings.length} meeting recordings via the search_notes tool.
 
 Available meetings (newest first):
@@ -1376,8 +1378,8 @@ How to answer:
           headers: {
             Authorization: `Bearer ${apiKey}`,
             'Content-Type': 'application/json',
-            'HTTP-Referer': typeof window !== 'undefined' ? window.location.origin : 'https://lumina-ai.app',
-            'X-Title': 'Lumina AI',
+            'HTTP-Referer': typeof window !== 'undefined' ? window.location.origin : 'https://wisprnote.app',
+            'X-Title': 'WisprNote AI',
           },
           body: JSON.stringify({
             model: 'google/gemini-3.5-flash',
@@ -1489,6 +1491,7 @@ How to answer:
 
     for (const part of functionCallParts) {
       const fc = part.functionCall;
+      if (!fc) continue;
       const callId = `${callIndex++}`;
       const query: string = typeof fc.args?.query === 'string' ? fc.args.query : '';
       const rawFilters = fc.args?.filters;
@@ -1825,8 +1828,8 @@ Transcription: ${cleanTranscriptionForKG(text)}`;
             headers: {
               'Authorization': `Bearer ${openRouterKey}`,
               'Content-Type': 'application/json',
-              'HTTP-Referer': typeof window !== 'undefined' ? window.location.origin : 'https://lumina-ai.app',
-              'X-Title': 'Lumina AI',
+              'HTTP-Referer': typeof window !== 'undefined' ? window.location.origin : 'https://wisprnote.app',
+              'X-Title': 'WisprNote AI',
             },
             body: JSON.stringify({
               model: toOpenRouterModel(model),
@@ -1902,7 +1905,7 @@ Transcription: ${cleanTranscriptionForKG(text)}`;
     };
 
     // Try parsing, with repair fallback
-    let parsed;
+    let parsed: any;
     try {
       parsed = JSON.parse(cleanContent);
     } catch {
@@ -1992,8 +1995,8 @@ Text: ${cleanTranscriptionForKG(text, 4000)}`;
             headers: {
               'Authorization': `Bearer ${openRouterKey}`,
               'Content-Type': 'application/json',
-              'HTTP-Referer': typeof window !== 'undefined' ? window.location.origin : 'https://lumina-ai.app',
-              'X-Title': 'Lumina AI',
+              'HTTP-Referer': typeof window !== 'undefined' ? window.location.origin : 'https://wisprnote.app',
+              'X-Title': 'WisprNote AI',
             },
             body: JSON.stringify({
               model: toOpenRouterModel(retryModel),

@@ -73,20 +73,30 @@ export default function NotesPage({ selectedTask, isLoading = false, isLoadingDe
     catch { return []; }
   });
 
-  // Whenever allTasks gains attendees (cache load or task update), persist them
+  // Write persistedPeople to localStorage asynchronously so it never blocks a render
   useEffect(() => {
+    const id = setTimeout(() => {
+      try { localStorage.setItem('lumina:knownPeople', JSON.stringify(persistedPeople)); } catch {}
+    }, 0);
+    return () => clearTimeout(id);
+  }, [persistedPeople]);
+
+  // Populate persistedPeople from allTasks exactly once (the first time allTasks has attendees).
+  // Using a ref so this does NOT re-run on every allTasks reference change — allTasks is a new
+  // array object on every setHistory() call, which would otherwise trigger expensive iterations.
+  const populatedFromTasksRef = useRef(false);
+  useEffect(() => {
+    if (populatedFromTasksRef.current) return;
     const names: string[] = [];
     for (const task of allTasks) {
       for (const name of task.attendees ?? []) if (name) names.push(name);
     }
-    if (!names.length) return;
+    if (!names.length) return; // wait until cache has loaded tasks with attendees
+    populatedFromTasksRef.current = true;
     setPersistedPeople(prev => {
       const seen = new Set(prev.map(p => p.toLowerCase()));
       const fresh = names.filter(n => !seen.has(n.toLowerCase()));
-      if (!fresh.length) return prev;
-      const next = [...prev, ...fresh];
-      try { localStorage.setItem('lumina:knownPeople', JSON.stringify(next)); } catch {}
-      return next;
+      return fresh.length ? [...prev, ...fresh] : prev;
     });
   }, [allTasks]);
 
@@ -122,10 +132,12 @@ export default function NotesPage({ selectedTask, isLoading = false, isLoadingDe
 
   const saveAttendees = async (next: string[]) => {
     if (!selectedTask?.id) return;
+    // Update parent optimistically before the API round-trip so this batches
+    // with the local setAttendees() call and causes only ONE combined re-render.
+    if (onTaskUpdated) onTaskUpdated({ ...selectedTask, attendees: next });
     try {
       await updateTaskAttendees(selectedTask.id, next);
-      if (onTaskUpdated) onTaskUpdated({ ...selectedTask, attendees: next });
-    } catch { /* silent — local state already updated */ }
+    } catch { /* silent — local state and parent already updated */ }
   };
 
   const handleAddAttendee = (name?: string) => {
@@ -135,13 +147,10 @@ export default function NotesPage({ selectedTask, isLoading = false, isLoadingDe
     setAttendees(next);
     setAttendeeInput('');
     setSuggestionIndex(-1);
-    // Persist immediately to localStorage so it's available as a suggestion cross-session
-    setPersistedPeople(prev => {
-      if (prev.some(p => p.toLowerCase() === value.toLowerCase())) return prev;
-      const updated = [...prev, value];
-      try { localStorage.setItem('lumina:knownPeople', JSON.stringify(updated)); } catch {}
-      return updated;
-    });
+    // Add to persistent directory — the persistedPeople effect writes to localStorage
+    setPersistedPeople(prev =>
+      prev.some(p => p.toLowerCase() === value.toLowerCase()) ? prev : [...prev, value]
+    );
     saveAttendees(next);
   };
 
