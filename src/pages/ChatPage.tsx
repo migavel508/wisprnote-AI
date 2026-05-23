@@ -691,7 +691,7 @@ export default function ChatPage({
                     <div className="w-7 h-7 rounded-full bg-[#1a1a1a] flex items-center justify-center flex-shrink-0">
                       <Sparkles className="w-3.5 h-3.5 text-white" />
                     </div>
-                    <span className="text-[13px] font-semibold text-zinc-800 dark:text-zinc-200">Lumina AI</span>
+                    <span className="text-[13px] font-semibold text-zinc-800 dark:text-zinc-200">WisprNote AI</span>
                   </div>
                 )}
                 {msg.role === 'model' && msg.agentStatus === 'done' && msg.agentPlan && msg.agentPlan.length > 0 && (
@@ -709,22 +709,6 @@ export default function ChatPage({
                 {msg.image && (
                   <div className={`mt-4 rounded-2xl overflow-hidden border border-zinc-200/80 dark:border-white/10 ${msg.role === 'model' ? 'ml-10' : ''}`}>
                     <img src={msg.image} alt="Visualization" className="w-full h-auto" />
-                  </div>
-                )}
-                {msg.role === 'model' && !!msg.citations?.length && (
-                  <div className="mt-3 ml-10">
-                    <p className="text-[10px] font-medium text-zinc-500 dark:text-zinc-500 mb-1.5">Sources</p>
-                    <div className="flex flex-wrap gap-2">
-                    {msg.citations.slice(0, 4).map((citation, citationIdx) => (
-                      <span
-                        key={`${citation.meetingId}-${citation.chunkId}-${citationIdx}`}
-                        className="px-2.5 py-1 rounded-full text-[11px] bg-zinc-100 dark:bg-app-panel text-zinc-700 dark:text-zinc-200 border border-zinc-200/80 dark:border-white/10"
-                        title={`${citation.meetingTitle} • ${citation.chunkId} • score ${citation.score.toFixed(2)}`}
-                      >
-                        {citation.meetingTitle} • {citation.chunkId}
-                      </span>
-                    ))}
-                    </div>
                   </div>
                 )}
                 {msg.role === 'model' && msg.retrievalMeta && (
@@ -766,7 +750,7 @@ export default function ChatPage({
                       <div className="w-7 h-7 rounded-full bg-[#1a1a1a] flex items-center justify-center flex-shrink-0">
                         <Sparkles className="w-3.5 h-3.5 text-white" />
                       </div>
-                      <span className="text-[13px] font-semibold text-zinc-800 dark:text-zinc-200">Lumina AI</span>
+                      <span className="text-[13px] font-semibold text-zinc-800 dark:text-zinc-200">WisprNote AI</span>
                     </div>
                     <div className="pl-10">
                       <ThoughtProcess steps={agentMsg.agentPlan} isLive={true} />
@@ -1037,7 +1021,7 @@ export default function ChatPage({
             </div>
           </div>
           <p className="text-center mt-2 text-[10px] text-zinc-400 dark:text-zinc-500">
-            Lumina AI can make mistakes. Verify important information.
+            WisprNote AI can make mistakes. Verify important information.
           </p>
         </div>
       </div>

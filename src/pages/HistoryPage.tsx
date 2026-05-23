@@ -196,7 +196,19 @@ export default function HistoryPage({ history, onSelectTask, isLoading = false, 
   // Navigate immediately -- App.tsx handles fetching full details in background
   const handleSelectTask = useCallback((task: TaskHistory) => {
     if (task.id && taskCache.has(task.id)) {
-      onSelectTask(taskCache.get(task.id)!);
+      const cached = taskCache.get(task.id)!;
+      // Prefer `task` from live history state (has latest attendees, title, etc.
+      // updated via onTaskUpdated) but recover heavy fields that are absent from
+      // lightweight history entries (transcription, notes, etc.) from the cache.
+      onSelectTask({
+        ...cached,
+        ...task,
+        transcription: task.transcription ?? cached.transcription,
+        notes: task.notes ?? cached.notes,
+        visualization_image: task.visualization_image ?? cached.visualization_image,
+        personal_note: task.personal_note ?? cached.personal_note,
+        audio_url: task.audio_url ?? cached.audio_url,
+      });
       return;
     }
     onSelectTask(task);
