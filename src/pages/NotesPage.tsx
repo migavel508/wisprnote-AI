@@ -10,6 +10,7 @@ import { TaskHistory, updateTaskTitle, updateTaskSummary, updateTaskNotes, updat
 import { generateMeetingTitle, generateSummary, generateNotes, generateNotesVisualization } from '../services/geminiService';
 import { NotesPageSkeleton } from '../components/Skeleton';
 import { MeetingNoteTab } from '../components/ManualNotes/MeetingNoteTab';
+import { formatDisplayName, formatDisplayInitials } from '../lib/displayName';
 import ShareModal from '../components/ShareModal';
 import {
   Workspace, getWorkspacesForTask, createWorkspace,
@@ -407,11 +408,11 @@ export default function NotesPage({ selectedTask, isLoading = false, isLoadingDe
                     <div className="flex items-center gap-2 px-2 py-1.5 rounded-xl">
                       <div className="w-6 h-6 rounded-full bg-[#f06060]/15 flex items-center justify-center flex-shrink-0">
                         <span className="text-[10px] font-semibold text-[#f06060]">
-                          {(session?.user?.name || session?.user?.email || 'M')[0].toUpperCase()}
+                          {formatDisplayInitials(session?.user?.email, session?.user?.name, 'M')[0]}
                         </span>
                       </div>
                       <p className="text-[12px] font-medium text-app-fg leading-tight flex-1 truncate">
-                        {session?.user?.name || session?.user?.email}
+                        {formatDisplayName(session?.user?.email, session?.user?.name)}
                         <span className="text-app-fg-subtle font-normal"> (me)</span>
                       </p>
                     </div>
