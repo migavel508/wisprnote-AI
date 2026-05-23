@@ -43,13 +43,12 @@ import { motion, AnimatePresence } from 'motion/react';
 import Markdown from 'react-markdown';
 import remarkGfm from 'remark-gfm';
 import ForceGraph2D from 'react-force-graph-2d';
-import { 
-  processAudioBatch, 
-  generateSummary, 
-  generateNotes, 
+import {
+  processAudioBatch,
+  generateSummary,
+  generateNotes,
   chatWithNotes,
-  agentPlanQuery,
-  agentSynthesizeFromEvidence,
+  agentChatAllMeetings,
   generateConceptImage,
   generateEmailContent,
   generateWikiContent,
@@ -63,11 +62,19 @@ import {
 } from './services/geminiService';
 import {
   retrieveForSingleMeeting,
-  retrieveCrossMeeting,
-  retrieveForManyMeetings,
+  scoreMeetingCandidate,
+  retrieveMeetingEvidence,
+  formatEvidence,
   type MeetingDocument,
+  type RetrievalEvidence,
 } from './services/chatRetrievalService';
-import { indexMeetingTranscription, backfillExistingMeetings } from './services/turbopufferService';
+import {
+  indexMeetingTranscription,
+  backfillExistingMeetings,
+  isTurbopufferConfigured,
+  embedQuery,
+  queryHybrid,
+} from './services/turbopufferService';
 import { 
   saveTask, 
   queuePendingTask,
@@ -163,6 +170,9 @@ interface AgentStep {
   label: string;
   status: 'pending' | 'running' | 'done' | 'error';
   detail?: string;
+  type?: 'search-tool';
+  searchQuery?: string;
+  searchResults?: Array<{ meetingId: string; meetingTitle: string; score: number }>;
 }
 
 interface Message {
@@ -300,6 +310,16 @@ export default function App() {
 
   const ALL_MEETINGS_THREAD_ID = 'all-meetings';
 
+  interface ChatThread {
+    id: string;
+    title: string;
+    taskId: string | null;
+    taskTitle?: string;
+    createdAt: string;
+    updatedAt: string;
+    preview: string;
+  }
+
   const [session, setSession] = useState<AuthSession | null>(null);
   /** False until the first `getSession()` finishes — avoids flashing the login screen on cold start when Cognito already has tokens. */
   const [isAuthSessionResolved, setIsAuthSessionResolved] = useState(false);
@@ -364,6 +384,11 @@ export default function App() {
   const HISTORY_PAGE_SIZE = 24;
   const [chatMessages, setChatMessages] = useState<Message[]>([]);
   const [allMeetingsChatMessages, setAllMeetingsChatMessages] = useState<Message[]>([]);
+  const [chatThreads, setChatThreads] = useState<ChatThread[]>(() => {
+    try { return JSON.parse(localStorage.getItem('lumina:chatThreads') ?? '[]'); }
+    catch { return []; }
+  });
+  const [activeChatThreadId, setActiveChatThreadId] = useState<string | null>(null);
   const [selectedTask, setSelectedTask] = useState<TaskHistory | null>(null);
   const [isLoadingTaskDetails, setIsLoadingTaskDetails] = useState(false);
   const [isLoadingHistory, setIsLoadingHistory] = useState(true);
@@ -558,6 +583,7 @@ export default function App() {
     setChatMessages([]);
     setAllMeetingsChatMessages([]);
     setChatInput('');
+    setActiveChatThreadId(null);
     setAgentAssetHistory([]);
     setSelectedAgentAsset(null);
     setFile(null);
@@ -570,6 +596,53 @@ export default function App() {
     setManualNotesList([]);
     setIsLoadingManualNotes(true);
     resetUserLedgers();
+  }, []);
+
+  const upsertChatThread = useCallback((thread: ChatThread) => {
+    setChatThreads(prev => {
+      const idx = prev.findIndex(t => t.id === thread.id);
+      const next = idx >= 0
+        ? prev.map((t, i) => i === idx ? { ...t, ...thread } : t)
+        : [thread, ...prev];
+      try { localStorage.setItem('lumina:chatThreads', JSON.stringify(next)); } catch {}
+      return next;
+    });
+  }, []);
+
+  const handleNewThread = useCallback(() => {
+    setActiveChatThreadId(null);
+    setChatMessages([]);
+    setChatInput('');
+  }, []);
+
+  const handleSwitchThread = useCallback(async (thread: ChatThread) => {
+    setActiveChatThreadId(thread.id);
+    setChatMessages([]);
+    try {
+      const messages = await getChatHistoryByThread(thread.id);
+      const parsed = (messages as any[]).map((msg: any) => ({
+        role: msg.role,
+        text: msg.text,
+        image: msg.image,
+        citations: msg.citations?.map((c: any) => ({
+          meetingId: c.meeting_id,
+          meetingTitle: c.meeting_title,
+          chunkId: c.chunk_id,
+          score: c.score,
+        })),
+        retrievalMeta: msg.retrieval_meta
+          ? {
+              scope: msg.retrieval_meta.scope,
+              confidence: msg.retrieval_meta.confidence,
+              selectedMeetingIds: msg.retrieval_meta.selected_meeting_ids,
+              tokenUsageTotal: msg.retrieval_meta.token_usage_total,
+              coveredMeetingsCount: msg.retrieval_meta.covered_meetings_count,
+              totalMeetingsCount: msg.retrieval_meta.total_meetings_count,
+            }
+          : undefined,
+      }));
+      setChatMessages(parsed);
+    } catch { /* non-fatal */ }
   }, []);
 
   useEffect(() => {
@@ -773,6 +846,7 @@ export default function App() {
     const tid = selectedTask.id;
     if (lastChatFetchTaskIdRef.current !== tid) {
       lastChatFetchTaskIdRef.current = tid;
+      setActiveChatThreadId(null); // reset so new messages create a new thread
       void fetchChatHistory(tid);
     }
     if (lastAssetsFetchTaskIdRef.current !== tid) {
@@ -1569,7 +1643,7 @@ export default function App() {
         markKGExtractedBatch(validIds);
         reconcileKGLedger(new Set(validIds));
         if (corruptIds.length > 0) {
-          log.info('kg_corrupt_entries_detected', { count: corruptIds.length, ids: corruptIds });
+          log.info('kg_corrupt_entries_detected', { count: corruptIds.length, ids: corruptIds.join(', ') });
         }
       }
     } catch (err) {
@@ -2378,20 +2452,49 @@ export default function App() {
       }));
     };
 
+    let currentThreadId = activeChatThreadId;
+
     try {
+      // Determine or create thread ID for this conversation
+      const isFirstMsg = chatMessages.filter(m => m.role === 'user').length === 0;
+      if (!currentThreadId) {
+        currentThreadId = selectedTask
+          ? `tm_${selectedTask.id}_${Date.now()}`
+          : `allm_${Date.now()}`;
+        setActiveChatThreadId(currentThreadId);
+      }
+      // Save thread metadata
+      if (isFirstMsg || !chatThreads.find(t => t.id === currentThreadId)) {
+        upsertChatThread({
+          id: currentThreadId,
+          title: userInput.slice(0, 60),
+          taskId: selectedTask?.id ?? null,
+          taskTitle: selectedTask?.filename,
+          createdAt: new Date().toISOString(),
+          updatedAt: new Date().toISOString(),
+          preview: userInput.slice(0, 120),
+        });
+      } else {
+        upsertChatThread({
+          ...chatThreads.find(t => t.id === currentThreadId)!,
+          updatedAt: new Date().toISOString(),
+          preview: userInput.slice(0, 120),
+        });
+      }
+
       if (selectedTask && selectedTask.id) {
         await saveChatMessage({
           task_id: selectedTask.id,
           role: 'user',
           text: userInput,
-          thread_id: `task:${selectedTask.id}`,
+          thread_id: currentThreadId,
         });
       } else {
         setAllMeetingsChatMessages(prev => [...prev, userMessage]);
         saveChatMessage({
           role: 'user',
           text: userInput,
-          thread_id: ALL_MEETINGS_THREAD_ID,
+          thread_id: currentThreadId,
         }).catch(err => log.warn('persist_all_meetings_user_msg_failed', { error: err instanceof Error ? err : undefined }));
       }
 
@@ -2411,7 +2514,7 @@ export default function App() {
 
       const isSingleMeeting = !!selectedTask;
       const allMeetings: MeetingDocument[] = history
-        .filter((task) => !!task.id && !!task.transcription?.trim())
+        .filter((task) => !!task.id)
         .map((task) => ({
           meetingId: task.id!,
           title: task.filename || 'Untitled Meeting',
@@ -2419,41 +2522,23 @@ export default function App() {
           summary: task.summary || '',
           notes: task.notes || '',
         }));
-      const meetingTitles = isSingleMeeting
-        ? [selectedTask!.filename || 'This meeting']
-        : allMeetings.map(m => m.title);
-
-      const plan = await agentPlanQuery(userInput, meetingTitles, isSingleMeeting);
-
-      // ═══════════ PHASE 2: PLANNING ═══════════
-      const singleSteps: AgentStep[] = [
-        { id: 'retrieve', label: 'Retrieve evidence', status: 'pending' },
-        { id: 'analyze', label: 'Analyze context', status: 'pending' },
-        { id: 'respond', label: 'Generate response', status: 'pending' },
-      ];
-      const multiSteps: AgentStep[] = [
-        { id: 'classify', label: `Understanding: ${plan.intent.slice(0, 50)}`, status: 'done' },
-        { id: 'search', label: `Searching across ${allMeetings.length} meetings`, status: 'pending' },
-        { id: 'synthesize', label: 'Compiling findings', status: 'pending' },
-      ];
-      const planSteps = isSingleMeeting ? singleSteps : multiSteps;
-      updateAgentMessage(() => ({
-        agentStatus: 'planning',
-        agentPlan: planSteps,
-      }));
-      await new Promise(r => setTimeout(r, 300));
-
-      // ═══════════ PHASE 3: EXECUTING ═══════════
-      updateAgentMessage(() => ({ agentStatus: 'executing' }));
-
+      // ═══════════ PHASE 2: PLANNING + EXECUTING ═══════════
       let response: string;
       let responseCitations: Message['citations'] = undefined;
       let responseRetrievalMeta: Message['retrievalMeta'] = undefined;
 
       if (isSingleMeeting) {
-        // --- Single meeting path ---
-        updateStep('retrieve', 'running');
+        // --- Single meeting: RAG retrieval + chatWithNotes ---
+        const singleSteps: AgentStep[] = [
+          { id: 'retrieve', label: 'Retrieve evidence', status: 'pending' },
+          { id: 'analyze', label: 'Analyze context', status: 'pending' },
+          { id: 'respond', label: 'Generate response', status: 'pending' },
+        ];
+        updateAgentMessage(() => ({ agentStatus: 'planning', agentPlan: singleSteps }));
+        await new Promise(r => setTimeout(r, 200));
+        updateAgentMessage(() => ({ agentStatus: 'executing' }));
 
+        updateStep('retrieve', 'running');
         const meeting: MeetingDocument = {
           meetingId: selectedTask!.id || 'unknown',
           title: selectedTask!.filename || 'Untitled Meeting',
@@ -2461,7 +2546,6 @@ export default function App() {
           summary: selectedTask!.summary || '',
           notes: selectedTask!.notes || '',
         };
-
         const retrievalPlan = await retrieveForSingleMeeting({
           query: userInput,
           meeting,
@@ -2506,112 +2590,237 @@ export default function App() {
         updateStep('respond', 'done');
 
       } else {
-        // --- Many meetings: single cross-meeting Turbopuffer query ---
-        updateStep('search', 'running');
-        log.debug('agent_multi_meeting_path', { isBroad: plan.isBroad, intent: plan.intent, meetingCount: allMeetings.length });
+        // --- All meetings: anarlog-style agentic tool-calling loop with turbopuffer search ---
+        log.debug('agent_multi_meeting_agentic', { meetingCount: allMeetings.length });
+        updateAgentMessage(() => ({ agentStatus: 'executing', agentPlan: [] }));
 
-        const topK = plan.isBroad ? 60 : 30;
-        const meetingTitleMap = new Map(allMeetings.map(m => [m.meetingId, m.title]));
-        const meetingSummaryMap = new Map(
-          allMeetings.filter(m => m.summary).map(m => [m.meetingId, m.summary || ''])
-        );
+        const dateMap = new Map(history.map(h => [h.id ?? '', h.created_at ?? '']));
 
-        const crossResult = await retrieveCrossMeeting({
-          query: userInput,
-          topK,
-          isBroad: plan.isBroad,
-          totalMeetingsCount: allMeetings.length,
-          meetingTitleMap,
-          meetingSummaryMap,
-        });
+        const turbopufferSearchFn = async (
+          query: string,
+          filters?: { recent_days?: number },
+          limit?: number,
+        ) => {
+          let docsToSearch = allMeetings;
+          if (filters?.recent_days && filters.recent_days > 0) {
+            const cutoff = Date.now() - filters.recent_days * 24 * 60 * 60 * 1000;
+            const filtered = allMeetings.filter(m => {
+              const date = dateMap.get(m.meetingId);
+              if (!date) return true;
+              return new Date(date).getTime() >= cutoff;
+            });
+            if (filtered.length > 0) docsToSearch = filtered;
+          }
 
-        let contextForSynthesis: string;
-        let coveredCount: number;
-        let coveredIds: string[];
-        let confidence: number;
+          const maxCandidates = limit ?? 5;
+          const docsById = new Map(docsToSearch.map(m => [m.meetingId, m]));
+          let candidateDocs: MeetingDocument[] = [];
 
-        if (crossResult && crossResult.evidence.length > 0) {
-          const evidenceMeetingCount = crossResult.meetingGroups.length;
-          log.debug('agent_turbopuffer_result', { chunks: crossResult.evidence.length, meetingGroups: evidenceMeetingCount, covered: crossResult.coveredMeetingIds.length });
-          contextForSynthesis = crossResult.context;
-          coveredCount = crossResult.coveredMeetingIds.length;
-          coveredIds = crossResult.coveredMeetingIds;
-          confidence = crossResult.confidence;
+          // ── Strategy 1: global turbopuffer ANN + BM25 hybrid (semantic-first) ──────
+          // This is the primary path. ANN understands meaning (not just keywords), so
+          // "SDLC offtracks" finds "project delays" and "Mowlish" finds his transcript
+          // mentions even when titles/summaries don't contain his name.
+          if (isTurbopufferConfigured()) {
+            try {
+              const qVec = await embedQuery(query);
+              const globalHits = await queryHybrid(qVec, query, 40);
 
-          responseCitations = crossResult.evidence.slice(0, 8).map(e => ({
-            meetingId: e.meetingId,
-            meetingTitle: e.meetingTitle,
-            chunkId: e.chunkId,
-            score: e.score,
-          }));
+              // Date-filter hits to respect filters.recent_days
+              const validHits = filters?.recent_days
+                ? globalHits.filter(hit => {
+                    const date = dateMap.get(hit.meetingId);
+                    if (!date) return true;
+                    const cutoff = Date.now() - (filters.recent_days ?? 0) * 24 * 60 * 60 * 1000;
+                    return new Date(date).getTime() >= cutoff;
+                  })
+                : globalHits;
 
-          updateStep('search', 'done',
-            plan.isBroad
-              ? `Covering all ${coveredCount} meetings (deep evidence from ${evidenceMeetingCount})`
-              : `Found evidence in ${evidenceMeetingCount} meetings`
-          );
-        } else {
-          log.debug('agent_turbopuffer_fallback', { meetingCount: allMeetings.length, isBroad: plan.isBroad });
-          updateStep('search', 'done', `Using summaries from ${allMeetings.length} meetings`);
+              // Deduplicate by meeting, preserving highest score per meeting.
+              const meetingHitMap = new Map<string, number>();
+              for (const hit of validHits) {
+                const existing = meetingHitMap.get(hit.meetingId) ?? 0;
+                if (hit.score > existing) meetingHitMap.set(hit.meetingId, hit.score);
+              }
+              // Sort by score descending and resolve to MeetingDocument objects.
+              const sortedMeetingIds = Array.from(meetingHitMap.entries())
+                .sort((a, b) => b[1] - a[1])
+                .map(([id]) => id);
+              for (const id of sortedMeetingIds) {
+                const doc = docsById.get(id);
+                if (doc) candidateDocs.push(doc);
+                if (candidateDocs.length >= maxCandidates) break;
+              }
+            } catch { /* fall through to keyword fallback */ }
+          }
 
-          const fallbackResult = await retrieveForManyMeetings({
-            query: userInput,
-            meetings: allMeetings,
-            totalTokenBudget: plan.isBroad ? 16000 : 10000,
-          });
+          // ── Strategy 2: keyword fallback (title + summary) when turbopuffer unavailable ──
+          if (candidateDocs.length === 0) {
+            const scored = docsToSearch
+              .map(m => ({ doc: m, score: scoreMeetingCandidate(query, m) }))
+              .sort((a, b) => b.score - a.score);
+            const keywordMatches = scored.filter(s => s.score > 0).slice(0, maxCandidates).map(s => s.doc);
+            candidateDocs = keywordMatches.length > 0
+              ? keywordMatches
+              : scored.slice(0, Math.min(3, maxCandidates)).map(s => s.doc);
+          }
 
-          contextForSynthesis = fallbackResult.context;
-          coveredCount = fallbackResult.coveredMeetingsCount;
-          coveredIds = fallbackResult.selectedMeetingIds;
-          confidence = fallbackResult.confidence;
+          // ── Strategy 3: per-meeting deep retrieval for each candidate ────────────
+          // Turbopuffer with meetingIdFilter pulls the most relevant chunks from that
+          // specific meeting. Falls back to local BM25 if chunks aren't indexed.
+          const perBudget = Math.floor(7000 / Math.max(1, candidateDocs.length));
+          const allEvidence: RetrievalEvidence[] = [];
+          for (const m of candidateDocs) {
+            const { evidence } = await retrieveMeetingEvidence(query, m, perBudget);
+            allEvidence.push(...evidence);
+          }
 
-          responseCitations = fallbackResult.evidence.slice(0, 8).map(e => ({
-            meetingId: e.meetingId,
-            meetingTitle: e.meetingTitle,
-            chunkId: e.chunkId,
-            score: e.score,
-          }));
-        }
+          // ── Strategy 4: lazy-load fallback (meetings not yet indexed in turbopuffer) ──
+          // Fetches the full transcription from the server for the top 2 candidates and
+          // runs local BM25 on it. Handles cold-start and unindexed meetings.
+          if (allEvidence.length === 0 && candidateDocs.length > 0) {
+            for (const m of candidateDocs.slice(0, 2)) {
+              if (m.transcription?.trim()) continue;
+              try {
+                const full = await getTaskById(m.meetingId);
+                if (full?.transcription?.trim()) {
+                  const enriched = { ...m, transcription: full.transcription, summary: full.summary || m.summary, notes: full.notes || m.notes };
+                  const { evidence: lazy } = await retrieveMeetingEvidence(query, enriched, perBudget);
+                  allEvidence.push(...lazy);
+                  const idx = candidateDocs.indexOf(m);
+                  if (idx !== -1) candidateDocs[idx] = enriched;
+                }
+              } catch { /* ignore */ }
+            }
+          }
 
-        responseRetrievalMeta = {
-          scope: 'many',
-          confidence,
-          selectedMeetingIds: coveredIds,
-          tokenUsageTotal: 0,
-          coveredMeetingsCount: coveredCount,
-          totalMeetingsCount: allMeetings.length,
+          const summaryBlocks = candidateDocs
+            .filter(m => m.summary?.trim())
+            .map(m => `- ${m.title}: ${(m.summary || '').slice(0, 300)}`);
+
+          const evidenceText = allEvidence
+            .sort((a, b) => b.score - a.score)
+            .slice(0, 20)
+            .map((e, i) => formatEvidence(0, i, e))
+            .join('\n\n');
+
+          const contextText = [
+            `=== COVERAGE ===\nSearched ${candidateDocs.length} of ${docsToSearch.length} meetings`,
+            `=== SELECTED MEETINGS ===\n${candidateDocs.map((m, i) => `${i + 1}. ${m.title}`).join('\n')}`,
+            summaryBlocks.length
+              ? `=== AI-GENERATED MEETING SUMMARIES (may contain errors — treat as hints only, not ground truth) ===\n${summaryBlocks.join('\n')}`
+              : '',
+            evidenceText
+              ? `=== TRANSCRIPT EVIDENCE (authoritative — prefer this over summaries for specific facts, names, and roles) ===\n${evidenceText}`
+              : `=== TRANSCRIPT EVIDENCE ===\nNo evidence found. Call search_notes again with a different or shorter query.`,
+          ].filter(Boolean).join('\n\n');
+
+          const meetingScoreMap = new Map<string, { title: string; score: number }>();
+          for (const e of allEvidence) {
+            const existing = meetingScoreMap.get(e.meetingId);
+            if (!existing || e.score > existing.score) {
+              meetingScoreMap.set(e.meetingId, { title: e.meetingTitle, score: e.score });
+            }
+          }
+          if (meetingScoreMap.size === 0) {
+            for (const c of candidateDocs) meetingScoreMap.set(c.meetingId, { title: c.title, score: 0 });
+          }
+          const results = Array.from(meetingScoreMap.entries())
+            .map(([meetingId, { title, score }]) => ({
+              meetingId,
+              meetingTitle: title,
+              score,
+              date: dateMap.get(meetingId),
+            }))
+            .sort((a, b) => b.score - a.score);
+
+          return { results, contextText };
         };
 
-        updateStep('synthesize', 'running',
-          plan.isBroad
-            ? `Synthesizing across all ${coveredCount} meetings...`
-            : `Compiling findings from ${coveredCount} meetings...`
+        response = await agentChatAllMeetings(
+          userInput,
+          msgHistory,
+          allMeetings.map(m => ({
+            meetingId: m.meetingId,
+            title: m.title,
+            transcription: m.transcription,
+            summary: m.summary,
+            notes: m.notes,
+            createdAt: dateMap.get(m.meetingId),
+          })),
+          {
+            searchFn: turbopufferSearchFn,
+            onToolCallStart: (step) => {
+              updateAgentMessage(prev => ({
+                agentStatus: 'executing',
+                agentPlan: [
+                  ...(prev.agentPlan ?? []),
+                  {
+                    id: `search-${step.callId}`,
+                    label: 'Searching notes',
+                    status: 'running' as const,
+                    type: 'search-tool' as const,
+                    searchQuery: step.query || '',
+                  },
+                ],
+              }));
+            },
+            onToolCallDone: (step) => {
+              if (step.results?.length) {
+                responseCitations = step.results.map(r => ({
+                  meetingId: r.meetingId,
+                  meetingTitle: r.meetingTitle,
+                  chunkId: '',
+                  score: r.score,
+                }));
+                const topScore = step.results[0]?.score ?? 0;
+                const avgScore = step.results.slice(0, 3).reduce((s, r) => s + r.score, 0) / Math.min(step.results.length, 3);
+                const derivedConfidence = Math.min(0.95, Math.max(0.2, (topScore + avgScore) / 2));
+                responseRetrievalMeta = {
+                  scope: 'many',
+                  confidence: derivedConfidence,
+                  selectedMeetingIds: step.results.map(r => r.meetingId),
+                  tokenUsageTotal: undefined,
+                  coveredMeetingsCount: step.results.length,
+                  totalMeetingsCount: allMeetings.length,
+                };
+              }
+              updateAgentMessage(prev => ({
+                agentPlan: prev.agentPlan?.map(s =>
+                  s.id === `search-${step.callId}`
+                    ? {
+                        ...s,
+                        status: 'done' as const,
+                        detail: step.results?.length
+                          ? `Found ${step.results.length} meeting${step.results.length !== 1 ? 's' : ''}`
+                          : 'No results found',
+                        searchResults: step.results?.map(r => ({
+                          meetingId: r.meetingId,
+                          meetingTitle: r.meetingTitle,
+                          score: r.score,
+                        })),
+                      }
+                    : s
+                ),
+              }));
+            },
+          }
         );
-
-        response = await agentSynthesizeFromEvidence({
-          userQuery: userInput,
-          intent: plan.intent,
-          context: contextForSynthesis,
-          history: msgHistory,
-          meetingsVisited: coveredCount,
-          totalMeetings: allMeetings.length,
-        });
-
-        updateStep('synthesize', 'done');
       }
 
       // ═══════════ PHASE 4: DONE — replace agent placeholder with final response ═══════════
-      const modelMessage: Message = {
+      // Build the final message lazily inside setChatMessages so we can carry agentPlan
+      // from the in-flight placeholder (which accumulated search steps).
+      let modelMessage: Message = {
         role: 'model',
         text: response,
         agentStatus: 'done',
         citations: responseCitations,
         retrievalMeta: responseRetrievalMeta,
       };
-
       setChatMessages(prev => {
-        const withoutPlaceholder = prev.filter(m => !(m.role === 'model' && m.agentStatus && m.agentStatus !== 'done'));
-        return [...withoutPlaceholder, modelMessage];
+        const placeholder = prev.find(m => m.role === 'model' && m.agentStatus && m.agentStatus !== 'done');
+        modelMessage = { ...modelMessage, agentPlan: placeholder?.agentPlan };
+        return [...prev.filter(m => !(m.role === 'model' && m.agentStatus && m.agentStatus !== 'done')), modelMessage];
       });
 
       const chatSaveMeta = {
@@ -2638,7 +2847,7 @@ export default function App() {
         saveChatMessage({
           role: 'model',
           text: response,
-          thread_id: ALL_MEETINGS_THREAD_ID,
+          thread_id: currentThreadId ?? ALL_MEETINGS_THREAD_ID,
           ...chatSaveMeta,
         }).catch(err => log.warn('persist_all_meetings_model_msg_failed', { error: err instanceof Error ? err : undefined }));
       } else if (selectedTask && selectedTask.id) {
@@ -2646,7 +2855,7 @@ export default function App() {
           task_id: selectedTask.id,
           role: 'model',
           text: response,
-          thread_id: `task:${selectedTask.id}`,
+          thread_id: currentThreadId ?? `task:${selectedTask.id}`,
           ...chatSaveMeta,
         });
       }
@@ -2682,7 +2891,7 @@ export default function App() {
           role: 'model',
           text: visualMessage.text,
           image: imageUrl,
-          thread_id: `task:${selectedTask.id}`,
+          thread_id: activeChatThreadId ?? `task:${selectedTask.id}`,
         });
         void persistChatThreadToCache(selectedTask.id ?? null);
       } else {
@@ -3635,6 +3844,7 @@ export default function App() {
                   onTaskUpdated={handleTaskUpdated}
                   isLoadingDetails={isLoadingTaskDetails}
                   session={session}
+                  allTasks={history}
                 />
               ) : (
                 <HistoryPage
@@ -3678,6 +3888,11 @@ export default function App() {
                 selectedAgentAsset={selectedAgentAsset}
                 setSelectedAgentAsset={setSelectedAgentAsset as (a: any) => void}
                 downloadExistingAsset={downloadExistingAsset}
+                chatThreads={chatThreads}
+                activeChatThreadId={activeChatThreadId}
+                onNewThread={handleNewThread}
+                onSwitchThread={handleSwitchThread}
+                session={session}
               />
             )}
 

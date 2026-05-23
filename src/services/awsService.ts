@@ -69,6 +69,7 @@ export interface TaskHistory {
   prompt?: string;
   personal_note?: string;
   visualization_image?: string;
+  attendees?: string[];
 }
 
 export interface TaskMetadata {
@@ -102,6 +103,10 @@ export async function updateTaskNotes(taskId: string, newNotes: string): Promise
 
 export async function updateTaskVisualization(taskId: string, imageBase64: string): Promise<TaskHistory> {
   return apiRequest<TaskHistory>('PUT', `/tasks/${taskId}`, { visualization_image: imageBase64 });
+}
+
+export async function updateTaskAttendees(taskId: string, attendees: string[]): Promise<void> {
+  await apiRequest('PUT', `/tasks/${taskId}`, { attendees });
 }
 
 export async function getTasksLightweight(

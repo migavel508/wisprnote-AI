@@ -125,17 +125,62 @@ interface PeoplePageProps {
 }
 
 export default function PeoplePage({ allTasks, onSelectTask }: PeoplePageProps) {
-  const [contacts, setContacts] = useState<Contact[]>([]);
+  const [apiContacts, setApiContacts] = useState<Contact[]>([]);
   const [loading, setLoading] = useState(true);
   const [search, setSearch] = useState('');
-  const [error, setError] = useState<string | null>(null);
 
   useEffect(() => {
     getContacts()
-      .then(setContacts)
-      .catch(() => setError('Failed to load contacts. Make sure you have processed meetings with people mentioned.'))
+      .then(setApiContacts)
+      .catch(() => setApiContacts([]))
       .finally(() => setLoading(false));
   }, []);
+
+  // Build contacts from manually added attendees in tasks, merging with API contacts
+  const contacts = useMemo<Contact[]>(() => {
+    const merged = new Map<string, Contact>();
+
+    // Seed with API contacts first (keyed by lowercase name)
+    for (const c of apiContacts) {
+      merged.set(c.name.toLowerCase(), c);
+    }
+
+    // Layer in manually added attendees from tasks
+    for (const task of allTasks) {
+      if (!task.attendees?.length) continue;
+      for (const name of task.attendees) {
+        const key = name.toLowerCase();
+        const existing = merged.get(key);
+        if (existing) {
+          // Add task_id if not already linked
+          if (task.id && !existing.task_ids.includes(task.id)) {
+            merged.set(key, {
+              ...existing,
+              meeting_count: existing.meeting_count + 1,
+              task_ids: [...existing.task_ids, task.id],
+              last_seen: task.created_at && task.created_at > existing.last_seen
+                ? task.created_at
+                : existing.last_seen,
+            });
+          }
+        } else {
+          // New contact from manual attendee
+          const isEmail = name.includes('@');
+          merged.set(key, {
+            name: isEmail ? name : name,
+            role: null,
+            email: isEmail ? name : null,
+            company: null,
+            meeting_count: task.id ? 1 : 0,
+            last_seen: task.created_at ?? '',
+            task_ids: task.id ? [task.id] : [],
+          });
+        }
+      }
+    }
+
+    return Array.from(merged.values()).sort((a, b) => b.meeting_count - a.meeting_count);
+  }, [apiContacts, allTasks]);
 
   const filtered = useMemo(() => {
     if (!search.trim()) return contacts;
@@ -177,10 +222,6 @@ export default function PeoplePage({ allTasks, onSelectTask }: PeoplePageProps) 
         {loading ? (
           <div className="flex items-center justify-center py-16">
             <Loader2 className="animate-spin text-app-fg-subtle" size={20} />
-          </div>
-        ) : error ? (
-          <div className="text-center py-16">
-            <p className="text-[13px] text-app-fg-subtle max-w-sm mx-auto">{error}</p>
           </div>
         ) : filtered.length === 0 ? (
           <div className="text-center py-16">

@@ -1,4 +1,4 @@
-import { useState, useEffect, useRef } from 'react';
+import { useState, useEffect, useRef, useMemo } from 'react';
 import { logger } from '../lib/logger';
 
 const log = logger.scope('NotesPage');
@@ -6,7 +6,7 @@ import { motion, AnimatePresence } from 'framer-motion';
 import { Sparkles, Loader2, Check, RefreshCw, Image as ImageIcon, Share2, Plus, X, Search, Calendar, Users, FolderOpen } from 'lucide-react';
 import Markdown from 'react-markdown';
 import remarkGfm from 'remark-gfm';
-import { TaskHistory, updateTaskTitle, updateTaskSummary, updateTaskNotes, updateTaskVisualization } from '../services/awsService';
+import { TaskHistory, updateTaskTitle, updateTaskSummary, updateTaskNotes, updateTaskVisualization, updateTaskAttendees } from '../services/awsService';
 import { generateMeetingTitle, generateSummary, generateNotes, generateNotesVisualization } from '../services/geminiService';
 import { NotesPageSkeleton } from '../components/Skeleton';
 import { MeetingNoteTab } from '../components/ManualNotes/MeetingNoteTab';
@@ -23,6 +23,7 @@ interface NotesPageProps {
   isLoadingDetails?: boolean;
   onTaskUpdated?: (task: TaskHistory) => void;
   session?: { user: { name?: string; email: string } } | null;
+  allTasks?: TaskHistory[];
 }
 
 type NoteTab = 'transcription' | 'summary' | 'notes' | 'note';
@@ -38,7 +39,7 @@ function formatTranscriptionWithBoldSpeakers(text: string): string {
   return text.replace(speakerPattern, (match) => `**${match.trim()}**`);
 }
 
-export default function NotesPage({ selectedTask, isLoading = false, isLoadingDetails = false, onTaskUpdated, session }: NotesPageProps) {
+export default function NotesPage({ selectedTask, isLoading = false, isLoadingDetails = false, onTaskUpdated, session, allTasks = [] }: NotesPageProps) {
   const [noteTab, setNoteTab] = useState<NoteTab>('summary');
   const [isGeneratingTitle, setIsGeneratingTitle] = useState(false);
   const [titleGenerated, setTitleGenerated] = useState(false);
@@ -60,6 +61,95 @@ export default function NotesPage({ selectedTask, isLoading = false, isLoadingDe
   const [togglingWsId, setTogglingWsId] = useState<string | null>(null);
   const wsPicker = useRef<HTMLDivElement>(null);
   const peoplePicker = useRef<HTMLDivElement>(null);
+
+  // Attendee state — synced from task, persisted on change
+  const [attendees, setAttendees] = useState<string[]>(selectedTask?.attendees ?? []);
+  const [attendeeInput, setAttendeeInput] = useState('');
+  const [suggestionIndex, setSuggestionIndex] = useState(-1);
+
+  // Cross-session known people: loaded from localStorage instantly, updated as tasks load
+  const [persistedPeople, setPersistedPeople] = useState<string[]>(() => {
+    try { return JSON.parse(localStorage.getItem('lumina:knownPeople') ?? '[]'); }
+    catch { return []; }
+  });
+
+  // Whenever allTasks gains attendees (cache load or task update), persist them
+  useEffect(() => {
+    const names: string[] = [];
+    for (const task of allTasks) {
+      for (const name of task.attendees ?? []) if (name) names.push(name);
+    }
+    if (!names.length) return;
+    setPersistedPeople(prev => {
+      const seen = new Set(prev.map(p => p.toLowerCase()));
+      const fresh = names.filter(n => !seen.has(n.toLowerCase()));
+      if (!fresh.length) return prev;
+      const next = [...prev, ...fresh];
+      try { localStorage.setItem('lumina:knownPeople', JSON.stringify(next)); } catch {}
+      return next;
+    });
+  }, [allTasks]);
+
+  // All known people: in-session allTasks attendees + localStorage cross-session cache
+  const knownPeople = useMemo(() => {
+    const seen = new Set<string>();
+    const people: string[] = [];
+    for (const task of allTasks) {
+      for (const name of task.attendees ?? []) {
+        const key = name.toLowerCase();
+        if (!seen.has(key)) { seen.add(key); people.push(name); }
+      }
+    }
+    for (const name of persistedPeople) {
+      const key = name.toLowerCase();
+      if (!seen.has(key)) { seen.add(key); people.push(name); }
+    }
+    return people;
+  }, [allTasks, persistedPeople]);
+
+  // Suggestions: known people matching the current input, not already added
+  const suggestions = useMemo(() => {
+    const q = attendeeInput.trim().toLowerCase();
+    if (!q) return [];
+    return knownPeople
+      .filter(p => p.toLowerCase().includes(q) && !attendees.includes(p))
+      .slice(0, 6);
+  }, [attendeeInput, knownPeople, attendees]);
+
+  useEffect(() => {
+    setAttendees(selectedTask?.attendees ?? []);
+  }, [selectedTask?.id]);
+
+  const saveAttendees = async (next: string[]) => {
+    if (!selectedTask?.id) return;
+    try {
+      await updateTaskAttendees(selectedTask.id, next);
+      if (onTaskUpdated) onTaskUpdated({ ...selectedTask, attendees: next });
+    } catch { /* silent — local state already updated */ }
+  };
+
+  const handleAddAttendee = (name?: string) => {
+    const value = (name ?? attendeeInput).trim();
+    if (!value || attendees.includes(value)) { setAttendeeInput(''); setSuggestionIndex(-1); return; }
+    const next = [...attendees, value];
+    setAttendees(next);
+    setAttendeeInput('');
+    setSuggestionIndex(-1);
+    // Persist immediately to localStorage so it's available as a suggestion cross-session
+    setPersistedPeople(prev => {
+      if (prev.some(p => p.toLowerCase() === value.toLowerCase())) return prev;
+      const updated = [...prev, value];
+      try { localStorage.setItem('lumina:knownPeople', JSON.stringify(updated)); } catch {}
+      return updated;
+    });
+    saveAttendees(next);
+  };
+
+  const handleRemoveAttendee = (name: string) => {
+    const next = attendees.filter(a => a !== name);
+    setAttendees(next);
+    saveAttendees(next);
+  };
 
   useEffect(() => {
     setVisualizationImage(selectedTask?.visualization_image || null);
@@ -275,27 +365,95 @@ export default function NotesPage({ selectedTask, isLoading = false, isLoadingDe
                 className="flex items-center gap-1 px-2.5 py-1 rounded-full border border-zinc-200 dark:border-app-border text-[11.5px] text-zinc-500 dark:text-app-fg-muted hover:border-zinc-400 dark:hover:border-app-fg-subtle hover:text-zinc-700 dark:hover:text-app-fg transition-all"
               >
                 <Users className="w-3 h-3 flex-shrink-0" />
-                <span>Me</span>
+                <span>Me{attendees.length > 0 ? ` +${attendees.length}` : ''}</span>
               </button>
               {showPeoplePicker && (
-                <div className="absolute top-full left-0 mt-1.5 z-50 bg-app-panel border border-app-border rounded-2xl shadow-xl w-56 overflow-hidden">
+                <div className="absolute top-full left-0 mt-1.5 z-50 bg-app-panel border border-app-border rounded-2xl shadow-xl w-64 overflow-hidden">
+                  {/* Input */}
                   <div className="px-3 pt-3 pb-2">
                     <input
                       autoFocus
-                      placeholder="Add attendees…"
+                      value={attendeeInput}
+                      onChange={e => { setAttendeeInput(e.target.value); setSuggestionIndex(-1); }}
+                      onKeyDown={e => {
+                        if (e.key === 'ArrowDown') { e.preventDefault(); setSuggestionIndex(i => Math.min(i + 1, suggestions.length - 1)); return; }
+                        if (e.key === 'ArrowUp') { e.preventDefault(); setSuggestionIndex(i => Math.max(i - 1, -1)); return; }
+                        if (e.key === 'Enter' || e.key === ',') {
+                          e.preventDefault();
+                          if (suggestionIndex >= 0 && suggestions[suggestionIndex]) {
+                            handleAddAttendee(suggestions[suggestionIndex]);
+                          } else {
+                            handleAddAttendee();
+                          }
+                          return;
+                        }
+                        if (e.key === 'Escape') setShowPeoplePicker(false);
+                      }}
+                      placeholder="Add name or email, press Enter…"
                       className="w-full text-[12px] text-app-fg bg-transparent outline-none placeholder:text-app-fg-subtle border-b border-app-border pb-2"
                     />
                   </div>
-                  <div className="px-2 pb-2.5">
-                    <div className="flex items-center gap-2 px-2 py-1.5 rounded-xl hover:bg-app-nav-hover-bg">
+                  <div className="px-2 pb-2.5 max-h-52 overflow-y-auto">
+                    {/* Current user (me) — always shown, not removable */}
+                    <div className="flex items-center gap-2 px-2 py-1.5 rounded-xl">
                       <div className="w-6 h-6 rounded-full bg-[#f06060]/15 flex items-center justify-center flex-shrink-0">
-                        <span className="text-[10px] font-semibold text-[#f06060]">{(session?.user?.name || session?.user?.email || 'M')[0].toUpperCase()}</span>
+                        <span className="text-[10px] font-semibold text-[#f06060]">
+                          {(session?.user?.name || session?.user?.email || 'M')[0].toUpperCase()}
+                        </span>
                       </div>
-                      <p className="text-[12px] font-medium text-app-fg leading-tight">
+                      <p className="text-[12px] font-medium text-app-fg leading-tight flex-1 truncate">
                         {session?.user?.name || session?.user?.email}
                         <span className="text-app-fg-subtle font-normal"> (me)</span>
                       </p>
                     </div>
+                    {/* Added attendees */}
+                    {attendees.map(name => (
+                      <div key={name} className="flex items-center gap-2 px-2 py-1.5 rounded-xl hover:bg-app-nav-hover-bg group">
+                        <div className="w-6 h-6 rounded-full bg-zinc-200 dark:bg-app-raised flex items-center justify-center flex-shrink-0">
+                          <span className="text-[10px] font-semibold text-zinc-600 dark:text-zinc-300">
+                            {name[0].toUpperCase()}
+                          </span>
+                        </div>
+                        <p className="text-[12px] text-app-fg flex-1 truncate">{name}</p>
+                        <button
+                          onClick={() => handleRemoveAttendee(name)}
+                          className="opacity-0 group-hover:opacity-100 transition-opacity p-0.5 rounded hover:bg-zinc-200 dark:hover:bg-app-chip"
+                        >
+                          <X className="w-3 h-3 text-zinc-400" />
+                        </button>
+                      </div>
+                    ))}
+                    {/* Suggestions from known people */}
+                    {suggestions.length > 0 && (
+                      <>
+                        <p className="text-[10px] font-mono text-app-fg-subtle uppercase tracking-wide px-2 pt-2 pb-1">Suggestions</p>
+                        {suggestions.map((name, idx) => (
+                          <button
+                            key={name}
+                            onMouseDown={e => { e.preventDefault(); handleAddAttendee(name); }}
+                            className={`w-full flex items-center gap-2 px-2 py-1.5 rounded-xl text-left transition-colors ${idx === suggestionIndex ? 'bg-app-nav-hover-bg' : 'hover:bg-app-nav-hover-bg'}`}
+                          >
+                            <div className="w-6 h-6 rounded-full bg-zinc-100 dark:bg-app-raised flex items-center justify-center flex-shrink-0">
+                              <span className="text-[10px] font-semibold text-zinc-500 dark:text-zinc-300">{name[0].toUpperCase()}</span>
+                            </div>
+                            <p className="text-[12px] text-app-fg flex-1 truncate">{name}</p>
+                            <Plus className="w-3 h-3 text-app-fg-subtle flex-shrink-0" />
+                          </button>
+                        ))}
+                      </>
+                    )}
+                    {/* Add new entry when input doesn't exactly match a suggestion */}
+                    {attendeeInput.trim() && !suggestions.some(s => s.toLowerCase() === attendeeInput.trim().toLowerCase()) && (
+                      <button
+                        onClick={() => handleAddAttendee()}
+                        className="w-full flex items-center gap-2 px-2 py-1.5 mt-0.5 rounded-xl hover:bg-app-nav-hover-bg text-left"
+                      >
+                        <div className="w-6 h-6 rounded-full bg-blue-50 dark:bg-blue-950/30 flex items-center justify-center flex-shrink-0">
+                          <Plus className="w-3 h-3 text-blue-500" />
+                        </div>
+                        <p className="text-[12px] text-blue-500">Add &ldquo;{attendeeInput.trim()}&rdquo;</p>
+                      </button>
+                    )}
                   </div>
                 </div>
               )}

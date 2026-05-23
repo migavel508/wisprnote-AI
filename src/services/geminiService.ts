@@ -724,14 +724,148 @@ function trimHistoryToTokenBudget(
   return kept.reverse();
 }
 
+function normalizeMarkdownFormatting(text: string): string {
+  let out = text;
+
+  // Fix em-dash / en-dash used as inline bullet separators: "text – item" → newline + "- item"
+  out = out.replace(/([^\n])[ \t][–—][ \t](?=\S)/g, '$1\n- ');
+
+  // Ensure numbered list items always start on their own line
+  out = out.replace(/([^\n])(\s+)(\d+\.\s+\*\*)/g, (_, before, _ws, item) => `${before}\n\n${item}`);
+
+  // Ensure ## / ### headings always have a blank line before them
+  out = out.replace(/([^\n])\n(#{1,3} )/g, '$1\n\n$2');
+
+  // Collapse 4+ newlines to at most 2
+  out = out.replace(/\n{4,}/g, '\n\n\n');
+
+  return out.trim();
+}
+
 function sanitizeInlineCitations(text: string): string {
-  return text
+  const cleaned = text
     .replace(/\[M\d+-E\d+(?:\s*,\s*M\d+-E\d+)*\]/gi, '')
     .replace(/\[\d+(?:\s*,\s*\d+)*\]/g, '')
     .replace(/\[(summary|source)\]/gi, '')
-    .replace(/\s{2,}/g, ' ')
     .replace(/\n{3,}/g, '\n\n')
     .trim();
+  return normalizeMarkdownFormatting(cleaned);
+}
+
+type QuestionCategory = 'action-items' | 'decisions' | 'summary' | 'people' | 'specific-fact' | 'comparison' | 'general';
+
+function detectQuestionCategory(query: string): QuestionCategory {
+  const q = query.toLowerCase();
+  if (/action.?item|task|to.?do|follow.?up|assign|owner|responsible|who.*(?:should|will|need to|handle|take care)/.test(q)) return 'action-items';
+  if (/\bdecision|decide|decided|agreed|approved?|conclusion|outcome|voted|chose|selected\b/.test(q)) return 'decisions';
+  if (/summar|overview|recap|highlight|key.?point|main.?point|gist|brief|tell me about|what happened|what was discussed/.test(q)) return 'summary';
+  if (/who attended|who (?:was|were|is|are)|attendee|participant|speaker|team member|people in/.test(q)) return 'people';
+  if (/compar|differ|versus|\bvs\.?\b|contrast|better|worse|pros.?and.?cons|options/.test(q)) return 'comparison';
+  if (/what.+(?:said|mentioned|discussed|talked|brought|raised|covered)|when|where|how much|how many|quote|exact/.test(q)) return 'specific-fact';
+  return 'general';
+}
+
+const MARKDOWN_RULES = `
+CRITICAL MARKDOWN RULES — MUST FOLLOW EXACTLY:
+- NEVER use – (en-dash) or — (em-dash) as a bullet point. Use only - (hyphen) followed by a space.
+- Every list item MUST start on its own NEW LINE.
+- Every numbered section MUST have a blank line before the next one.
+- Sub-bullets under a numbered item must be indented with 3 spaces and use - .
+- Do NOT run multiple items onto the same line separated by dashes.
+- Output must be valid GitHub-flavored Markdown — it will be rendered directly.`;
+
+function buildFormatGuide(category: QuestionCategory): string {
+  switch (category) {
+    case 'action-items':
+      return `RESPONSE FORMAT — Action Items:
+Group tasks by category (if applicable) using ## headings. Each task on its own numbered line.
+
+## [Category Name]
+1. **[Task]** — Owner: [Name or Unassigned] | Due: [date or "TBD"]
+2. **[Task]** — Owner: [Name or Unassigned] | Due: [date or "TBD"]
+
+## [Next Category]
+1. **[Task]** — Owner: [Name or Unassigned] | Due: [date or "TBD"]
+
+If no categories apply, use a flat numbered list:
+1. **[Task]** — Owner: [Name] | Due: [date]
+
+If no action items are found, say so in one sentence.
+${MARKDOWN_RULES}`;
+
+    case 'decisions':
+      return `RESPONSE FORMAT — Decisions:
+One bullet per decision. Group under ## headings if there are many topics.
+
+## [Topic or Meeting Section]
+- **[Decision]** — [who decided / context]
+- **[Decision]** — [who decided / context]
+
+If no decisions are found, say so in one sentence.
+${MARKDOWN_RULES}`;
+
+    case 'summary':
+      return `RESPONSE FORMAT — Summary:
+Use this exact structure (omit sections not present in the context):
+
+## Overview
+[2-3 sentence high-level summary]
+
+## Key Discussion Points
+- [point 1]
+- [point 2]
+- [point 3]
+
+## Decisions Made
+- [decision] *(write "None recorded" if absent)*
+
+## Action Items
+1. **[task]** — Owner: [Name]
+2. **[task]** — Owner: [Name]
+
+## Next Steps
+- [step] *(omit entire section if not mentioned)*
+${MARKDOWN_RULES}`;
+
+    case 'people':
+      return `RESPONSE FORMAT — People:
+One person per bullet with their role or contribution.
+
+- **[Name]** — [role or what they contributed / said]
+- **[Name]** — [role or what they contributed / said]
+${MARKDOWN_RULES}`;
+
+    case 'comparison':
+      return `RESPONSE FORMAT — Comparison:
+Show each option as a separate block.
+
+**[Option A / Person A]**
+- [key point]
+- [key point]
+
+**[Option B / Person B]**
+- [key point]
+- [key point]
+
+**Key difference:** [1 sentence summary]
+${MARKDOWN_RULES}`;
+
+    case 'specific-fact':
+      return `RESPONSE FORMAT — Direct Answer:
+Answer directly in 1-2 sentences first, then provide supporting context or a quote below.
+
+If quoting a speaker: > "[quote]" — *[Speaker Name]*
+${MARKDOWN_RULES}`;
+
+    default:
+      return `RESPONSE FORMAT:
+- Use ## headings to separate major sections.
+- Use - (hyphen) for ALL bullet points — never em-dash or en-dash.
+- Use **bold** for key terms, names, and important facts.
+- Keep paragraphs short (2-3 sentences max).
+- Put the most important information first.
+${MARKDOWN_RULES}`;
+  }
 }
 
 async function enforceGroundedAnswer(params: {
@@ -872,94 +1006,65 @@ export async function chatWithNotes(
 
   const intent = detectQueryIntent(message);
   const isOverview = intent === 'overview';
+  const questionCategory = detectQuestionCategory(message);
+  const formatGuide = buildFormatGuide(questionCategory);
 
-  // ── Build rich context from all available sources ──────────────────────────
-  let contextSections: string[] = [];
+  // ── Build context in anarlog-style <context> XML block ─────────────────────
+  let fullContext = '';
 
   if (data.preparedContext?.trim()) {
-    contextSections.push(data.preparedContext.trim());
+    fullContext = data.preparedContext.trim();
   } else {
+    const contextParts: string[] = [];
 
-  // 1. Always include structured notes and summary when available (highest quality)
+    if (title) contextParts.push(`Title: ${title}`);
+
     if (summary?.trim()) {
-      contextSections.push(`=== AI-GENERATED MEETING SUMMARY ===\n${summary.trim()}`);
+      contextParts.push(`Enhanced Meeting Summary:\n${summary.trim()}`);
     }
+
     if (notes?.trim()) {
-      // Strip HTML tags from notes (TipTap saves HTML)
       const plainNotes = notes.replace(/<[^>]+>/g, ' ').replace(/\s{2,}/g, ' ').trim();
       if (plainNotes.length > 20) {
-        contextSections.push(`=== MEETING NOTES ===\n${plainNotes}`);
+        contextParts.push(`User Written Notes:\n${plainNotes}`);
       }
     }
 
-  // 2. Add transcription chunks via BM25 retrieval
     if (transcription?.trim() && useRAG) {
       const chunks = chunkTranscription(transcription);
-      // For overview queries fetch more chunks; for specific queries fewer but more precise
       const topK = isOverview ? 10 : 6;
       const results = await retrieveRelevantChunks(message, chunks, topK);
       const retrieved = prepareContext(results);
 
       if (retrieved.trim()) {
-        contextSections.push(`=== TRANSCRIPTION EXCERPTS ===\n${retrieved}`);
-      } else if (transcription.trim()) {
-        // Fallback: use entire transcription (capped at 6000 chars) when BM25 finds nothing
-        contextSections.push(`=== FULL TRANSCRIPTION ===\n${transcription.substring(0, 6000)}${transcription.length > 6000 ? '\n[... truncated ...]' : ''}`);
+        contextParts.push(`Relevant Transcript Excerpts:\n${retrieved}`);
+      } else {
+        contextParts.push(`Full Meeting Transcript:\n${transcription.substring(0, 6000)}${transcription.length > 6000 ? '\n[... truncated ...]' : ''}`);
       }
     } else if (transcription?.trim()) {
-      contextSections.push(`=== TRANSCRIPTION ===\n${transcription}`);
+      contextParts.push(`Full Meeting Transcript:\n${transcription}`);
+    }
+
+    if (contextParts.length > 0) {
+      fullContext = `<context>\n\n${contextParts.join('\n\n')}\n\n</context>`;
     }
   }
 
-  const fullContext = contextSections.join('\n\n');
-  const meetingLabel = title ? `"${title}"` : 'this meeting';
+  const today = new Date().toLocaleDateString('en-US', { year: 'numeric', month: 'long', day: 'numeric' });
 
-  const systemInstruction = isOverview
-    ? `You are an expert meeting assistant with access to comprehensive data for ${meetingLabel}.
+  const systemInstruction = `Current date: ${today}
 
-Your task: Provide a thorough, detailed, well-structured answer to the user's question.
+You are Lumina AI, a helpful meeting assistant. Your purpose is to help users understand their meeting content better.
 
-STRICT GROUNDING RULES (most important):
-- ONLY state facts that appear verbatim or are directly supported by the context below.
-- If information is NOT in the context, say so explicitly — never guess or infer.
-- When multiple context sources agree, synthesise into one cohesive answer and note the agreement.
-- When sources conflict, present both viewpoints and flag the discrepancy.
-
-FORMATTING:
-- Use headings, bullet points, or numbered lists for clarity.
-- Name specific speakers, decisions, dates, or action items exactly as they appear in the context.
-- Provide FULL detail — do not truncate or over-summarise when the user asks for detail.
-
-MEETING CONTEXT:
-${fullContext}
-
-RESPONSE QUALITY CONTRACT:
-- Ground every factual claim in the provided evidence.
+- Always keep your responses concise, professional, and directly relevant to the user's questions.
+- Your primary source of truth is the meeting transcript. Generate responses primarily from the transcript, then the summary or notes.
+- Only state facts that appear in the context. If information is not there, say so explicitly — never guess or infer.
 - Do NOT print citation markers like [M1-E2], [2], [Summary], or [Source].
-- If evidence confidence is weak, state uncertainty clearly.`
+- If the answer is genuinely absent from all sources, say: "I couldn't find that information in this meeting's records."
 
-    : `You are a precise meeting assistant for ${meetingLabel}.
+${formatGuide}
 
-Your task: Answer the user's specific question accurately using ONLY the provided meeting context.
-
-STRICT GROUNDING RULES (most important):
-- Answer ONLY from the evidence below — never fabricate or infer facts not present in context.
-- Quote or closely paraphrase the exact relevant section(s).
-- If the answer is genuinely absent from ALL provided sources, say: "I couldn't find that specific information in this meeting's records."
-- If you are uncertain, say so rather than guessing.
-
-FORMATTING:
-- Answer directly and specifically — do not pad with irrelevant details.
-- If a speaker made the relevant statement, name them.
-- If multiple pieces of context are relevant, address each one.
-
-MEETING CONTEXT:
-${fullContext}
-
-RESPONSE QUALITY CONTRACT:
-- Answer only from supplied evidence — zero fabrication tolerance.
-- Do NOT print citation markers like [M1-E2], [2], [Summary], or [Source].
-- If evidence is insufficient, state exactly what is missing.`;
+${fullContext}`;
 
   const recentHistory = trimHistoryToTokenBudget(history, 2400);
 
@@ -990,33 +1095,31 @@ export async function agentSynthesizeFromEvidence(params: {
   meetingsVisited: number;
   totalMeetings: number;
 }): Promise<string> {
-  const systemInstruction = `You are Lumina, an expert meeting AI assistant.
+  const crossMeetingCategory = detectQuestionCategory(params.userQuery);
+  const crossMeetingFormat = buildFormatGuide(crossMeetingCategory);
+  const today = new Date().toLocaleDateString('en-US', { year: 'numeric', month: 'long', day: 'numeric' });
 
-USER'S EXACT REQUEST: "${params.userQuery}"
-INTERPRETED TASK: ${params.intent}
-Evidence was retrieved across ${params.meetingsVisited} out of ${params.totalMeetings} total meetings.
+  const systemInstruction = `Current date: ${today}
 
-STRICT GROUNDING RULES (most important):
-- Answer ONLY from the evidence provided below — zero fabrication tolerance.
+You are Lumina AI, a helpful meeting assistant searching across ${params.meetingsVisited} of ${params.totalMeetings} available meetings.
+
+User's request: "${params.userQuery}"
+Task: ${params.intent}
+
+- Answer ONLY from the evidence provided — never fabricate or infer facts not present.
 - Answer EXACTLY what the user asked — nothing more, nothing less.
-- If the user asked for "key topics", deliver key topics. Do NOT add action items, next steps, or other extras unless asked.
-- If the user asked to cover "all meetings", your response MUST reference ALL meetings with evidence. State how many you covered.
-- If the user asked about a specific aspect (decisions, topics, action items), focus ONLY on that aspect.
-- If evidence doesn't support a claim, do NOT make it. Say "no evidence found" for that meeting instead.
-- When you are uncertain, explicitly flag it rather than guessing.
-
-FORMATTING:
-- Use headings, bullet points, or numbered lists for clarity.
-- Reference specific speakers and meeting names exactly as they appear in the evidence.
-- Cover findings from EVERY meeting that had relevant evidence — do not skip any.
-- State the total number of meetings covered at the beginning.
-
-RESPONSE QUALITY CONTRACT:
-- Every factual statement must trace back to the evidence below.
+- If the user asked to cover all meetings, group findings by meeting using ## [Meeting Title] headings.
+- If evidence is missing for a meeting, write "No relevant evidence found" for that meeting.
 - Do NOT print citation markers like [1], [M1-E2], [Source], etc.
-- If evidence is weak or missing for some meetings, state that clearly.
+- Begin with a one-line coverage note: "Found relevant information in X of Y meetings."
 
-${params.context}`;
+${crossMeetingFormat}
+
+<context>
+
+${params.context}
+
+</context>`;
 
   const recentHistory = trimHistoryToTokenBudget(params.history, 1400);
 
@@ -1037,6 +1140,382 @@ ${params.context}`;
     answer: response.text || '',
     context: params.context,
   });
+}
+
+// ─── Agentic Tool-Calling Chat (All Meetings) ────────────────────────────────
+
+export interface SearchableMeeting {
+  meetingId: string;
+  title: string;
+  transcription: string;
+  summary?: string;
+  notes?: string;
+  createdAt?: string;
+}
+
+export interface AgentSearchStep {
+  callId: string;
+  query: string;
+  filters?: { recent_days?: number };
+  status: 'running' | 'done';
+  results?: Array<{ meetingId: string; meetingTitle: string; score: number; date?: string }>;
+}
+
+export interface AgentChatCallbacks {
+  onToolCallStart: (step: AgentSearchStep) => void;
+  onToolCallDone: (step: AgentSearchStep) => void;
+  searchFn?: (
+    query: string,
+    filters?: { recent_days?: number },
+    limit?: number,
+  ) => Promise<{ results: AgentSearchStep['results']; contextText: string }>;
+}
+
+function scoreKeywordMatch(query: string, text: string): number {
+  const terms = query.toLowerCase().split(/\s+/).filter(t => t.length > 2);
+  const haystack = text.toLowerCase();
+  let score = 0;
+  for (const term of terms) {
+    const re = new RegExp(term.replace(/[.*+?^${}()|[\]\\]/g, '\\$&'), 'g');
+    score += (haystack.match(re) ?? []).length;
+  }
+  return score;
+}
+
+async function executeSearchNotes(
+  query: string,
+  filters: { recent_days?: number } | undefined,
+  limit: number,
+  allMeetings: SearchableMeeting[],
+): Promise<{ results: AgentSearchStep['results']; contextText: string }> {
+  let pool = allMeetings;
+
+  if (filters?.recent_days && filters.recent_days > 0) {
+    const cutoff = Date.now() - filters.recent_days * 24 * 60 * 60 * 1000;
+    const filtered = allMeetings.filter(m => {
+      if (!m.createdAt) return true;
+      return new Date(m.createdAt).getTime() >= cutoff;
+    });
+    if (filtered.length > 0) pool = filtered;
+  }
+
+  const scored = pool
+    .map(m => {
+      const fullText = `${m.title} ${m.notes || ''} ${m.summary || ''} ${m.transcription}`;
+      return { m, score: scoreKeywordMatch(query, fullText) };
+    })
+    .sort((a, b) => b.score - a.score);
+
+  const cap = Math.min(limit, 5);
+  let top = scored.filter(s => s.score > 0).slice(0, cap);
+  if (top.length === 0 && scored.length > 0) {
+    top = scored.slice(0, Math.min(cap, 3));
+  }
+
+  const contextParts = top.map(({ m }) => {
+    const date = m.createdAt
+      ? new Date(m.createdAt).toLocaleDateString('en-US', { year: 'numeric', month: 'short', day: 'numeric' })
+      : '';
+    const content = m.notes?.trim() || m.summary?.trim() || m.transcription.slice(0, 3000);
+    return `Title: ${m.title}${date ? `\nDate: ${date}` : ''}\n\n${content}`;
+  });
+
+  return {
+    results: top.map(({ m, score }) => ({
+      meetingId: m.meetingId,
+      meetingTitle: m.title,
+      score,
+      date: m.createdAt,
+    })),
+    contextText: contextParts.length > 0
+      ? contextParts.join('\n\n---\n\n')
+      : 'No matching meetings found.',
+  };
+}
+
+export async function agentChatAllMeetings(
+  userQuery: string,
+  history: { role: 'user' | 'model'; parts: { text: string }[] }[],
+  meetings: SearchableMeeting[],
+  callbacks: AgentChatCallbacks,
+): Promise<string> {
+  const today = new Date().toLocaleDateString('en-US', { year: 'numeric', month: 'long', day: 'numeric' });
+
+  const meetingIndex = meetings
+    .slice()
+    .sort((a, b) => (b.createdAt ?? '').localeCompare(a.createdAt ?? ''))
+    .map((m, i) => {
+      const date = m.createdAt
+        ? new Date(m.createdAt).toLocaleDateString('en-US', { month: 'short', day: 'numeric', year: 'numeric' })
+        : 'unknown date';
+      return `${i + 1}. "${m.title}" (${date})`;
+    })
+    .join('\n');
+
+  const systemInstruction = `Today's date: ${today}
+
+You are Lumina AI, a meeting intelligence assistant.
+You have access to ${meetings.length} meeting recordings via the search_notes tool.
+
+Available meetings (newest first):
+${meetingIndex}
+
+How to answer:
+1. ALWAYS call search_notes first. Never answer from memory.
+2. For time-based queries ("recent", "last week", "today"), set filters.recent_days appropriately (7 = last week, 1 = today, 30 = last month).
+3. For person-specific queries, include the person's full name in the query.
+4. Search multiple times with different queries if the first result is insufficient.
+5. Only state facts found in the retrieved content — never invent or assume.
+6. If no relevant content is found, clearly say so.
+7. MEETING SUMMARIES are AI-generated and may contain errors. When a claim about a person's specific role, task ownership, or assignment comes only from a summary (no transcript evidence), add a brief caveat: "(from AI-generated summary — verify in transcript)". Never repeat a summary claim as a certain fact without transcript backup.`;
+
+  const searchTool = {
+    functionDeclarations: [
+      {
+        name: 'search_notes',
+        description:
+          'Search meeting notes and transcripts. Returns matching meeting content. Use date filters for time-specific queries like "recent" or "last week".',
+        parameters: {
+          type: Type.OBJECT,
+          properties: {
+            query: {
+              type: Type.STRING,
+              description:
+                "Text to search for. Include person names, topics, or keywords. Required even if using date filters — use an empty string to list by date only.",
+            },
+            filters: {
+              type: Type.OBJECT,
+              description: 'Optional filters to narrow results',
+              properties: {
+                recent_days: {
+                  type: Type.INTEGER,
+                  description:
+                    'Return only meetings from the last N days. Use 1 for today, 7 for last week, 30 for last month.',
+                },
+              },
+            },
+            limit: {
+              type: Type.INTEGER,
+              description: 'Max meetings to return (1–5, default 3)',
+            },
+          },
+          required: ['query'],
+        },
+      },
+    ],
+  };
+
+  const recentHistory = trimHistoryToTokenBudget(history, 1200);
+  const MAX_STEPS = 5;
+  let callIndex = 0;
+
+  if (getProvider() === 'openrouter') {
+    // ── OpenRouter path: OpenAI-compatible tool calling ──────────────────────
+    const openaiTools = [
+      {
+        type: 'function',
+        function: {
+          name: 'search_notes',
+          description:
+            'Search meeting notes and transcripts. Returns matching meeting content. Use date filters for time-specific queries like "recent" or "last week".',
+          parameters: {
+            type: 'object',
+            properties: {
+              query: {
+                type: 'string',
+                description:
+                  'Text to search for. Include person names, topics, or keywords.',
+              },
+              filters: {
+                type: 'object',
+                properties: {
+                  recent_days: {
+                    type: 'integer',
+                    description:
+                      'Return only meetings from the last N days. Use 1 for today, 7 for last week, 30 for last month.',
+                  },
+                },
+              },
+              limit: {
+                type: 'integer',
+                description: 'Max meetings to return (1–5, default 3)',
+              },
+            },
+            required: ['query'],
+          },
+        },
+      },
+    ];
+
+    const messages: any[] = [
+      { role: 'system', content: systemInstruction },
+      ...recentHistory.map((m: any) => ({
+        role: m.role === 'model' ? 'assistant' : m.role,
+        content: m.parts?.map((p: any) => p.text).join('') ?? '',
+      })),
+      { role: 'user', content: userQuery },
+    ];
+
+    const apiKey = getOpenRouterKey();
+    if (!apiKey) throw new Error('VITE_OPENROUTER_API_KEY is not configured');
+
+    const SYNTH_NUDGE = 'You have searched enough. Now synthesize a direct answer from the evidence you retrieved. Use the meeting summaries and transcript excerpts. If information is incomplete, state what you found and note any gaps. Do NOT call search_notes again.';
+
+    for (let step = 0; step < MAX_STEPS; step++) {
+      const isFinalStep = step === MAX_STEPS - 1;
+      const isPreFinalStep = step === MAX_STEPS - 2;
+
+      // On the second-to-last step, inject a synthesis nudge so the AI knows to answer next.
+      if (isPreFinalStep) {
+        messages.push({ role: 'user', content: SYNTH_NUDGE });
+      }
+
+      const res = await withRetry(() =>
+        fetch('https://openrouter.ai/api/v1/chat/completions', {
+          method: 'POST',
+          headers: {
+            Authorization: `Bearer ${apiKey}`,
+            'Content-Type': 'application/json',
+            'HTTP-Referer': typeof window !== 'undefined' ? window.location.origin : 'https://lumina-ai.app',
+            'X-Title': 'Lumina AI',
+          },
+          body: JSON.stringify({
+            model: 'google/gemini-3.5-flash',
+            messages,
+            // Final step: no tools — forces AI to write a text response.
+            ...(isFinalStep ? {} : { tools: openaiTools, tool_choice: 'auto' }),
+            temperature: 0.1,
+            max_tokens: 5000,
+          }),
+        }).then(async r => {
+          if (!r.ok) {
+            const err: any = new Error(`OpenRouter ${r.status}: ${await r.text()}`);
+            err.status = r.status;
+            throw err;
+          }
+          return r.json();
+        })
+      );
+
+      const msg = res.choices?.[0]?.message;
+      if (!msg) break;
+
+      const toolCalls: any[] = msg.tool_calls ?? [];
+      log.debug('agent_chat_step_or', { step, hasToolCalls: toolCalls.length > 0, content: String(msg.content ?? '').slice(0, 80) });
+
+      if (toolCalls.length === 0) {
+        const text = (msg.content ?? '').trim();
+        return text ? sanitizeInlineCitations(text) : 'I could not find relevant information in the meeting notes.';
+      }
+
+      messages.push({ role: 'assistant', content: msg.content ?? null, tool_calls: toolCalls });
+
+      for (const tc of toolCalls) {
+        const callId = `${callIndex++}`;
+        let args: any = {};
+        try { args = JSON.parse(tc.function?.arguments ?? '{}'); } catch { /* ignore */ }
+
+        const query: string = typeof args.query === 'string' ? args.query : '';
+        const filters: { recent_days?: number } | undefined =
+          args.filters && typeof args.filters === 'object'
+            ? { recent_days: typeof args.filters.recent_days === 'number' ? args.filters.recent_days : undefined }
+            : undefined;
+        const limit: number = typeof args.limit === 'number' ? args.limit : 3;
+
+        log.debug('agent_tool_call_or', { callId, query, filters, limit });
+        callbacks.onToolCallStart({ callId, query, filters, status: 'running' });
+
+        const doSearch = callbacks.searchFn ?? ((q, f, l) => executeSearchNotes(q, f, l ?? 3, meetings));
+        const { results, contextText } = await doSearch(query, filters, limit);
+
+        log.debug('agent_tool_result_or', { callId, resultCount: results?.length ?? 0 });
+        callbacks.onToolCallDone({ callId, query, filters, status: 'done', results });
+
+        messages.push({ role: 'tool', tool_call_id: tc.id, content: contextText });
+      }
+    }
+
+    return 'I was unable to find a definitive answer after searching the meeting notes.';
+  }
+
+  // ── Native Gemini path ────────────────────────────────────────────────────
+  const contents: any[] = [
+    ...recentHistory,
+    { role: 'user', parts: [{ text: userQuery }] },
+  ];
+
+  const SYNTH_NUDGE_GEMINI = 'You have searched enough. Now synthesize a direct answer from the evidence you retrieved. Use the meeting summaries and transcript excerpts. If information is incomplete, state what you found and note any gaps. Do NOT call search_notes again.';
+
+  for (let step = 0; step < MAX_STEPS; step++) {
+    const isFinalStep = step === MAX_STEPS - 1;
+    const isPreFinalStep = step === MAX_STEPS - 2;
+
+    // On the second-to-last step, append a synthesis nudge so the AI commits to answering next.
+    if (isPreFinalStep) {
+      contents.push({ role: 'user', parts: [{ text: SYNTH_NUDGE_GEMINI }] });
+    }
+
+    const response = await generateWithFallback({
+      model: 'gemini-2.5-flash',
+      contents,
+      config: {
+        systemInstruction,
+        // Final step: remove tools so Gemini is forced to emit text.
+        ...(isFinalStep ? {} : { tools: [searchTool] }),
+        temperature: 0.1,
+        maxOutputTokens: 5000,
+      },
+    });
+
+    const parts = response.candidates?.[0]?.content?.parts ?? [];
+    const functionCallParts = parts.filter((p: any) => p.functionCall);
+    const textParts = parts.filter((p: any) => p.text?.trim());
+
+    log.debug('agent_chat_step', {
+      step,
+      hasFunctionCalls: functionCallParts.length > 0,
+      hasText: textParts.length > 0,
+      responseText: response.text?.slice(0, 80) ?? '',
+    });
+
+    if (functionCallParts.length === 0) {
+      const text = textParts.map((p: any) => p.text).join('').trim() || response.text?.trim() || '';
+      return text ? sanitizeInlineCitations(text) : 'I could not find relevant information in the meeting notes.';
+    }
+
+    contents.push({ role: 'model', parts });
+
+    const toolResponseParts: any[] = [];
+
+    for (const part of functionCallParts) {
+      const fc = part.functionCall;
+      const callId = `${callIndex++}`;
+      const query: string = typeof fc.args?.query === 'string' ? fc.args.query : '';
+      const rawFilters = fc.args?.filters;
+      const filters: { recent_days?: number } | undefined =
+        rawFilters && typeof rawFilters === 'object' && !Array.isArray(rawFilters)
+          ? { recent_days: typeof (rawFilters as any).recent_days === 'number' ? (rawFilters as any).recent_days : undefined }
+          : undefined;
+      const limit: number = typeof fc.args?.limit === 'number' ? fc.args.limit : 3;
+
+      log.debug('agent_tool_call', { callId, query, filters, limit });
+      callbacks.onToolCallStart({ callId, query, filters, status: 'running' });
+
+      const doSearch = callbacks.searchFn ?? ((q, f, l) => executeSearchNotes(q, f, l ?? 3, meetings));
+      const { results, contextText } = await doSearch(query, filters, limit);
+
+      log.debug('agent_tool_result', { callId, resultCount: results?.length ?? 0, contextLen: contextText.length });
+      callbacks.onToolCallDone({ callId, query, filters, status: 'done', results });
+
+      toolResponseParts.push({
+        functionResponse: { name: fc.name, response: { content: contextText } },
+      });
+    }
+
+    contents.push({ role: 'user', parts: toolResponseParts });
+  }
+
+  return 'I was unable to find a definitive answer after searching the meeting notes.';
 }
 
 export async function generateConceptImage(description: string): Promise<string | null> {
