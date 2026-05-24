@@ -682,8 +682,16 @@ async function handleWorkspaces(method: string, segments: string[], userId: stri
     const body = parseBody(event);
     if (!body.name?.trim()) return badRequest('name is required');
     const row = await queryOne(
-      'INSERT INTO workspaces (user_id, name, emoji, color) VALUES ($1,$2,$3,$4) RETURNING *',
-      [userId, body.name.trim(), body.emoji || '🗂️', body.color || '#f06060']
+      `INSERT INTO workspaces (user_id, name, emoji, color, description, image_url)
+       VALUES ($1,$2,$3,$4,$5,$6) RETURNING *`,
+      [
+        userId,
+        body.name.trim(),
+        body.emoji || '🗂️',
+        body.color || '#f06060',
+        body.description ?? '',
+        body.image_url ?? null,
+      ]
     );
     return created(row);
   }
@@ -694,8 +702,21 @@ async function handleWorkspaces(method: string, segments: string[], userId: stri
   if (method === 'PUT' && !sub) {
     const body = parseBody(event);
     const row = await queryOne(
-      `UPDATE workspaces SET name=COALESCE($1,name), emoji=COALESCE($2,emoji), color=COALESCE($3,color) WHERE id=$4 RETURNING *`,
-      [body.name?.trim() || null, body.emoji || null, body.color || null, workspaceId]
+      `UPDATE workspaces SET
+         name        = COALESCE($1,name),
+         emoji       = COALESCE($2,emoji),
+         color       = COALESCE($3,color),
+         description = COALESCE($4,description),
+         image_url   = COALESCE($5,image_url)
+       WHERE id=$6 RETURNING *`,
+      [
+        body.name?.trim() || null,
+        body.emoji || null,
+        body.color || null,
+        body.description ?? null,
+        body.image_url ?? null,
+        workspaceId,
+      ]
     );
     return ok(row);
   }
@@ -714,8 +735,18 @@ async function handleWorkspaces(method: string, segments: string[], userId: stri
     const body = parseBody(event);
     if (!body.name?.trim()) return badRequest('name is required');
     const row = await queryOne(
-      'INSERT INTO folders (workspace_id, user_id, name) VALUES ($1,$2,$3) RETURNING *',
-      [workspaceId, userId, body.name.trim()]
+      `INSERT INTO folders
+         (workspace_id, user_id, name, emoji, color, description, icon_type, icon_name, favorite)
+       VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9) RETURNING *`,
+      [
+        workspaceId, userId, body.name.trim(),
+        body.emoji ?? null,
+        body.color ?? null,
+        body.description ?? '',
+        body.icon_type ?? body.iconType ?? 'icon',
+        body.icon_name ?? body.iconName ?? null,
+        body.favorite === true,
+      ]
     );
     return created(row);
   }
@@ -787,7 +818,27 @@ async function handleFolders(method: string, segments: string[], userId: string,
 
   if (method === 'PUT' && !sub) {
     const body = parseBody(event);
-    const row = await queryOne('UPDATE folders SET name=$1 WHERE id=$2 RETURNING *', [body.name?.trim() || folder.name, folderId]);
+    const row = await queryOne(
+      `UPDATE folders SET
+         name        = COALESCE($1,name),
+         emoji       = COALESCE($2,emoji),
+         color       = COALESCE($3,color),
+         description = COALESCE($4,description),
+         icon_type   = COALESCE($5,icon_type),
+         icon_name   = COALESCE($6,icon_name),
+         favorite    = COALESCE($7,favorite)
+       WHERE id=$8 RETURNING *`,
+      [
+        body.name?.trim() || null,
+        body.emoji ?? null,
+        body.color ?? null,
+        body.description ?? null,
+        body.icon_type ?? body.iconType ?? null,
+        body.icon_name ?? body.iconName ?? null,
+        typeof body.favorite === 'boolean' ? body.favorite : null,
+        folderId,
+      ]
+    );
     return ok(row);
   }
 

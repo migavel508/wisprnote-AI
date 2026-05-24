@@ -15,11 +15,27 @@ import {
   Monitor,
   Plus,
   ChevronRight,
+  Lock,
+  Folder as FolderIcon,
+  Pencil,
+  Trash2,
+  Star,
+  UserPlus,
+  FolderPlus,
 } from 'lucide-react';
 import { AuthSession } from '../services/awsAuthService';
 import { getPendingTaskCount } from '../services/awsService';
 import { useTheme, type ThemePreference } from '../theme/ThemeProvider';
-import { getWorkspaces, getFolders, createWorkspace, type Workspace, type Folder as FolderType } from '../services/workspaceService';
+import {
+  ensureDefaultWorkspace, getFolders, createWorkspace, createFolder,
+  deleteWorkspace, updateWorkspace, renameFolder, deleteFolder,
+  isDefaultWorkspace, getWorkspaceImage, getAvatarGradient,
+  DEFAULT_WORKSPACE_NAME, DEFAULT_WORKSPACE_EMOJI,
+  type Workspace, type Folder as FolderType,
+} from '../services/workspaceService';
+import { setWorkspaceSelection, useWorkspaceSelection } from '../services/workspaceSelection';
+import CreateFolderModal, { type FolderDraft } from './CreateFolderModal';
+import WorkspaceCreationWizard from './WorkspaceCreationWizard';
 import WorkspaceSwitcher from './WorkspaceSwitcher';
 
 type View = 'process' | 'history' | 'notes' | 'chat' | 'knowledge' | 'notebooks' | 'audio-devices' | 'workspace' | 'people' | 'settings';
@@ -85,43 +101,232 @@ function ThemeAppearancePicker({ collapsed }: { collapsed?: boolean }) {
   );
 }
 
-// ── Workspace row with expand ─────────────────────────────────────────────────
-function WorkspaceRow({ ws, isActive, onClick }: { ws: Workspace; isActive: boolean; onClick: () => void }) {
-  const [expanded, setExpanded] = useState(false);
-  const [folders, setFolders] = useState<FolderType[]>([]);
-  const [fetched, setFetched] = useState(false);
+// ── Workspace avatar (image > gradient + letter) ──────────────────────────────
+function WorkspaceAvatar({ ws, size = 16 }: { ws: Workspace; size?: number }) {
+  const image = getWorkspaceImage(ws.id);
+  if (image) {
+    return (
+      <div className="rounded-md overflow-hidden flex-shrink-0" style={{ width: size, height: size }}>
+        <img src={image} alt={ws.name} className="w-full h-full object-cover" />
+      </div>
+    );
+  }
+  const initial = (ws.name.charAt(0) || '?').toUpperCase();
+  const [c1, c2, c3] = getAvatarGradient(ws.name || 'workspace');
+  return (
+    <div
+      className="rounded-md flex items-center justify-center text-white font-semibold flex-shrink-0 overflow-hidden"
+      style={{
+        width: size, height: size,
+        background: `linear-gradient(135deg, ${c1} 0%, ${c2} 55%, ${c3} 100%)`,
+        fontSize: Math.max(8, size * 0.55),
+      }}
+    >
+      {initial}
+    </div>
+  );
+}
 
-  const handleExpand = (e: React.MouseEvent) => {
-    e.stopPropagation();
-    if (!fetched) {
-      getFolders(ws.id).then(f => { setFolders(f); setFetched(true); }).catch(() => setFetched(true));
-    }
-    setExpanded(v => !v);
-  };
+// ── Folder icon helper ────────────────────────────────────────────────────────
+function FolderGlyph({ folder, size = 14 }: { folder: FolderType; size?: number }) {
+  if (folder.iconType === 'emoji' && folder.emoji) {
+    return <span style={{ fontSize: size, lineHeight: 1 }}>{folder.emoji}</span>;
+  }
+  if (folder.emoji && folder.iconType !== 'icon') {
+    return <span style={{ fontSize: size, lineHeight: 1 }}>{folder.emoji}</span>;
+  }
+  return <FolderIcon size={size} strokeWidth={1.7} style={{ color: folder.color || 'currentColor' }} />;
+}
+
+// ── Context menu ──────────────────────────────────────────────────────────────
+interface ContextMenuItem {
+  label: string;
+  icon: typeof Pencil;
+  onClick: () => void;
+  destructive?: boolean;
+  divider?: boolean;
+}
+
+function ContextMenu({
+  items, anchorRef, onClose,
+}: { items: ContextMenuItem[]; anchorRef: React.RefObject<HTMLElement>; onClose: () => void }) {
+  const menuRef = useRef<HTMLDivElement>(null);
+  const [pos, setPos] = useState<{ left: number; top: number }>({ left: 0, top: 0 });
+
+  useEffect(() => {
+    if (!anchorRef.current) return;
+    const r = anchorRef.current.getBoundingClientRect();
+    setPos({ left: r.right + 6, top: r.top });
+  }, [anchorRef]);
+
+  useEffect(() => {
+    const onDoc = (e: MouseEvent) => {
+      if (menuRef.current && !menuRef.current.contains(e.target as Node)) onClose();
+    };
+    const onKey = (e: KeyboardEvent) => { if (e.key === 'Escape') onClose(); };
+    document.addEventListener('mousedown', onDoc);
+    document.addEventListener('keydown', onKey);
+    return () => {
+      document.removeEventListener('mousedown', onDoc);
+      document.removeEventListener('keydown', onKey);
+    };
+  }, [onClose]);
+
+  return (
+    <div
+      ref={menuRef}
+      style={{ position: 'fixed', left: pos.left, top: pos.top }}
+      className="z-[200] min-w-[180px] bg-app-canvas rounded-xl border border-app-divider shadow-[0_18px_48px_-12px_rgba(0,0,0,0.18)] dark:shadow-[0_18px_48px_-12px_rgba(0,0,0,0.6)] py-1"
+    >
+      {items.map((item, i) => (
+        <div key={i}>
+          {item.divider && <div className="h-px bg-app-divider mx-2 my-1" />}
+          <button
+            onClick={() => { item.onClick(); onClose(); }}
+            className={`w-full flex items-center gap-2 px-3 py-1.5 text-[12.5px] text-left tracking-[-0.01em] transition-colors ${
+              item.destructive
+                ? 'text-red-500 hover:bg-red-50 dark:hover:bg-red-950/30'
+                : 'text-app-fg hover:bg-app-nav-hover-bg'
+            }`}
+          >
+            <item.icon size={13} strokeWidth={1.7} className={item.destructive ? '' : 'text-app-fg-subtle'} />
+            <span className="flex-1">{item.label}</span>
+          </button>
+        </div>
+      ))}
+    </div>
+  );
+}
+
+// ── Workspace row with expand + context menu ──────────────────────────────────
+interface WorkspaceRowProps {
+  ws: Workspace;
+  folders: FolderType[];
+  expanded: boolean;
+  selectedWorkspaceId: string | null;
+  selectedFolderId: string | null;
+  onToggleExpand: () => void;
+  onSelectWorkspace: () => void;
+  onSelectFolder: (f: FolderType) => void;
+  onCreateFolder: () => void;
+  onRenameWorkspace: () => void;
+  onShareWorkspace: () => void;
+  onDeleteWorkspace: () => void;
+  onRenameFolder: (f: FolderType) => void;
+  onShareFolder: (f: FolderType) => void;
+  onDeleteFolder: (f: FolderType) => void;
+}
+
+function WorkspaceRow({
+  ws, folders, expanded, selectedWorkspaceId, selectedFolderId,
+  onToggleExpand, onSelectWorkspace, onSelectFolder, onCreateFolder,
+  onRenameWorkspace, onShareWorkspace, onDeleteWorkspace,
+  onRenameFolder, onShareFolder, onDeleteFolder,
+}: WorkspaceRowProps) {
+  const [menuOpen, setMenuOpen] = useState(false);
+  const [folderMenu, setFolderMenu] = useState<FolderType | null>(null);
+  const moreRef = useRef<HTMLButtonElement>(null);
+  const folderMoreRefs = useRef<Record<string, HTMLButtonElement | null>>({});
+
+  const isPrivate = isDefaultWorkspace(ws);
+  const isActive = selectedWorkspaceId === ws.id && !selectedFolderId;
 
   return (
     <>
       <div
-        onClick={onClick}
-        className={`w-full flex items-center gap-2.5 px-2.5 py-[7px] text-[13px] rounded-xl transition-all duration-200 cursor-pointer ${
-          isActive ? 'bg-app-nav-active-bg text-app-nav-active-fg font-medium shadow-sm' : 'text-app-nav-fg hover:bg-app-nav-hover-bg hover:text-app-nav-fg-hover'
+        onClick={onSelectWorkspace}
+        className={`group w-full flex items-center gap-2 pl-1.5 pr-1 py-[6px] text-[13px] rounded-xl transition-all duration-200 cursor-pointer ${
+          isActive ? 'bg-app-nav-active-bg text-app-nav-active-fg font-medium' : 'text-app-nav-fg hover:bg-app-nav-hover-bg hover:text-app-nav-fg-hover'
         }`}
       >
-        <button onClick={handleExpand} className="flex-shrink-0 text-app-fg-subtle hover:text-app-fg transition-colors">
-          <ChevronRight size={13} strokeWidth={1.8} className={`transition-transform duration-150 ${expanded ? 'rotate-90' : ''}`} />
-        </button>
-        <span className="text-[15px] leading-none flex-shrink-0">{ws.emoji}</span>
-        <span className="flex-1 truncate tracking-[-0.01em]">{ws.name}</span>
-      </div>
-      {expanded && fetched && folders.map(f => (
-        <div
-          key={f.id}
-          onClick={onClick}
-          className="flex items-center gap-2 pl-9 pr-2.5 py-[5px] text-[12px] text-app-fg-subtle hover:bg-app-nav-hover-bg hover:text-app-nav-fg-hover rounded-xl cursor-pointer transition-colors"
+        <button
+          onClick={e => { e.stopPropagation(); onToggleExpand(); }}
+          className="flex-shrink-0 w-4 h-4 flex items-center justify-center text-app-fg-subtle hover:text-app-fg transition-colors"
         >
-          <span className="truncate">{f.name}</span>
-        </div>
-      ))}
+          <ChevronRight size={11} strokeWidth={2} className={`transition-transform duration-150 ${expanded ? 'rotate-90' : ''}`} />
+        </button>
+        {isPrivate ? (
+          <Lock size={13} strokeWidth={1.8} className="flex-shrink-0 text-app-fg-subtle" />
+        ) : (
+          <WorkspaceAvatar ws={ws} size={16} />
+        )}
+        <span className="flex-1 truncate tracking-[-0.01em]">{ws.name}</span>
+
+        {/* + button shown on hover — creates folder in this workspace */}
+        <button
+          onClick={e => { e.stopPropagation(); onCreateFolder(); }}
+          title="Create folder"
+          className="opacity-0 group-hover:opacity-100 flex-shrink-0 w-5 h-5 flex items-center justify-center rounded-md text-app-fg-subtle hover:bg-app-nav-active-bg hover:text-app-fg transition-all"
+        >
+          <Plus size={12} strokeWidth={1.8} />
+        </button>
+      </div>
+
+      {/* Folders */}
+      {expanded && folders.map(f => {
+        const folderActive = selectedFolderId === f.id;
+        return (
+          <div
+            key={f.id}
+            onClick={() => onSelectFolder(f)}
+            className={`group flex items-center gap-2 pl-7 pr-1 py-[5px] text-[12.5px] rounded-xl cursor-pointer transition-colors ${
+              folderActive ? 'bg-app-nav-active-bg text-app-nav-active-fg font-medium' : 'text-app-nav-fg hover:bg-app-nav-hover-bg hover:text-app-nav-fg-hover'
+            }`}
+          >
+            <FolderGlyph folder={f} size={13} />
+            <span className="flex-1 truncate tracking-[-0.01em]">{f.name}</span>
+            <button
+              ref={el => { folderMoreRefs.current[f.id] = el; }}
+              onClick={e => { e.stopPropagation(); setFolderMenu(f); }}
+              className="opacity-0 group-hover:opacity-100 flex-shrink-0 w-5 h-5 flex items-center justify-center rounded-md text-app-fg-subtle hover:bg-app-nav-active-bg hover:text-app-fg transition-all"
+            >
+              <span className="text-[10px] leading-none">⋯</span>
+            </button>
+          </div>
+        );
+      })}
+
+      {/* "Add folder" placeholder when expanded and no folders */}
+      {expanded && folders.length === 0 && (
+        <button
+          onClick={onCreateFolder}
+          className="w-full flex items-center gap-2 pl-7 pr-2 py-[5px] text-[12px] rounded-xl text-app-fg-subtle hover:bg-app-nav-hover-bg hover:text-app-fg transition-colors"
+        >
+          <FolderPlus size={12} strokeWidth={1.7} />
+          <span className="truncate">Add folder</span>
+        </button>
+      )}
+
+      {/* Hidden anchor for workspace context menu (... not shown in UI directly,
+          but we expose a right-click pattern via the +/folder buttons) */}
+      <button ref={moreRef} className="hidden" />
+      {menuOpen && (
+        <ContextMenu
+          anchorRef={moreRef as any}
+          onClose={() => setMenuOpen(false)}
+          items={[
+            { label: 'Create folder', icon: FolderPlus, onClick: onCreateFolder },
+            { label: 'Add to favorites', icon: Star, onClick: () => {} },
+            { label: 'Rename', icon: Pencil, onClick: onRenameWorkspace, divider: true },
+            { label: 'Sharing settings', icon: UserPlus, onClick: onShareWorkspace },
+            { label: 'Delete folder', icon: Trash2, onClick: onDeleteWorkspace, destructive: true, divider: true },
+          ]}
+        />
+      )}
+
+      {folderMenu && (
+        <ContextMenu
+          anchorRef={{ current: folderMoreRefs.current[folderMenu.id] } as any}
+          onClose={() => setFolderMenu(null)}
+          items={[
+            { label: 'Create folder', icon: FolderPlus, onClick: onCreateFolder },
+            { label: 'Add to favorites', icon: Star, onClick: () => {} },
+            { label: 'Rename', icon: Pencil, onClick: () => onRenameFolder(folderMenu), divider: true },
+            { label: 'Sharing settings', icon: UserPlus, onClick: () => onShareFolder(folderMenu) },
+            { label: 'Delete folder', icon: Trash2, onClick: () => onDeleteFolder(folderMenu), destructive: true, divider: true },
+          ]}
+        />
+      )}
     </>
   );
 }
@@ -137,9 +342,12 @@ export default function MainSidebar({
 }: MainSidebarProps) {
   const [pendingSyncCount, setPendingSyncCount] = useState(0);
   const [workspaces, setWorkspaces] = useState<Workspace[]>([]);
-  const [creatingWs, setCreatingWs] = useState(false);
-  const [newWsName, setNewWsName] = useState('');
-  const newWsRef = useRef<HTMLInputElement>(null);
+  const [foldersByWs, setFoldersByWs] = useState<Record<string, FolderType[]>>({});
+  const [expanded, setExpanded] = useState<Record<string, boolean>>({});
+  const [showCreateWizard, setShowCreateWizard] = useState(false);
+  const [folderModalForWs, setFolderModalForWs] = useState<string | null>(null);
+  const [renameTarget, setRenameTarget] = useState<{ type: 'ws' | 'folder'; id: string; name: string } | null>(null);
+  const selection = useWorkspaceSelection();
 
   useEffect(() => {
     getPendingTaskCount().then(setPendingSyncCount);
@@ -147,21 +355,104 @@ export default function MainSidebar({
     return () => window.clearInterval(timer);
   }, []);
 
+  // Load workspaces (ensuring default exists) + auto-expand default
   useEffect(() => {
-    getWorkspaces().then(setWorkspaces).catch(() => {});
+    ensureDefaultWorkspace().then(ws => {
+      setWorkspaces(ws);
+      // Auto-expand the default workspace + currently selected workspace
+      const next: Record<string, boolean> = {};
+      const def = ws.find(w => w.name === DEFAULT_WORKSPACE_NAME);
+      if (def) next[def.id] = true;
+      if (selection.workspaceId) next[selection.workspaceId] = true;
+      setExpanded(prev => ({ ...next, ...prev }));
+      // Prefetch folders for the default workspace
+      if (def) getFolders(def.id).then(f => setFoldersByWs(p => ({ ...p, [def.id]: f }))).catch(() => {});
+      // If nothing is selected yet, pick the default workspace
+      if (!selection.workspaceId && def) setWorkspaceSelection(def.id, null);
+    }).catch(() => {});
   }, []);
 
-  useEffect(() => {
-    if (creatingWs) setTimeout(() => newWsRef.current?.focus(), 50);
-  }, [creatingWs]);
+  const handleWorkspaceCreated = (ws: Workspace) => {
+    setWorkspaces(prev => prev.some(w => w.id === ws.id) ? prev : [...prev, ws]);
+    setExpanded(prev => ({ ...prev, [ws.id]: true }));
+    setWorkspaceSelection(ws.id, null);
+    onViewChange('workspace');
+  };
 
-  const handleCreateWs = async () => {
-    const name = newWsName.trim();
-    setCreatingWs(false);
-    setNewWsName('');
-    if (!name) return;
-    const ws = await createWorkspace(name).catch(() => null);
-    if (ws) { setWorkspaces(prev => [...prev, ws]); onViewChange('workspace'); }
+  const toggleExpand = async (ws: Workspace) => {
+    setExpanded(prev => ({ ...prev, [ws.id]: !prev[ws.id] }));
+    if (!foldersByWs[ws.id]) {
+      try {
+        const f = await getFolders(ws.id);
+        setFoldersByWs(p => ({ ...p, [ws.id]: f }));
+      } catch {}
+    }
+  };
+
+  const handleSelectWorkspace = (ws: Workspace) => {
+    setWorkspaceSelection(ws.id, null);
+    onViewChange('workspace');
+    if (!foldersByWs[ws.id]) {
+      getFolders(ws.id).then(f => setFoldersByWs(p => ({ ...p, [ws.id]: f }))).catch(() => {});
+    }
+  };
+
+  const handleSelectFolder = (ws: Workspace, f: FolderType) => {
+    setWorkspaceSelection(ws.id, f.id);
+    onViewChange('workspace');
+  };
+
+  const handleFolderCreated = async (wsId: string, draft: FolderDraft) => {
+    const created = await createFolder(wsId, draft.title, {
+      iconType: draft.iconType,
+      iconName: draft.iconName,
+      color: draft.iconColor,
+      emoji: draft.emoji,
+      description: draft.description,
+    });
+    setFoldersByWs(p => ({ ...p, [wsId]: [...(p[wsId] || []), created] }));
+    setExpanded(p => ({ ...p, [wsId]: true }));
+    setFolderModalForWs(null);
+    setWorkspaceSelection(wsId, created.id);
+    onViewChange('workspace');
+  };
+
+  const handleRenameWorkspace = async (ws: Workspace) => {
+    setRenameTarget({ type: 'ws', id: ws.id, name: ws.name });
+  };
+  const handleDeleteWorkspace = async (ws: Workspace) => {
+    if (isDefaultWorkspace(ws)) return; // never delete My notes
+    if (!window.confirm(`Delete "${ws.name}"? This removes all its folders.`)) return;
+    await deleteWorkspace(ws.id).catch(() => {});
+    setWorkspaces(prev => prev.filter(w => w.id !== ws.id));
+    if (selection.workspaceId === ws.id) setWorkspaceSelection(null, null);
+  };
+  const handleDeleteFolderById = async (ws: Workspace, f: FolderType) => {
+    if (!window.confirm(`Delete folder "${f.name}"?`)) return;
+    await deleteFolder(f.id).catch(() => {});
+    setFoldersByWs(p => ({ ...p, [ws.id]: (p[ws.id] || []).filter(x => x.id !== f.id) }));
+    if (selection.folderId === f.id) setWorkspaceSelection(ws.id, null);
+  };
+  const commitRename = async () => {
+    if (!renameTarget) return;
+    const newName = renameTarget.name.trim();
+    if (!newName) { setRenameTarget(null); return; }
+    if (renameTarget.type === 'ws') {
+      const updated = await updateWorkspace(renameTarget.id, { name: newName }).catch(() => null);
+      if (updated) setWorkspaces(prev => prev.map(w => w.id === updated.id ? updated : w));
+    } else {
+      const updated = await renameFolder(renameTarget.id, newName).catch(() => null);
+      if (updated) {
+        setFoldersByWs(p => {
+          const next = { ...p };
+          for (const k of Object.keys(next)) {
+            next[k] = next[k].map(f => f.id === updated.id ? { ...f, name: updated.name } : f);
+          }
+          return next;
+        });
+      }
+    }
+    setRenameTarget(null);
   };
 
   const navItems = [
@@ -309,52 +600,81 @@ export default function MainSidebar({
         </div>
 
         {/* Spaces */}
-        {(workspaces.length > 0 || true) && (
-          <div className="mt-4 px-2.5">
-            <div className="flex items-center px-2.5 mb-1.5">
-              <span className="flex-1 text-[9px] font-mono font-medium text-app-fg-label uppercase tracking-[0.12em]">Spaces</span>
+        <div className="mt-4 px-2.5">
+          <div className="flex items-center px-2.5 mb-1.5">
+            <span className="flex-1 text-[9px] font-mono font-medium text-app-fg-label uppercase tracking-[0.12em]">Spaces</span>
+            <button
+              onClick={() => setShowCreateWizard(true)}
+              title="Add workspace"
+              className="w-4 h-4 flex items-center justify-center rounded text-app-fg-subtle hover:text-app-fg transition-colors"
+            >
+              <Plus size={11} strokeWidth={2} />
+            </button>
+          </div>
+
+          <div className="space-y-px">
+            {workspaces.map(ws => (
+              <WorkspaceRow
+                key={ws.id}
+                ws={ws}
+                folders={foldersByWs[ws.id] || []}
+                expanded={!!expanded[ws.id]}
+                selectedWorkspaceId={selection.workspaceId}
+                selectedFolderId={selection.folderId}
+                onToggleExpand={() => toggleExpand(ws)}
+                onSelectWorkspace={() => handleSelectWorkspace(ws)}
+                onSelectFolder={(f) => handleSelectFolder(ws, f)}
+                onCreateFolder={() => setFolderModalForWs(ws.id)}
+                onRenameWorkspace={() => handleRenameWorkspace(ws)}
+                onShareWorkspace={() => onViewChange('settings')}
+                onDeleteWorkspace={() => handleDeleteWorkspace(ws)}
+                onRenameFolder={(f) => setRenameTarget({ type: 'folder', id: f.id, name: f.name })}
+                onShareFolder={() => onViewChange('settings')}
+                onDeleteFolder={(f) => handleDeleteFolderById(ws, f)}
+              />
+            ))}
+
+            {/* Bottom "Add folder" — creates folder under the currently selected workspace */}
+            {selection.workspaceId && (
               <button
-                onClick={() => setCreatingWs(true)}
-                className="w-4 h-4 flex items-center justify-center rounded text-app-fg-subtle hover:text-app-fg transition-colors"
+                onClick={() => setFolderModalForWs(selection.workspaceId)}
+                className="w-full flex items-center gap-2 pl-1.5 pr-2 py-[6px] text-[12.5px] rounded-xl text-app-fg-subtle hover:bg-app-nav-hover-bg hover:text-app-nav-fg-hover transition-all duration-200"
               >
-                <Plus size={11} strokeWidth={2} />
+                <FolderPlus size={13} strokeWidth={1.6} />
+                <span>Add folder</span>
               </button>
-            </div>
+            )}
+          </div>
+        </div>
 
-            <div className="space-y-px">
-              {workspaces.map(ws => (
-                <WorkspaceRow
-                  key={ws.id}
-                  ws={ws}
-                  isActive={currentView === 'workspace'}
-                  onClick={() => onViewChange('workspace')}
-                />
-              ))}
+        {/* Create folder modal */}
+        {folderModalForWs && (
+          <CreateFolderModal
+            workspaces={workspaces}
+            defaultWorkspaceId={folderModalForWs}
+            onClose={() => setFolderModalForWs(null)}
+            onCreate={(draft) => handleFolderCreated(draft.workspaceId, draft)}
+          />
+        )}
 
-              {creatingWs && (
-                <div className="flex items-center gap-2 px-2.5 py-[6px] rounded-xl bg-app-nav-hover-bg">
-                  <span className="text-[14px] leading-none">🗂️</span>
-                  <input
-                    ref={newWsRef}
-                    value={newWsName}
-                    onChange={e => setNewWsName(e.target.value)}
-                    onKeyDown={e => { if (e.key === 'Enter') handleCreateWs(); if (e.key === 'Escape') { setCreatingWs(false); setNewWsName(''); } }}
-                    onBlur={handleCreateWs}
-                    placeholder="Space name…"
-                    className="flex-1 text-[12.5px] bg-transparent outline-none text-app-fg placeholder:text-app-fg-subtle"
-                  />
-                </div>
-              )}
-
-              {workspaces.length === 0 && !creatingWs && (
-                <button
-                  onClick={() => setCreatingWs(true)}
-                  className="w-full flex items-center gap-2.5 px-2.5 py-[6px] text-[12.5px] rounded-xl text-app-fg-subtle hover:bg-app-nav-hover-bg hover:text-app-nav-fg-hover transition-all duration-200"
-                >
-                  <Plus size={13} strokeWidth={1.5} />
-                  <span>New space</span>
-                </button>
-              )}
+        {/* Inline rename modal */}
+        {renameTarget && (
+          <div className="fixed inset-0 z-[9999] flex items-center justify-center bg-black/30 backdrop-blur-sm" onClick={() => setRenameTarget(null)}>
+            <div className="bg-app-canvas rounded-2xl border border-app-divider shadow-xl w-[360px] p-5" onClick={e => e.stopPropagation()}>
+              <h3 className="text-[14px] font-semibold text-app-fg mb-3">
+                Rename {renameTarget.type === 'ws' ? 'workspace' : 'folder'}
+              </h3>
+              <input
+                autoFocus
+                value={renameTarget.name}
+                onChange={e => setRenameTarget({ ...renameTarget, name: e.target.value })}
+                onKeyDown={e => { if (e.key === 'Enter') commitRename(); if (e.key === 'Escape') setRenameTarget(null); }}
+                className="w-full px-3 py-2 rounded-lg border border-app-divider bg-app-canvas outline-none text-[13px] text-app-fg focus:border-app-fg-subtle"
+              />
+              <div className="flex justify-end gap-2 mt-4">
+                <button onClick={() => setRenameTarget(null)} className="px-3 py-1.5 rounded-lg text-[12.5px] text-app-fg hover:bg-app-nav-hover-bg">Cancel</button>
+                <button onClick={commitRename} className="px-3 py-1.5 rounded-lg text-[12.5px] font-semibold bg-app-fg text-app-canvas hover:opacity-90">Save</button>
+              </div>
             </div>
           </div>
         )}
@@ -381,8 +701,8 @@ export default function MainSidebar({
             workspaces={workspaces}
             activeWorkspaceId={workspaces[0]?.id ?? null}
             session={session}
-            onSwitchWorkspace={() => onViewChange('workspace')}
-            onCreateWorkspace={() => setCreatingWs(true)}
+            onSwitchWorkspace={(ws) => { setWorkspaceSelection(ws.id, null); onViewChange('workspace'); }}
+            onCreateWorkspace={() => setShowCreateWizard(true)}
             onInvite={() => onViewChange('workspace')}
             onManageTemplates={() => onViewChange('settings')}
             onOpenHelp={() => onViewChange('settings')}
@@ -390,6 +710,14 @@ export default function MainSidebar({
             onSignOut={onSignOut}
           />
         </div>
+
+        {showCreateWizard && (
+          <WorkspaceCreationWizard
+            session={session}
+            onClose={() => setShowCreateWizard(false)}
+            onCreated={handleWorkspaceCreated}
+          />
+        )}
       </div>
     </>
   );
