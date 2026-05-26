@@ -299,7 +299,7 @@ function getApiKey(): string {
 // Utility to try a model and fallback if it fails (e.g. 503 Service Unavailable)
 async function generateWithFallback(
   requestOptions: any,
-  fallbackModels: string[] = ["gemini-3.1-flash-lite-preview", "gemini-3-flash-preview"]
+  fallbackModels: string[] = ["gemini-3.5-flash", "gemini-3.1-flash-lite"]
 ): Promise<GenerateContentResponse> {
   const provider = getProvider();
   let lastError: Error | null = null;
@@ -627,7 +627,7 @@ export async function generateMeetingTitle(transcription: string): Promise<strin
   const snippet = transcription.substring(0, 500).trim();
   
   const response = await generateWithFallback({
-    model: "gemini-3.1-flash-lite-preview", // Use faster, cheaper model for simple title generation
+    model: "gemini-3.5-flash", // Use faster, cheaper model for simple title generation
     contents: `Title this meeting in 3-6 words. No quotes. Just the title.
 
 Content: ${snippet}`,
@@ -895,7 +895,7 @@ Output ONLY valid JSON:
 
   try {
     const verification = await generateWithFallback({
-      model: 'gemini-3.1-flash-lite-preview',
+      model: 'gemini-3.5-flash',
       contents: [{ role: 'user', parts: [{ text: verifierPrompt }] }],
       config: {
         temperature: 0.1,
@@ -1807,7 +1807,7 @@ Meeting: ${meetingTitle}
 Transcription: ${cleanTranscriptionForKG(text)}`;
 
   try {
-    const modelsToTry = ['gemini-3-flash-preview', 'gemini-3.1-flash-lite-preview'];
+    const modelsToTry = ['gemini-3-flash-preview', 'gemini-3.5-flash'];
     let response: Response | null = null;
     const MAX_RETRIES = 4;
     const BASE_DELAY = 2000;
