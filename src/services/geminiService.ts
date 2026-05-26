@@ -32,6 +32,52 @@ function getOpenRouterImageModel(): string {
     'google/gemini-2.5-flash-image';
 }
 
+// Fetch with a hard timeout + clearer network error messages. Without this,
+// a dropped connection can leave OpenRouter requests hanging for minutes
+// before the browser eventually gives up.
+async function fetchWithTimeout(
+  input: RequestInfo | URL,
+  init: RequestInit = {},
+  timeoutMs = 60000
+): Promise<Response> {
+  if (typeof navigator !== 'undefined' && navigator.onLine === false) {
+    const err: any = new Error('Network connection lost — you appear to be offline.');
+    err.status = 0;
+    err.code = 'OFFLINE';
+    throw err;
+  }
+
+  const controller = new AbortController();
+  const externalSignal = (init as any).signal as AbortSignal | undefined;
+  if (externalSignal) {
+    if (externalSignal.aborted) controller.abort();
+    else externalSignal.addEventListener('abort', () => controller.abort(), { once: true });
+  }
+  const timer = setTimeout(() => controller.abort(), timeoutMs);
+
+  try {
+    return await fetch(input, { ...init, signal: controller.signal });
+  } catch (e: any) {
+    const isAbort = e?.name === 'AbortError' || controller.signal.aborted;
+    if (isAbort) {
+      const err: any = new Error(`Request timed out after ${Math.round(timeoutMs / 1000)}s — network connection lost or API too slow.`);
+      err.status = 0;
+      err.code = 'TIMEOUT';
+      throw err;
+    }
+    // TypeError from fetch usually means DNS/TCP failure (no internet, CORS, server down).
+    if (e instanceof TypeError) {
+      const err: any = new Error(`Network error: ${e.message || 'fetch failed'} — check your internet connection.`);
+      err.status = 0;
+      err.code = 'NETWORK';
+      throw err;
+    }
+    throw e;
+  } finally {
+    clearTimeout(timer);
+  }
+}
+
 // Convert Google GenAI content format → OpenAI-compatible messages
 function convertToOpenAIMessages(
   contents: any,
@@ -138,7 +184,7 @@ async function callOpenRouter(requestOptions: any): Promise<GenerateContentRespo
     body.response_format = { type: 'json_object' };
   }
 
-  const response = await fetch('https://openrouter.ai/api/v1/chat/completions', {
+  const response = await fetchWithTimeout('https://openrouter.ai/api/v1/chat/completions', {
     method: 'POST',
     headers: {
       'Authorization': `Bearer ${apiKey}`,
@@ -147,7 +193,7 @@ async function callOpenRouter(requestOptions: any): Promise<GenerateContentRespo
       'X-Title': 'WisprNote AI',
     },
     body: JSON.stringify(body),
-  });
+  }, 90000);
 
   if (!response.ok) {
     const errText = await response.text();
@@ -165,17 +211,18 @@ async function callOpenRouter(requestOptions: any): Promise<GenerateContentRespo
   } as any;
 }
 
-// Unified content generation — routes to OpenRouter or Gemini based on provider
+// Unified content generation — routes to OpenRouter or Gemini based on provider.
+// Wrap in withRetry so transient network drops / timeouts auto-recover.
 async function generateContent(requestOptions: any): Promise<GenerateContentResponse> {
   if (getProvider() === 'openrouter') {
-    return callOpenRouter(requestOptions);
+    return withRetry(() => callOpenRouter(requestOptions), 4);
   }
-  return ai.models.generateContent(requestOptions);
+  return withRetry(() => ai.models.generateContent(requestOptions), 4);
 }
 
 // ─── Retry Utility ───────────────────────────────────────────────────────────
 const RETRYABLE_STATUSES = new Set([429, 500, 502, 503, 504]);
-const RETRYABLE_MSGS = ['rate limit', 'quota', 'overloaded', 'fetch failed', 'network error', 'etimedout', 'econnreset'];
+const RETRYABLE_MSGS = ['rate limit', 'quota', 'overloaded', 'fetch failed', 'network error', 'timed out', 'timeout', 'aborted', 'etimedout', 'econnreset', 'enotfound'];
 
 function parseRetryDelayMs(error: any): number | null {
   const msg = String(error?.message || '');
@@ -197,11 +244,17 @@ async function withRetry<T>(fn: () => Promise<T>, maxRetries = 5, baseDelayMs = 
       
       const status: number = error.status ?? error.statusCode ?? error?.error?.code ?? error?.code ?? 0;
       const msg = (error.message ?? '').toLowerCase();
-      
+
+      // Bail out immediately if the device is offline — retrying won't help and
+      // wastes the user's time. The next user action will trigger a fresh try.
+      if (error?.code === 'OFFLINE' || (typeof navigator !== 'undefined' && navigator.onLine === false)) {
+        throw error;
+      }
+
       const retryable = RETRYABLE_STATUSES.has(status) ||
         RETRYABLE_MSGS.some(m => msg.includes(m)) ||
         status === 0;
-        
+
       if (!retryable) throw error;
 
       // Rate-limit (429) and quota errors need a much longer cooldown than
@@ -243,7 +296,7 @@ async function generateImageWithOpenRouter(prompt: string): Promise<string | nul
   for (const model of modelCandidates) {
     try {
       const response = await withRetry(async () => {
-        const res = await fetch('https://openrouter.ai/api/v1/chat/completions', {
+        const res = await fetchWithTimeout('https://openrouter.ai/api/v1/chat/completions', {
           method: 'POST',
           headers: {
             'Authorization': `Bearer ${apiKey}`,
@@ -257,7 +310,7 @@ async function generateImageWithOpenRouter(prompt: string): Promise<string | nul
             modalities: ['image', 'text'],
             temperature: 0.2,
           }),
-        });
+        }, 120000);
 
         if (!res.ok) {
           const errText = await res.text();
@@ -299,7 +352,7 @@ function getApiKey(): string {
 // Utility to try a model and fallback if it fails (e.g. 503 Service Unavailable)
 async function generateWithFallback(
   requestOptions: any,
-  fallbackModels: string[] = ["gemini-3.5-flash", "gemini-3.1-flash-lite"]
+  fallbackModels: string[] = ["gemini-3.1-flash-lite"]
 ): Promise<GenerateContentResponse> {
   const provider = getProvider();
   let lastError: Error | null = null;
@@ -622,27 +675,43 @@ ${text}`,
   return response.text || "";
 }
 
-export async function generateMeetingTitle(transcription: string): Promise<string> {
-  // Use only first 500 chars to minimize token usage - enough to understand context
-  const snippet = transcription.substring(0, 500).trim();
-  
-  const response = await generateWithFallback({
-    model: "gemini-3.5-flash", // Use faster, cheaper model for simple title generation
-    contents: `Title this meeting in 3-6 words. No quotes. Just the title.
+// Build a token-bounded view of the whole meeting (beginning + middle + end)
+// so titles reflect what was actually discussed end-to-end, not just the intro.
+function buildTitleContext(transcription: string): string {
+  const clean = transcription.trim().replace(/\s+/g, ' ');
+  const MAX_CHARS = 3600; // ~900 tokens — keeps the call cheap on flash-lite
+  if (clean.length <= MAX_CHARS) return clean;
+  const slice = Math.floor(MAX_CHARS / 3);
+  const head = clean.slice(0, slice);
+  const midStart = Math.max(0, Math.floor(clean.length / 2 - slice / 2));
+  const middle = clean.slice(midStart, midStart + slice);
+  const tail = clean.slice(-slice);
+  return `[BEGINNING]\n${head}\n\n[MIDDLE]\n${middle}\n\n[END]\n${tail}`;
+}
 
-Content: ${snippet}`,
+export async function generateMeetingTitle(transcription: string): Promise<string> {
+  const context = buildTitleContext(transcription);
+
+  const response = await generateWithFallback({
+    model: "gemini-3.1-flash-lite",
+    contents: `Title this meeting in 3-6 words based on the OVERALL discussion (not just the opening). Output the title only — no quotes, no trailing punctuation, no explanation.
+
+${context}`,
+    config: {
+      temperature: 0.3,
+      maxOutputTokens: 24,
+    },
   });
-  
-  // Clean up the response
+
   let title = (response.text || "").trim();
   title = title.replace(/^["']|["']$/g, '');
   title = title.replace(/\n.*/g, '');
   title = title.trim();
-  
+
   if (!title || title.length > 60) {
     return "Untitled Meeting";
   }
-  
+
   return title;
 }
 
@@ -895,11 +964,11 @@ Output ONLY valid JSON:
 
   try {
     const verification = await generateWithFallback({
-      model: 'gemini-3.5-flash',
+      model: 'gemini-3.1-flash-lite',
       contents: [{ role: 'user', parts: [{ text: verifierPrompt }] }],
       config: {
         temperature: 0.1,
-        maxOutputTokens: 1800,
+        maxOutputTokens: 1200,
       },
     });
 
@@ -1366,7 +1435,7 @@ How to answer:
       }
 
       const res = await withRetry(() =>
-        fetch('https://openrouter.ai/api/v1/chat/completions', {
+        fetchWithTimeout('https://openrouter.ai/api/v1/chat/completions', {
           method: 'POST',
           headers: {
             Authorization: `Bearer ${apiKey}`,
@@ -1375,14 +1444,14 @@ How to answer:
             'X-Title': 'WisprNote AI',
           },
           body: JSON.stringify({
-            model: 'google/gemini-3.5-flash',
+            model: 'google/gemini-3.1-flash-lite',
             messages,
             // Final step: no tools — forces AI to write a text response.
             ...(isFinalStep ? {} : { tools: openaiTools, tool_choice: 'auto' }),
             temperature: 0.1,
             max_tokens: 5000,
           }),
-        }).then(async r => {
+        }, 90000).then(async r => {
           if (!r.ok) {
             const err: any = new Error(`OpenRouter ${r.status}: ${await r.text()}`);
             err.status = r.status;
@@ -1807,7 +1876,7 @@ Meeting: ${meetingTitle}
 Transcription: ${cleanTranscriptionForKG(text)}`;
 
   try {
-    const modelsToTry = ['gemini-3-flash-preview', 'gemini-3.5-flash'];
+    const modelsToTry = ['gemini-3-flash-preview', 'gemini-3.1-flash-lite'];
     let response: Response | null = null;
     const MAX_RETRIES = 4;
     const BASE_DELAY = 2000;
@@ -1816,7 +1885,7 @@ Transcription: ${cleanTranscriptionForKG(text)}`;
       let succeeded = false;
       for (let attempt = 0; attempt <= MAX_RETRIES; attempt++) {
         if (provider === 'openrouter') {
-          response = await fetch('https://openrouter.ai/api/v1/chat/completions', {
+          response = await fetchWithTimeout('https://openrouter.ai/api/v1/chat/completions', {
             method: 'POST',
             headers: {
               'Authorization': `Bearer ${openRouterKey}`,
@@ -1830,16 +1899,16 @@ Transcription: ${cleanTranscriptionForKG(text)}`;
               temperature: 0.1,
               response_format: { type: 'json_object' },
             })
-          });
+          }, 90000);
         } else {
-          response = await fetch(`https://generativelanguage.googleapis.com/v1beta/models/${model}:generateContent?key=${geminiApiKey}`, {
+          response = await fetchWithTimeout(`https://generativelanguage.googleapis.com/v1beta/models/${model}:generateContent?key=${geminiApiKey}`, {
             method: 'POST',
             headers: { 'Content-Type': 'application/json' },
             body: JSON.stringify({
               contents: [{ role: 'user', parts: [{ text: combinedPrompt }] }],
               generationConfig: { temperature: 0.1, responseMimeType: "application/json" }
             })
-          });
+          }, 90000);
         }
 
         if (response.ok) { succeeded = true; break; }
@@ -1983,7 +2052,7 @@ Text: ${cleanTranscriptionForKG(text, 4000)}`;
         const retryModel = 'gemini-3-flash-preview';
         let retryResp: Response;
         if (provider === 'openrouter') {
-          retryResp = await fetch('https://openrouter.ai/api/v1/chat/completions', {
+          retryResp = await fetchWithTimeout('https://openrouter.ai/api/v1/chat/completions', {
             method: 'POST',
             headers: {
               'Authorization': `Bearer ${openRouterKey}`,
@@ -1997,16 +2066,16 @@ Text: ${cleanTranscriptionForKG(text, 4000)}`;
               temperature: 0.2,
               response_format: { type: 'json_object' },
             })
-          });
+          }, 90000);
         } else {
-          retryResp = await fetch(`https://generativelanguage.googleapis.com/v1beta/models/${retryModel}:generateContent?key=${geminiApiKey}`, {
+          retryResp = await fetchWithTimeout(`https://generativelanguage.googleapis.com/v1beta/models/${retryModel}:generateContent?key=${geminiApiKey}`, {
             method: 'POST',
             headers: { 'Content-Type': 'application/json' },
             body: JSON.stringify({
               contents: [{ role: 'user', parts: [{ text: retryPrompt }] }],
               generationConfig: { temperature: 0.2, responseMimeType: "application/json" }
             })
-          });
+          }, 90000);
         }
 
         if (retryResp.ok) {
