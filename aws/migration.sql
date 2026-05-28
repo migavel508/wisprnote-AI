@@ -93,7 +93,9 @@ CREATE TABLE IF NOT EXISTS chat_history (
   image           TEXT,
   thread_id       TEXT,
   citations       JSONB DEFAULT '[]'::jsonb,
-  retrieval_meta  JSONB DEFAULT '{}'::jsonb
+  retrieval_meta  JSONB DEFAULT '{}'::jsonb,
+  agent_status    TEXT,
+  agent_plan      JSONB DEFAULT '[]'::jsonb
 );
 
 CREATE INDEX IF NOT EXISTS idx_chat_history_user_id ON chat_history(user_id);

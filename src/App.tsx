@@ -103,6 +103,7 @@ import {
   updateTaskNotes,
 } from './services/awsService';
 import { cacheGet, cacheSet, cacheClearUser, type CachedHistoryPayload } from './services/appCache';
+import { getContacts, type Contact } from './services/workspaceService';
 import { getSession, onAuthStateChange, signOut, getUserId, type AuthSession } from './services/awsAuthService';
 import { splitAudio, AudioBatch, shouldUseFileAPI, FILE_API_THRESHOLD_MB, BlobReadError } from './services/audioService';
 import { 
@@ -172,6 +173,7 @@ interface AgentStep {
   status: 'pending' | 'running' | 'done' | 'error';
   detail?: string;
   type?: 'search-tool';
+  searchKind?: 'notes' | 'people';
   searchQuery?: string;
   searchResults?: Array<{ meetingId: string; meetingTitle: string; score: number }>;
 }
@@ -393,7 +395,15 @@ export default function App() {
     try { return JSON.parse(localStorage.getItem('lumina:chatThreads') ?? '[]'); }
     catch { return []; }
   });
-  const [activeChatThreadId, setActiveChatThreadId] = useState<string | null>(null);
+  const [activeChatThreadId, setActiveChatThreadId] = useState<string | null>(() => {
+    try { return localStorage.getItem('lumina:activeChatThreadId'); } catch { return null; }
+  });
+  useEffect(() => {
+    try {
+      if (activeChatThreadId) localStorage.setItem('lumina:activeChatThreadId', activeChatThreadId);
+      else localStorage.removeItem('lumina:activeChatThreadId');
+    } catch {}
+  }, [activeChatThreadId]);
   const [selectedTask, setSelectedTask] = useState<TaskHistory | null>(null);
   const [isLoadingTaskDetails, setIsLoadingTaskDetails] = useState(false);
   const [isLoadingHistory, setIsLoadingHistory] = useState(true);
@@ -804,10 +814,48 @@ export default function App() {
             totalMeetingsCount: (msg as any).retrieval_meta.total_meetings_count,
           }
         : undefined,
+      agentStatus: (msg as any).agent_status,
+      agentPlan: Array.isArray((msg as any).agent_plan)
+        ? (msg as any).agent_plan.map((s: any) => ({
+            id: s.id,
+            label: s.label,
+            status: s.status,
+            detail: s.detail,
+            type: s.type,
+            searchKind: s.search_kind,
+            searchQuery: s.search_query,
+            searchResults: Array.isArray(s.search_results)
+              ? s.search_results.map((r: any) => ({
+                  meetingId: r.meeting_id,
+                  meetingTitle: r.meeting_title,
+                  score: r.score,
+                }))
+              : undefined,
+          }))
+        : undefined,
     }));
 
+  // Resolve which thread to load when in All-Meetings mode. Picks (in order):
+  //   1. the currently active thread (restored from localStorage)
+  //   2. the most recently updated all-meetings thread in the chatThreads list
+  //   3. the legacy ALL_MEETINGS_THREAD_ID constant
+  // and writes the result back to activeChatThreadId so subsequent saves target it.
+  const resolveAllMeetingsThreadId = (): string => {
+    if (activeChatThreadId) return activeChatThreadId;
+    const recent = chatThreads
+      .filter(t => !t.taskId)
+      .slice()
+      .sort((a, b) => (b.updatedAt ?? '').localeCompare(a.updatedAt ?? ''))[0];
+    if (recent) {
+      setActiveChatThreadId(recent.id);
+      return recent.id;
+    }
+    return ALL_MEETINGS_THREAD_ID;
+  };
+
   const fetchChatHistory = async (taskId: string | null) => {
-    const cacheKey = taskId ? `chat:${taskId}` : 'chat:all-meetings';
+    const threadId = taskId ? null : resolveAllMeetingsThreadId();
+    const cacheKey = taskId ? `chat:${taskId}` : `chat:all-meetings:${threadId}`;
     try {
       const cachedRaw = await cacheGet<ChatMessage[]>(cacheKey);
       if (cachedRaw?.length) {
@@ -817,7 +865,7 @@ export default function App() {
       }
       const data = taskId
         ? await getChatHistory(taskId)
-        : await getChatHistoryByThread(ALL_MEETINGS_THREAD_ID);
+        : await getChatHistoryByThread(threadId!);
       await cacheSet(cacheKey, data);
       const messages = parseChatMessages(data);
       setChatMessages(messages);
@@ -832,10 +880,11 @@ export default function App() {
 
   const persistChatThreadToCache = async (taskId: string | null) => {
     try {
-      const cacheKey = taskId ? `chat:${taskId}` : 'chat:all-meetings';
+      const threadId = taskId ? null : resolveAllMeetingsThreadId();
+      const cacheKey = taskId ? `chat:${taskId}` : `chat:all-meetings:${threadId}`;
       const data = taskId
         ? await getChatHistory(taskId)
-        : await getChatHistoryByThread(ALL_MEETINGS_THREAD_ID);
+        : await getChatHistoryByThread(threadId!);
       await cacheSet(cacheKey, data);
     } catch {
       /* non-fatal */
@@ -2601,6 +2650,42 @@ export default function App() {
 
         const dateMap = new Map(history.map(h => [h.id ?? '', h.created_at ?? '']));
 
+        let sharedKgCache: KnowledgeGraphEntry[] | null = null;
+        const loadKG = async (): Promise<KnowledgeGraphEntry[]> => {
+          if (sharedKgCache) return sharedKgCache;
+          try {
+            sharedKgCache = await getKnowledgeGraph();
+          } catch (err) {
+            log.error('kg_lookup_failed', { message: (err as Error)?.message });
+            sharedKgCache = [];
+          }
+          return sharedKgCache;
+        };
+
+        const formatKGEntry = (entry: KnowledgeGraphEntry, maxTopicChars = 220): string => {
+          const parts: string[] = [];
+          if (entry.topics?.length) {
+            parts.push(
+              `Topics:\n${entry.topics
+                .map(t => `  • ${t.name}${t.status ? ` (${t.status})` : ''}${t.summary ? ` — ${t.summary.slice(0, maxTopicChars)}` : ''}`)
+                .join('\n')}`
+            );
+          }
+          if (entry.decisions?.length) {
+            parts.push(
+              `Decisions:\n${entry.decisions.map(d => `  • ${d.decision}${d.relatedTopic ? ` [topic: ${d.relatedTopic}]` : ''}`).join('\n')}`
+            );
+          }
+          if (entry.action_items?.length) {
+            parts.push(
+              `Action items:\n${entry.action_items.map(a => `  • ${a.task}${a.owner ? ` (owner: ${a.owner})` : ''}${a.relatedTopic ? ` [topic: ${a.relatedTopic}]` : ''}`).join('\n')}`
+            );
+          }
+          if (entry.people?.length) parts.push(`People: ${entry.people.join(', ')}`);
+          if (entry.refs?.length) parts.push(`References: ${entry.refs.join(', ')}`);
+          return parts.length ? parts.join('\n') : '(empty knowledge graph entry)';
+        };
+
         const turbopufferSearchFn = async (
           query: string,
           filters?: { recent_days?: number },
@@ -2617,7 +2702,10 @@ export default function App() {
             });
           }
 
-          const maxCandidates = Math.min(Math.max(limit ?? 5, 1), 10);
+          // Floor at 8 so semantically-related meetings beyond the LLM's stated limit
+          // still get surfaced — the LLM tends to under-specify limit (e.g. 5) for
+          // queries that actually span many meetings.
+          const maxCandidates = Math.min(Math.max(limit ?? 5, 8), 10);
           const trimmedQuery = query.trim();
 
           // ── Date-range listing mode (empty query) ─────────────────────────────────
@@ -2668,7 +2756,10 @@ export default function App() {
           if (isTurbopufferConfigured()) {
             try {
               const qVec = await embedQuery(query);
-              const globalHits = await queryHybrid(qVec, query, 40);
+              // Fetch a wide net of chunks (80) so meetings with mid-relevance hits
+              // still bubble up after the per-meeting dedup, instead of being cut off
+              // by one meeting dominating the top of the chunk list.
+              const globalHits = await queryHybrid(qVec, query, 80);
 
               // Date-filter hits to respect filters.recent_days
               const validHits = filters?.recent_days
@@ -2749,7 +2840,7 @@ export default function App() {
             .join('\n\n');
 
           const contextText = [
-            `=== COVERAGE ===\nSearched ${candidateDocs.length} of ${docsToSearch.length} meetings`,
+            `=== COVERAGE ===\nSearched ${candidateDocs.length} of ${docsToSearch.length} meetings (Turbopuffer semantic + BM25 hybrid over transcript chunks)`,
             `=== SELECTED MEETINGS ===\n${candidateDocs.map((m, i) => `${i + 1}. ${m.title}`).join('\n')}`,
             summaryBlocks.length
               ? `=== AI-GENERATED MEETING SUMMARIES (may contain errors — treat as hints only, not ground truth) ===\n${summaryBlocks.join('\n')}`
@@ -2766,8 +2857,12 @@ export default function App() {
               meetingScoreMap.set(e.meetingId, { title: e.meetingTitle, score: e.score });
             }
           }
-          if (meetingScoreMap.size === 0) {
-            for (const c of candidateDocs) meetingScoreMap.set(c.meetingId, { title: c.title, score: 0 });
+          // Always include every candidate so the UI step and citations list the full
+          // scope, even when per-meeting deep retrieval returned no chunks.
+          for (const c of candidateDocs) {
+            if (!meetingScoreMap.has(c.meetingId)) {
+              meetingScoreMap.set(c.meetingId, { title: c.title, score: 0 });
+            }
           }
           const results = Array.from(meetingScoreMap.entries())
             .map(([meetingId, { title, score }]) => ({
@@ -2779,6 +2874,231 @@ export default function App() {
             .sort((a, b) => b.score - a.score);
 
           return { results, contextText };
+        };
+
+        let contactsCache: Contact[] | null = null;
+        const meetingByMeetingId = new Map(allMeetings.map(m => [m.meetingId, m]));
+        const contentCache = new Map<string, { transcription: string; summary: string; notes: string }>();
+
+        const loadMeetingContent = async (meetingId: string) => {
+          const hit = contentCache.get(meetingId);
+          if (hit) return hit;
+          const inMemory = meetingByMeetingId.get(meetingId);
+          let transcription = inMemory?.transcription ?? '';
+          let summary = inMemory?.summary ?? '';
+          let notes = inMemory?.notes ?? '';
+          if (!transcription.trim() || !summary.trim() || !notes.trim()) {
+            try {
+              const full = await getTaskById(meetingId);
+              if (full) {
+                if (!transcription.trim() && full.transcription) transcription = full.transcription;
+                if (!summary.trim() && full.summary) summary = full.summary;
+                if (!notes.trim() && (full as any).notes) notes = (full as any).notes;
+              }
+            } catch (err) {
+              log.warn?.('contacts_lazy_load_failed', { meetingId, message: (err as Error)?.message });
+            }
+          }
+          const payload = { transcription, summary, notes };
+          contentCache.set(meetingId, payload);
+          return payload;
+        };
+
+        const extractTranscriptExcerpt = (transcription: string, name: string, maxChars = 1800): string => {
+          if (!transcription.trim()) return '';
+          const lowered = transcription.toLowerCase();
+          const needle = name.toLowerCase();
+          const idx = lowered.indexOf(needle);
+          if (idx === -1) {
+            return transcription.slice(0, maxChars);
+          }
+          const start = Math.max(0, idx - Math.floor(maxChars / 2));
+          const end = Math.min(transcription.length, start + maxChars);
+          return (start > 0 ? '…' : '') + transcription.slice(start, end) + (end < transcription.length ? '…' : '');
+        };
+
+        const contactsSearchFn = async (query: string, limit?: number) => {
+          const [, kgEntries] = await Promise.all([
+            (async () => {
+              if (contactsCache) return;
+              try { contactsCache = await getContacts(); }
+              catch (err) {
+                log.error('contacts_lookup_failed', { message: (err as Error)?.message });
+                contactsCache = [];
+              }
+            })(),
+            loadKG(),
+          ]);
+
+          const cap = Math.min(Math.max(limit ?? 5, 1), 10);
+          const q = (query || '').trim().toLowerCase();
+          const qEscaped = q.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+
+          const matchedContacts = (contactsCache ?? [])
+            .map(c => {
+              const hay = [c.name, c.email ?? '', c.role ?? '', c.company ?? ''].join('\n').toLowerCase();
+              if (!q) return { c, score: c.meeting_count };
+              if (!hay.includes(q)) return { c, score: 0 };
+              const nameMatch = c.name.toLowerCase().includes(q) ? 10 : 0;
+              return { c, score: nameMatch + (hay.match(new RegExp(qEscaped, 'g'))?.length ?? 0) };
+            })
+            .filter(s => s.score > 0)
+            .sort((a, b) => b.score - a.score)
+            .slice(0, cap)
+            .map(s => s.c);
+
+          const kgEntriesByTaskId = new Map<string, KnowledgeGraphEntry>();
+          for (const entry of kgEntries) {
+            if (entry.task_id) kgEntriesByTaskId.set(entry.task_id, entry);
+          }
+
+          const kgMentions = new Set<string>();
+          if (q) {
+            for (const entry of kgEntries) {
+              const peopleArr = entry.people ?? [];
+              const owners = (entry.action_items ?? []).map(a => a.owner ?? '');
+              const haystack = [...peopleArr, ...owners].join('\n').toLowerCase();
+              if (haystack.includes(q)) kgMentions.add(entry.task_id);
+            }
+          }
+
+          const contacts = matchedContacts.map(c => ({
+            name: c.name,
+            role: c.role,
+            company: c.company,
+            email: c.email,
+            meeting_count: c.meeting_count,
+            task_ids: c.task_ids,
+            last_seen: c.last_seen,
+          }));
+
+          const cutoffByDays = (days: number) => Date.now() - days * 24 * 60 * 60 * 1000;
+          const within30 = cutoffByDays(30);
+
+          const meetingIdUnion = new Set<string>();
+          for (const c of matchedContacts) for (const id of c.task_ids) meetingIdUnion.add(id);
+          for (const id of kgMentions) meetingIdUnion.add(id);
+
+          if (matchedContacts.length === 0 && kgMentions.size === 0) {
+            return {
+              contacts,
+              meetings: [],
+              contextText: `No matches in the People directory or Knowledge Graph for "${query}". If you believe the user meant someone whose name only appears inside transcripts, you may fall back to search_notes. Otherwise tell the user no such person was found.`,
+            };
+          }
+
+          const allMeetingsForQuery = Array.from(meetingIdUnion)
+            .map(id => {
+              const meta = meetingByMeetingId.get(id);
+              const dateStr = dateMap.get(id);
+              return {
+                id,
+                title: meta?.title ?? kgEntriesByTaskId.get(id)?.meeting_title ?? '',
+                dateStr,
+              };
+            })
+            .filter(m => !!m.title);
+
+          const last30 = allMeetingsForQuery
+            .filter(m => m.dateStr && new Date(m.dateStr).getTime() >= within30)
+            .sort((a, b) => (b.dateStr ?? '').localeCompare(a.dateStr ?? ''));
+
+          const olderMeetings = allMeetingsForQuery
+            .filter(m => !last30.some(x => x.id === m.id))
+            .sort((a, b) => (b.dateStr ?? '').localeCompare(a.dateStr ?? ''))
+            .slice(0, 10);
+
+          const surfacedMeetings = last30.map(m => ({
+            meetingId: m.id,
+            meetingTitle: m.title,
+            score: 1,
+            date: m.dateStr,
+          }));
+
+          const contactHeaders = matchedContacts.map(c => {
+            const headerParts = [
+              c.name,
+              c.role ? `— ${c.role}` : '',
+              c.company ? `at ${c.company}` : '',
+              c.email ? `(${c.email})` : '',
+            ].filter(Boolean).join(' ');
+            const lastSeen = c.last_seen
+              ? new Date(c.last_seen).toLocaleDateString('en-US', { month: 'short', day: 'numeric', year: 'numeric' })
+              : 'unknown';
+            return `- ${headerParts} • total meetings: ${c.meeting_count} • last seen: ${lastSeen}`;
+          });
+
+          const evidenceBlocks = await Promise.all(
+            last30.map(async (m, idx) => {
+              const [{ transcription, summary, notes }, kg] = [
+                await loadMeetingContent(m.id),
+                kgEntriesByTaskId.get(m.id),
+              ];
+              const dateLabel = m.dateStr
+                ? new Date(m.dateStr).toLocaleDateString('en-US', { weekday: 'short', month: 'short', day: 'numeric', year: 'numeric' })
+                : 'unknown date';
+
+              const fromContacts = matchedContacts.some(c => c.task_ids.includes(m.id));
+              const fromKG = kgMentions.has(m.id);
+              const sourceTag = fromContacts && fromKG
+                ? 'attended (People directory) + mentioned (Knowledge Graph)'
+                : fromContacts
+                  ? 'attended (People directory)'
+                  : 'mentioned (Knowledge Graph)';
+
+              const kgBlock = kg
+                ? [
+                    kg.people?.length ? `Participants/mentions: ${kg.people.join(', ')}` : '',
+                    kg.topics?.length
+                      ? `Topics: ${kg.topics.map(t => `• ${t.name}${t.status ? ` (${t.status})` : ''}${t.summary ? ` — ${t.summary.slice(0, 240)}` : ''}`).join('\n')}`
+                      : '',
+                    kg.decisions?.length
+                      ? `Decisions: ${kg.decisions.map(d => `• ${d.decision}${d.relatedTopic ? ` [topic: ${d.relatedTopic}]` : ''}`).join('\n')}`
+                      : '',
+                    kg.action_items?.length
+                      ? `Action items: ${kg.action_items.map(a => `• ${a.task}${a.owner ? ` (owner: ${a.owner})` : ''}${a.relatedTopic ? ` [topic: ${a.relatedTopic}]` : ''}`).join('\n')}`
+                      : '',
+                  ].filter(Boolean).join('\n')
+                : '(no Knowledge Graph entry available)';
+
+              const notesBlock = notes.trim() ? `NOTES:\n${notes.slice(0, 1400)}` : '';
+              const summaryBlock = summary.trim() ? `SUMMARY (AI-generated, may contain errors):\n${summary.slice(0, 1200)}` : '';
+              const transcriptExcerpt = extractTranscriptExcerpt(transcription, query || matchedContacts[0]?.name || '', 1800);
+              const transcriptBlock = transcriptExcerpt.trim() ? `TRANSCRIPT EXCERPT:\n${transcriptExcerpt}` : '';
+
+              const bodyParts = [
+                `KNOWLEDGE GRAPH:\n${kgBlock}`,
+                notesBlock,
+                summaryBlock,
+                transcriptBlock,
+              ].filter(Boolean);
+
+              return `--- Meeting ${idx + 1}: "${m.title}" (${dateLabel}) [task_id: ${m.id}] [source: ${sourceTag}] ---\n${bodyParts.join('\n\n') || '(no content available for this meeting)'}`;
+            })
+          );
+
+          const olderRows = olderMeetings.map(m => {
+            const d = m.dateStr
+              ? new Date(m.dateStr).toLocaleDateString('en-US', { month: 'short', day: 'numeric', year: 'numeric' })
+              : 'unknown date';
+            return `  - "${m.title}" (${d}) [task_id: ${m.id}]`;
+          });
+
+          const contextText = [
+            `=== PERSON LOOKUP for "${query}" ===`,
+            `Sources cross-referenced: People directory (AWS /contacts) AND Knowledge Graph (AWS /knowledge-graph).`,
+            matchedContacts.length
+              ? `People-directory matches (${matchedContacts.length}):\n${contactHeaders.join('\n')}`
+              : `No exact People-directory match — fell back to Knowledge Graph mentions across meetings.`,
+            `=== EVIDENCE: ${last30.length} meeting${last30.length !== 1 ? 's' : ''} in the last 30 days (union of attended + mentioned) ===`,
+            last30.length ? evidenceBlocks.join('\n\n') : '(no meetings in the last 30 days)',
+            olderMeetings.length
+              ? `=== OLDER MEETINGS (titles only) ===\n${olderRows.join('\n')}`
+              : '',
+            `Instruction: Answer the user's question DIRECTLY from the EVIDENCE above, covering ALL listed meetings. Do not call search_notes for this person — the union of People directory + Knowledge Graph is the authoritative scope.`,
+          ].filter(Boolean).join('\n\n');
+
+          return { contacts, meetings: surfacedMeetings, contextText };
         };
 
         response = await agentChatAllMeetings(
@@ -2794,16 +3114,19 @@ export default function App() {
           })),
           {
             searchFn: turbopufferSearchFn,
+            contactsFn: contactsSearchFn,
             onToolCallStart: (step) => {
+              const isContacts = step.kind === 'contacts';
               updateAgentMessage(prev => ({
                 agentStatus: 'executing',
                 agentPlan: [
                   ...(prev.agentPlan ?? []),
                   {
                     id: `search-${step.callId}`,
-                    label: 'Searching notes',
+                    label: isContacts ? 'Searching people' : 'Searching notes',
                     status: 'running' as const,
                     type: 'search-tool' as const,
+                    searchKind: isContacts ? 'people' as const : 'notes' as const,
                     searchQuery: step.query || '',
                   },
                 ],
@@ -2819,7 +3142,9 @@ export default function App() {
                 }));
                 const topScore = step.results[0]?.score ?? 0;
                 const avgScore = step.results.slice(0, 3).reduce((s, r) => s + r.score, 0) / Math.min(step.results.length, 3);
-                const derivedConfidence = Math.min(0.95, Math.max(0.2, (topScore + avgScore) / 2));
+                const derivedConfidence = step.kind === 'contacts'
+                  ? Math.min(0.95, 0.6 + step.results.length * 0.05)
+                  : Math.min(0.95, Math.max(0.2, (topScore + avgScore) / 2));
                 responseRetrievalMeta = {
                   scope: 'many',
                   confidence: derivedConfidence,
@@ -2830,22 +3155,40 @@ export default function App() {
                 };
               }
               updateAgentMessage(prev => ({
-                agentPlan: prev.agentPlan?.map(s =>
-                  s.id === `search-${step.callId}`
-                    ? {
-                        ...s,
-                        status: 'done' as const,
-                        detail: step.results?.length
-                          ? `Found ${step.results.length} meeting${step.results.length !== 1 ? 's' : ''}`
-                          : 'No results found',
-                        searchResults: step.results?.map(r => ({
-                          meetingId: r.meetingId,
-                          meetingTitle: r.meetingTitle,
-                          score: r.score,
-                        })),
-                      }
-                    : s
-                ),
+                agentPlan: prev.agentPlan?.map(s => {
+                  if (s.id !== `search-${step.callId}`) return s;
+                  if (step.kind === 'contacts') {
+                    const foundPeople = step.contacts?.length ?? 0;
+                    const foundMeetings = step.results?.length ?? 0;
+                    const detail = foundPeople || foundMeetings
+                      ? foundMeetings
+                        ? `Found ${foundPeople} ${foundPeople === 1 ? 'person' : 'people'} across ${foundMeetings} meeting${foundMeetings !== 1 ? 's' : ''}`
+                        : `Found ${foundPeople} ${foundPeople === 1 ? 'person' : 'people'} (no meetings in last 30 days)`
+                      : 'No matching people';
+                    return {
+                      ...s,
+                      status: 'done' as const,
+                      detail,
+                      searchResults: step.results?.map(r => ({
+                        meetingId: r.meetingId,
+                        meetingTitle: r.meetingTitle,
+                        score: r.score,
+                      })),
+                    };
+                  }
+                  return {
+                    ...s,
+                    status: 'done' as const,
+                    detail: step.results?.length
+                      ? `Found ${step.results.length} meeting${step.results.length !== 1 ? 's' : ''}`
+                      : 'No results found',
+                    searchResults: step.results?.map(r => ({
+                      meetingId: r.meetingId,
+                      meetingTitle: r.meetingTitle,
+                      score: r.score,
+                    })),
+                  };
+                }),
               }));
             },
           }
@@ -2862,9 +3205,11 @@ export default function App() {
         citations: responseCitations,
         retrievalMeta: responseRetrievalMeta,
       };
+      let savedAgentPlan: AgentStep[] | undefined;
       setChatMessages(prev => {
         const placeholder = prev.find(m => m.role === 'model' && m.agentStatus && m.agentStatus !== 'done');
-        modelMessage = { ...modelMessage, agentPlan: placeholder?.agentPlan };
+        savedAgentPlan = placeholder?.agentPlan;
+        modelMessage = { ...modelMessage, agentPlan: savedAgentPlan };
         return [...prev.filter(m => !(m.role === 'model' && m.agentStatus && m.agentStatus !== 'done')), modelMessage];
       });
 
@@ -2885,6 +3230,21 @@ export default function App() {
               total_meetings_count: responseRetrievalMeta.totalMeetingsCount,
             }
           : undefined,
+        agent_status: 'done' as const,
+        agent_plan: savedAgentPlan?.map(s => ({
+          id: s.id,
+          label: s.label,
+          status: s.status,
+          detail: s.detail,
+          type: s.type,
+          search_kind: s.searchKind,
+          search_query: s.searchQuery,
+          search_results: s.searchResults?.map(r => ({
+            meeting_id: r.meetingId,
+            meeting_title: r.meetingTitle,
+            score: r.score,
+          })),
+        })),
       };
 
       if (!selectedTask) {

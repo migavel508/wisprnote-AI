@@ -405,10 +405,11 @@ async function handleChat(method: string, userId: string, event: APIGatewayProxy
     const results: any[] = [];
     for (const m of messages) {
       const row = await queryOne(
-        `INSERT INTO chat_history (user_id, task_id, role, text, image, thread_id, citations, retrieval_meta)
-         VALUES ($1,$2,$3,$4,$5,$6,$7,$8) RETURNING *`,
+        `INSERT INTO chat_history (user_id, task_id, role, text, image, thread_id, citations, retrieval_meta, agent_status, agent_plan)
+         VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10) RETURNING *`,
         [userId, m.task_id || null, m.role, m.text, m.image || null, m.thread_id || null,
-         JSON.stringify(m.citations || []), JSON.stringify(m.retrieval_meta || {})]
+         JSON.stringify(m.citations || []), JSON.stringify(m.retrieval_meta || {}),
+         m.agent_status || null, JSON.stringify(m.agent_plan || [])]
       );
       results.push(row);
     }

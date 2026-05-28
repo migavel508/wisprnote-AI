@@ -276,6 +276,21 @@ export interface ChatMessage {
     covered_meetings_count?: number;
     total_meetings_count?: number;
   };
+  agent_status?: 'thinking' | 'planning' | 'executing' | 'done';
+  agent_plan?: Array<{
+    id: string;
+    label: string;
+    status: 'pending' | 'running' | 'done' | 'error';
+    detail?: string;
+    type?: 'search-tool';
+    search_kind?: 'notes' | 'people';
+    search_query?: string;
+    search_results?: Array<{
+      meeting_id: string;
+      meeting_title: string;
+      score: number;
+    }>;
+  }>;
 }
 
 export async function saveChatMessage(message: ChatMessage): Promise<ChatMessage> {
