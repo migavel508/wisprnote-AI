@@ -73,6 +73,7 @@ interface AgentStep {
   status: 'pending' | 'running' | 'done' | 'error';
   detail?: string;
   type?: 'search-tool';
+  searchKind?: 'notes' | 'people';
   searchQuery?: string;
   searchResults?: Array<{ meetingId: string; meetingTitle: string; score: number }>;
 }
@@ -180,7 +181,9 @@ function ThoughtProcess({ steps, isLive }: { steps: AgentStep[]; isLive: boolean
                           : 'text-zinc-500 dark:text-zinc-400'
                       }`}>
                         {step.type === 'search-tool'
-                          ? (step.status === 'running' ? 'Searching notes' : 'Searched notes')
+                          ? (step.searchKind === 'people'
+                              ? (step.status === 'running' ? 'Searching people' : 'Searched people')
+                              : (step.status === 'running' ? 'Searching notes' : 'Searched notes'))
                           : step.label}
                         {step.type === 'search-tool' && step.searchQuery && (
                           <span className="ml-1.5 text-zinc-400 dark:text-zinc-500 font-normal">

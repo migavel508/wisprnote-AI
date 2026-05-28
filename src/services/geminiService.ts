@@ -1222,7 +1222,17 @@ export interface AgentSearchStep {
   query: string;
   filters?: { recent_days?: number };
   status: 'running' | 'done';
+  kind?: 'notes' | 'contacts';
   results?: Array<{ meetingId: string; meetingTitle: string; score: number; date?: string }>;
+  contacts?: Array<{
+    name: string;
+    role?: string | null;
+    company?: string | null;
+    email?: string | null;
+    meeting_count: number;
+    task_ids: string[];
+    last_seen?: string;
+  }>;
 }
 
 export interface AgentChatCallbacks {
@@ -1233,6 +1243,14 @@ export interface AgentChatCallbacks {
     filters?: { recent_days?: number },
     limit?: number,
   ) => Promise<{ results: AgentSearchStep['results']; contextText: string }>;
+  contactsFn?: (
+    query: string,
+    limit?: number,
+  ) => Promise<{
+    contacts: NonNullable<AgentSearchStep['contacts']>;
+    meetings: NonNullable<AgentSearchStep['results']>;
+    contextText: string;
+  }>;
 }
 
 function scoreKeywordMatch(query: string, text: string): number {
@@ -1343,24 +1361,34 @@ export async function agentChatAllMeetings(
 Current week: ${weekStartLabel} – ${todayLabel} (Monday through today)
 
 You are WisprNote AI, a meeting intelligence assistant.
-You have access to ${meetings.length} meeting recordings via the search_notes tool.
+You have access to ${meetings.length} meeting recordings via the search_notes tool, plus a contacts directory via the search_contacts tool.
 
 Available meetings (newest first):
 ${meetingIndex}
 
 How to use the search_notes tool:
 - query: a topic/person/keyword string. LEAVE IT EMPTY ("") when the user is asking for a date-range listing such as "this week", "today", "yesterday", "last week", "summary of my week" — combine an empty query with filters.recent_days so the tool returns EVERY meeting in the range rather than only ones whose text happens to contain the word you searched for.
-- filters.recent_days: 1 = today, 2 = today + yesterday, 7 = this week / last 7 days, 14 = last 2 weeks, 30 = last month. For "this week" specifically use 7.
-- limit: pick a number that covers what the user asked for. For "summary of the week" or "all meetings", set limit to at least the number of meetings shown above for that window (max 10).
-- For person-specific questions, put the person's name in query (no date filter unless the user gave one).
+- filters.recent_days: 1 = today, 2 = today + yesterday, 7 = this week / last 7 days, 14 = last 2 weeks, 30 = last month. For "this week" specifically use 7. For "this month" use 30.
+- limit: pick a number that covers what the user asked for. For "summary of the week" or "all meetings", set limit to at least the number of meetings shown above for that window (max 10). When the topic could plausibly span multiple meetings, pass a higher limit (8–10) — semantic similarity will surface every meeting that discusses the topic, not just keyword matches.
+- search_notes uses Turbopuffer semantic similarity (ANN + BM25 hybrid) over transcript chunks, so it surfaces meetings that discuss the topic even when the wording differs from the query (e.g. "obsidian changes" finds meetings discussing "migrating notes into the vault" or "Granola export"). Always pick the higher limit when the question is open-ended like "what changes do I need to make on X" — the answer likely spans several meetings.
 - You may call search_notes multiple times: e.g. one empty-query date-range call to list all meetings, then targeted follow-up calls with specific names or topics.
 
+How to use the search_contacts tool (this is the AUTHORITATIVE tool for person queries):
+- query: a person's name, email fragment, role, or company.
+- limit: max contacts to return (default 5).
+- search_contacts cross-references TWO sources stored in AWS: (1) the People directory (auto-extracted contacts with meeting_count, task_ids, role, company, email, last_seen) AND (2) the Knowledge Graph per-meeting entries (topics, decisions, action_items, people-mentioned arrays). Names that appear only as third-party mentions inside transcripts are picked up via the Knowledge Graph branch even when the person isn't a contact.
+- The response includes, for EVERY meeting that person attended OR was mentioned in within the last 30 days: meeting title + date + task_id, the Knowledge Graph topics/decisions/action_items, the meeting NOTES, the SUMMARY, and a TRANSCRIPT excerpt. This is the COMPLETE evidence — you do not need a follow-up search_notes call for the same person.
+
 How to answer:
-1. ALWAYS call search_notes first. Never answer from memory.
-2. When summarizing a time window, call search_notes with query="" + the right recent_days + limit=10 first, so you actually see every meeting in scope.
-3. Only state facts found in the retrieved content — never invent or assume.
-4. If no relevant content is found, clearly say so.
-5. MEETING SUMMARIES are AI-generated and may contain errors. When a claim about a person's specific role, task ownership, or assignment comes only from a summary (no transcript evidence), add a brief caveat: "(from AI-generated summary — verify in transcript)". Never repeat a summary claim as a certain fact without transcript backup.`;
+1. ALWAYS call a search tool first. Never answer from memory.
+2. PERSON-SPECIFIC QUERIES (e.g. "how is Moulish doing", "what has X been working on", "performance of Y this month", "what did X say about Z", "summarize X's contributions"):
+   a. Call search_contacts(query=person_name) ONCE. That single call returns all the evidence you need.
+   b. Synthesize the answer DIRECTLY from the EVIDENCE blocks. Cover ALL the meetings listed there. Reference meeting titles when citing facts. Use the Knowledge Graph topics/decisions/action_items as your primary structure when relevant.
+   c. DO NOT call search_notes for the same person — it would only re-fetch a subset of what search_contacts already gave you, and it filters by transcript keyword match which drops meetings where the person attended but wasn't named in the text.
+3. When summarizing a time window without a specific person, call search_notes with query="" + the right recent_days + limit=10.
+4. Only state facts found in the retrieved content — never invent or assume.
+5. If search_contacts returns no matches, only then fall back to search_notes with the name as the query.
+6. MEETING SUMMARIES are AI-generated and may contain errors. When a claim about a person's specific role, task ownership, or assignment comes only from a summary (no transcript evidence), add a brief caveat: "(from AI-generated summary — verify in transcript)". Never repeat a summary claim as a certain fact without transcript backup.`;
 
   const searchTool = {
     functionDeclarations: [
@@ -1393,6 +1421,25 @@ How to answer:
             },
           },
           required: [],
+        },
+      },
+      {
+        name: 'search_contacts',
+        description:
+          'Look up people in the contacts directory by name, email, role, or company. Returns each match with their meeting_count, list of meeting IDs (task_ids), meeting titles + dates, and last_seen date. Call this FIRST whenever the user mentions a specific person — it gives you the authoritative list of meetings that person was in, instead of relying on keyword matches in transcripts.',
+        parameters: {
+          type: Type.OBJECT,
+          properties: {
+            query: {
+              type: Type.STRING,
+              description: "Person name, email fragment, role, or company to search.",
+            },
+            limit: {
+              type: Type.INTEGER,
+              description: 'Max contacts to return (1–10, default 5).',
+            },
+          },
+          required: ['query'],
         },
       },
     ],
@@ -1438,6 +1485,28 @@ How to answer:
           },
         },
       },
+      {
+        type: 'function',
+        function: {
+          name: 'search_contacts',
+          description:
+            'AUTHORITATIVE one-shot lookup for any person-specific query. Cross-references the People directory AND the Knowledge Graph in AWS. For each matched person, returns the FULL EVIDENCE (Knowledge Graph topics/decisions/action_items + meeting notes + summary + transcript excerpts) for every meeting they attended or were mentioned in within the last 30 days. After calling this, answer directly from the evidence — do NOT call search_notes for the same person.',
+          parameters: {
+            type: 'object',
+            properties: {
+              query: {
+                type: 'string',
+                description: "Person name, email fragment, role, or company to search.",
+              },
+              limit: {
+                type: 'integer',
+                description: 'Max contacts to return (1–10, default 5).',
+              },
+            },
+            required: ['query'],
+          },
+        },
+      },
     ];
 
     const messages: any[] = [
@@ -1452,7 +1521,7 @@ How to answer:
     const apiKey = getOpenRouterKey();
     if (!apiKey) throw new Error('VITE_OPENROUTER_API_KEY is not configured');
 
-    const SYNTH_NUDGE = 'You have searched enough. Now synthesize a direct answer from the evidence you retrieved. Use the meeting summaries and transcript excerpts. If information is incomplete, state what you found and note any gaps. Do NOT call search_notes again.';
+    const SYNTH_NUDGE = 'You have searched enough. Now synthesize a direct answer from the evidence you retrieved. Use the meeting summaries and transcript excerpts. If information is incomplete, state what you found and note any gaps. Do NOT call search_notes or search_contacts again.';
 
     for (let step = 0; step < MAX_STEPS; step++) {
       const isFinalStep = step === MAX_STEPS - 1;
@@ -1505,24 +1574,41 @@ How to answer:
 
       for (const tc of toolCalls) {
         const callId = `${callIndex++}`;
+        const toolName = tc.function?.name ?? 'search_notes';
         let args: any = {};
         try { args = JSON.parse(tc.function?.arguments ?? '{}'); } catch { /* ignore */ }
 
         const query: string = typeof args.query === 'string' ? args.query : '';
+        const limit: number = typeof args.limit === 'number' ? args.limit : 5;
+
+        if (toolName === 'search_contacts') {
+          log.debug('agent_tool_call_or', { callId, tool: 'search_contacts', query, limit });
+          callbacks.onToolCallStart({ callId, query, status: 'running', kind: 'contacts' });
+
+          const { contacts, meetings, contextText } = callbacks.contactsFn
+            ? await callbacks.contactsFn(query, limit)
+            : { contacts: [], meetings: [], contextText: 'No contacts directory available.' };
+
+          log.debug('agent_tool_result_or', { callId, tool: 'search_contacts', contactCount: contacts.length, meetingCount: meetings.length });
+          callbacks.onToolCallDone({ callId, query, status: 'done', kind: 'contacts', contacts, results: meetings });
+
+          messages.push({ role: 'tool', tool_call_id: tc.id, content: contextText });
+          continue;
+        }
+
         const filters: { recent_days?: number } | undefined =
           args.filters && typeof args.filters === 'object'
             ? { recent_days: typeof args.filters.recent_days === 'number' ? args.filters.recent_days : undefined }
             : undefined;
-        const limit: number = typeof args.limit === 'number' ? args.limit : 5;
 
-        log.debug('agent_tool_call_or', { callId, query, filters, limit });
-        callbacks.onToolCallStart({ callId, query, filters, status: 'running' });
+        log.debug('agent_tool_call_or', { callId, tool: 'search_notes', query, filters, limit });
+        callbacks.onToolCallStart({ callId, query, filters, status: 'running', kind: 'notes' });
 
         const doSearch = callbacks.searchFn ?? ((q, f, l) => executeSearchNotes(q, f, l ?? 5, meetings));
         const { results, contextText } = await doSearch(query, filters, limit);
 
         log.debug('agent_tool_result_or', { callId, resultCount: results?.length ?? 0 });
-        callbacks.onToolCallDone({ callId, query, filters, status: 'done', results });
+        callbacks.onToolCallDone({ callId, query, filters, status: 'done', kind: 'notes', results });
 
         messages.push({ role: 'tool', tool_call_id: tc.id, content: contextText });
       }
@@ -1537,7 +1623,7 @@ How to answer:
     { role: 'user', parts: [{ text: userQuery }] },
   ];
 
-  const SYNTH_NUDGE_GEMINI = 'You have searched enough. Now synthesize a direct answer from the evidence you retrieved. Use the meeting summaries and transcript excerpts. If information is incomplete, state what you found and note any gaps. Do NOT call search_notes again.';
+  const SYNTH_NUDGE_GEMINI = 'You have searched enough. Now synthesize a direct answer from the evidence you retrieved. Use the meeting summaries and transcript excerpts. If information is incomplete, state what you found and note any gaps. Do NOT call search_notes or search_contacts again.';
 
   for (let step = 0; step < MAX_STEPS; step++) {
     const isFinalStep = step === MAX_STEPS - 1;
@@ -1584,22 +1670,41 @@ How to answer:
       const fc = part.functionCall;
       if (!fc) continue;
       const callId = `${callIndex++}`;
+      const toolName: string = typeof fc.name === 'string' ? fc.name : 'search_notes';
       const query: string = typeof fc.args?.query === 'string' ? fc.args.query : '';
+      const limit: number = typeof fc.args?.limit === 'number' ? fc.args.limit : 5;
+
+      if (toolName === 'search_contacts') {
+        log.debug('agent_tool_call', { callId, tool: 'search_contacts', query, limit });
+        callbacks.onToolCallStart({ callId, query, status: 'running', kind: 'contacts' });
+
+        const { contacts, meetings, contextText } = callbacks.contactsFn
+          ? await callbacks.contactsFn(query, limit)
+          : { contacts: [], meetings: [], contextText: 'No contacts directory available.' };
+
+        log.debug('agent_tool_result', { callId, tool: 'search_contacts', contactCount: contacts.length, meetingCount: meetings.length });
+        callbacks.onToolCallDone({ callId, query, status: 'done', kind: 'contacts', contacts, results: meetings });
+
+        toolResponseParts.push({
+          functionResponse: { name: fc.name, response: { content: contextText } },
+        });
+        continue;
+      }
+
       const rawFilters = fc.args?.filters;
       const filters: { recent_days?: number } | undefined =
         rawFilters && typeof rawFilters === 'object' && !Array.isArray(rawFilters)
           ? { recent_days: typeof (rawFilters as any).recent_days === 'number' ? (rawFilters as any).recent_days : undefined }
           : undefined;
-      const limit: number = typeof fc.args?.limit === 'number' ? fc.args.limit : 5;
 
-      log.debug('agent_tool_call', { callId, query, filters, limit });
-      callbacks.onToolCallStart({ callId, query, filters, status: 'running' });
+      log.debug('agent_tool_call', { callId, tool: 'search_notes', query, filters, limit });
+      callbacks.onToolCallStart({ callId, query, filters, status: 'running', kind: 'notes' });
 
       const doSearch = callbacks.searchFn ?? ((q, f, l) => executeSearchNotes(q, f, l ?? 5, meetings));
       const { results, contextText } = await doSearch(query, filters, limit);
 
       log.debug('agent_tool_result', { callId, resultCount: results?.length ?? 0, contextLen: contextText.length });
-      callbacks.onToolCallDone({ callId, query, filters, status: 'done', results });
+      callbacks.onToolCallDone({ callId, query, filters, status: 'done', kind: 'notes', results });
 
       toolResponseParts.push({
         functionResponse: { name: fc.name, response: { content: contextText } },
