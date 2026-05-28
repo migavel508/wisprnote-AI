@@ -40,11 +40,11 @@ const assistantMarkdownComponents = {
   ul: ({ children }: { children?: React.ReactNode }) => (
     <ul className="my-2 list-disc pl-5 space-y-0.5">{children}</ul>
   ),
-  ol: ({ children }: { children?: React.ReactNode }) => (
-    <ol className="my-2 list-decimal pl-5 space-y-0.5">{children}</ol>
+  ol: ({ children, start }: { children?: React.ReactNode; start?: number }) => (
+    <ol start={start} className="my-2 list-decimal pl-5 space-y-0.5">{children}</ol>
   ),
-  li: ({ children }: { children?: React.ReactNode }) => (
-    <li className="text-[13px] leading-[1.7] text-zinc-700 dark:text-zinc-300">{children}</li>
+  li: ({ children, value }: { children?: React.ReactNode; value?: number }) => (
+    <li value={value} className="text-[13px] leading-[1.7] text-zinc-700 dark:text-zinc-300">{children}</li>
   ),
   p: ({ children }: { children?: React.ReactNode }) => (
     <p className="mb-2 last:mb-0 text-[13px] leading-[1.75] text-zinc-700 dark:text-zinc-300">{children}</p>

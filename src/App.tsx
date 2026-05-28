@@ -2606,18 +2606,58 @@ export default function App() {
           filters?: { recent_days?: number },
           limit?: number,
         ) => {
+          const hasDateFilter = !!(filters?.recent_days && filters.recent_days > 0);
           let docsToSearch = allMeetings;
-          if (filters?.recent_days && filters.recent_days > 0) {
-            const cutoff = Date.now() - filters.recent_days * 24 * 60 * 60 * 1000;
-            const filtered = allMeetings.filter(m => {
+          if (hasDateFilter) {
+            const cutoff = Date.now() - filters!.recent_days! * 24 * 60 * 60 * 1000;
+            docsToSearch = allMeetings.filter(m => {
               const date = dateMap.get(m.meetingId);
-              if (!date) return true;
+              if (!date) return false;
               return new Date(date).getTime() >= cutoff;
             });
-            if (filtered.length > 0) docsToSearch = filtered;
           }
 
-          const maxCandidates = limit ?? 5;
+          const maxCandidates = Math.min(Math.max(limit ?? 5, 1), 10);
+          const trimmedQuery = query.trim();
+
+          // ── Date-range listing mode (empty query) ─────────────────────────────────
+          // When the LLM passes query="" with a recent_days filter, the user is asking
+          // "show me everything in this window" — semantic/keyword scoring would just
+          // throw away meetings whose text doesn't contain a buzzword. Return them all
+          // sorted by date desc, with their notes/summaries as context.
+          if (trimmedQuery.length === 0) {
+            const sorted = docsToSearch
+              .slice()
+              .sort((a, b) => {
+                const da = dateMap.get(a.meetingId) ?? '';
+                const db = dateMap.get(b.meetingId) ?? '';
+                return db.localeCompare(da);
+              })
+              .slice(0, maxCandidates);
+
+            const sections = sorted.map((m, i) => {
+              const dateStr = dateMap.get(m.meetingId);
+              const dateLabel = dateStr
+                ? new Date(dateStr).toLocaleDateString('en-US', { weekday: 'short', month: 'short', day: 'numeric', year: 'numeric' })
+                : 'unknown date';
+              const content = (m.notes?.trim() || m.summary?.trim() || (m.transcription?.slice(0, 1800) ?? '')).trim();
+              return `${i + 1}. ${m.title} (${dateLabel})\n${content || '(no content available)'}`;
+            });
+
+            const rangeContext = [
+              `=== COVERAGE ===\nListed ${sorted.length} of ${docsToSearch.length} meetings in this date range (${allMeetings.length} total)`,
+              `=== MEETINGS ===\n${sections.join('\n\n---\n\n')}`,
+            ].join('\n\n');
+
+            const rangeResults = sorted.map(m => ({
+              meetingId: m.meetingId,
+              meetingTitle: m.title,
+              score: 1,
+              date: dateMap.get(m.meetingId),
+            }));
+
+            return { results: rangeResults, contextText: rangeContext };
+          }
           const docsById = new Map(docsToSearch.map(m => [m.meetingId, m]));
           let candidateDocs: MeetingDocument[] = [];
 

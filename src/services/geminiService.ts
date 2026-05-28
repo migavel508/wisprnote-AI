@@ -1253,27 +1253,43 @@ async function executeSearchNotes(
   allMeetings: SearchableMeeting[],
 ): Promise<{ results: AgentSearchStep['results']; contextText: string }> {
   let pool = allMeetings;
+  const hasDateFilter = !!(filters?.recent_days && filters.recent_days > 0);
 
-  if (filters?.recent_days && filters.recent_days > 0) {
-    const cutoff = Date.now() - filters.recent_days * 24 * 60 * 60 * 1000;
-    const filtered = allMeetings.filter(m => {
-      if (!m.createdAt) return true;
+  if (hasDateFilter) {
+    const cutoff = Date.now() - filters!.recent_days! * 24 * 60 * 60 * 1000;
+    pool = allMeetings.filter(m => {
+      if (!m.createdAt) return false;
       return new Date(m.createdAt).getTime() >= cutoff;
     });
-    if (filtered.length > 0) pool = filtered;
   }
 
-  const scored = pool
-    .map(m => {
-      const fullText = `${m.title} ${m.notes || ''} ${m.summary || ''} ${m.transcription}`;
-      return { m, score: scoreKeywordMatch(query, fullText) };
-    })
-    .sort((a, b) => b.score - a.score);
+  const cap = Math.min(Math.max(limit, 1), 10);
+  const trimmedQuery = query.trim();
+  let top: { m: SearchableMeeting; score: number }[];
 
-  const cap = Math.min(limit, 5);
-  let top = scored.filter(s => s.score > 0).slice(0, cap);
-  if (top.length === 0 && scored.length > 0) {
-    top = scored.slice(0, Math.min(cap, 3));
+  if (trimmedQuery.length === 0) {
+    top = pool
+      .slice()
+      .sort((a, b) => (b.createdAt ?? '').localeCompare(a.createdAt ?? ''))
+      .slice(0, cap)
+      .map(m => ({ m, score: 1 }));
+  } else {
+    const scored = pool
+      .map(m => {
+        const fullText = `${m.title} ${m.notes || ''} ${m.summary || ''} ${m.transcription}`;
+        return { m, score: scoreKeywordMatch(trimmedQuery, fullText) };
+      })
+      .sort((a, b) => b.score - a.score);
+
+    top = scored.filter(s => s.score > 0).slice(0, cap);
+    if (top.length === 0 && hasDateFilter && scored.length > 0) {
+      top = scored
+        .slice()
+        .sort((a, b) => (b.m.createdAt ?? '').localeCompare(a.m.createdAt ?? ''))
+        .slice(0, cap);
+    } else if (top.length === 0 && scored.length > 0) {
+      top = scored.slice(0, Math.min(cap, 3));
+    }
   }
 
   const contextParts = top.map(({ m }) => {
@@ -1303,20 +1319,28 @@ export async function agentChatAllMeetings(
   meetings: SearchableMeeting[],
   callbacks: AgentChatCallbacks,
 ): Promise<string> {
-  const today = new Date().toLocaleDateString('en-US', { year: 'numeric', month: 'long', day: 'numeric' });
+  const now = new Date();
+  const today = now.toLocaleDateString('en-US', { year: 'numeric', month: 'long', day: 'numeric', weekday: 'long' });
+  const dayOfWeek = now.getDay();
+  const daysSinceMonday = (dayOfWeek + 6) % 7;
+  const weekStart = new Date(now);
+  weekStart.setDate(now.getDate() - daysSinceMonday);
+  const weekStartLabel = weekStart.toLocaleDateString('en-US', { month: 'short', day: 'numeric' });
+  const todayLabel = now.toLocaleDateString('en-US', { month: 'short', day: 'numeric' });
 
   const meetingIndex = meetings
     .slice()
     .sort((a, b) => (b.createdAt ?? '').localeCompare(a.createdAt ?? ''))
     .map((m, i) => {
       const date = m.createdAt
-        ? new Date(m.createdAt).toLocaleDateString('en-US', { month: 'short', day: 'numeric', year: 'numeric' })
+        ? new Date(m.createdAt).toLocaleDateString('en-US', { weekday: 'short', month: 'short', day: 'numeric', year: 'numeric' })
         : 'unknown date';
       return `${i + 1}. "${m.title}" (${date})`;
     })
     .join('\n');
 
   const systemInstruction = `Today's date: ${today}
+Current week: ${weekStartLabel} – ${todayLabel} (Monday through today)
 
 You are WisprNote AI, a meeting intelligence assistant.
 You have access to ${meetings.length} meeting recordings via the search_notes tool.
@@ -1324,28 +1348,33 @@ You have access to ${meetings.length} meeting recordings via the search_notes to
 Available meetings (newest first):
 ${meetingIndex}
 
+How to use the search_notes tool:
+- query: a topic/person/keyword string. LEAVE IT EMPTY ("") when the user is asking for a date-range listing such as "this week", "today", "yesterday", "last week", "summary of my week" — combine an empty query with filters.recent_days so the tool returns EVERY meeting in the range rather than only ones whose text happens to contain the word you searched for.
+- filters.recent_days: 1 = today, 2 = today + yesterday, 7 = this week / last 7 days, 14 = last 2 weeks, 30 = last month. For "this week" specifically use 7.
+- limit: pick a number that covers what the user asked for. For "summary of the week" or "all meetings", set limit to at least the number of meetings shown above for that window (max 10).
+- For person-specific questions, put the person's name in query (no date filter unless the user gave one).
+- You may call search_notes multiple times: e.g. one empty-query date-range call to list all meetings, then targeted follow-up calls with specific names or topics.
+
 How to answer:
 1. ALWAYS call search_notes first. Never answer from memory.
-2. For time-based queries ("recent", "last week", "today"), set filters.recent_days appropriately (7 = last week, 1 = today, 30 = last month).
-3. For person-specific queries, include the person's full name in the query.
-4. Search multiple times with different queries if the first result is insufficient.
-5. Only state facts found in the retrieved content — never invent or assume.
-6. If no relevant content is found, clearly say so.
-7. MEETING SUMMARIES are AI-generated and may contain errors. When a claim about a person's specific role, task ownership, or assignment comes only from a summary (no transcript evidence), add a brief caveat: "(from AI-generated summary — verify in transcript)". Never repeat a summary claim as a certain fact without transcript backup.`;
+2. When summarizing a time window, call search_notes with query="" + the right recent_days + limit=10 first, so you actually see every meeting in scope.
+3. Only state facts found in the retrieved content — never invent or assume.
+4. If no relevant content is found, clearly say so.
+5. MEETING SUMMARIES are AI-generated and may contain errors. When a claim about a person's specific role, task ownership, or assignment comes only from a summary (no transcript evidence), add a brief caveat: "(from AI-generated summary — verify in transcript)". Never repeat a summary claim as a certain fact without transcript backup.`;
 
   const searchTool = {
     functionDeclarations: [
       {
         name: 'search_notes',
         description:
-          'Search meeting notes and transcripts. Returns matching meeting content. Use date filters for time-specific queries like "recent" or "last week".',
+          'Search meeting notes and transcripts. Pass an empty query with filters.recent_days to list every meeting in a date range (e.g. "this week", "today"). Pass a topic or person name to find specific content.',
         parameters: {
           type: Type.OBJECT,
           properties: {
             query: {
               type: Type.STRING,
               description:
-                "Text to search for. Include person names, topics, or keywords. Required even if using date filters — use an empty string to list by date only.",
+                'Text to search for: person name, topic, or keyword. Pass an empty string ("") to list meetings by date only.',
             },
             filters: {
               type: Type.OBJECT,
@@ -1354,16 +1383,16 @@ How to answer:
                 recent_days: {
                   type: Type.INTEGER,
                   description:
-                    'Return only meetings from the last N days. Use 1 for today, 7 for last week, 30 for last month.',
+                    'Return only meetings from the last N days (counts back from today, inclusive). Use 1 for today, 2 for today+yesterday, 7 for this week / last 7 days, 14 for last two weeks, 30 for last month.',
                 },
               },
             },
             limit: {
               type: Type.INTEGER,
-              description: 'Max meetings to return (1–5, default 3)',
+              description: 'Max meetings to return (1–10, default 5). For "summary of the week" / "all meetings", pass 10.',
             },
           },
-          required: ['query'],
+          required: [],
         },
       },
     ],
@@ -1381,14 +1410,14 @@ How to answer:
         function: {
           name: 'search_notes',
           description:
-            'Search meeting notes and transcripts. Returns matching meeting content. Use date filters for time-specific queries like "recent" or "last week".',
+            'Search meeting notes and transcripts. Pass an empty query with filters.recent_days to list every meeting in a date range (e.g. "this week", "today"). Pass a topic or person name to find specific content.',
           parameters: {
             type: 'object',
             properties: {
               query: {
                 type: 'string',
                 description:
-                  'Text to search for. Include person names, topics, or keywords.',
+                  'Text to search for: person name, topic, or keyword. Pass an empty string ("") to list meetings by date only.',
               },
               filters: {
                 type: 'object',
@@ -1396,16 +1425,16 @@ How to answer:
                   recent_days: {
                     type: 'integer',
                     description:
-                      'Return only meetings from the last N days. Use 1 for today, 7 for last week, 30 for last month.',
+                      'Return only meetings from the last N days (counts back from today, inclusive). Use 1 for today, 2 for today+yesterday, 7 for this week / last 7 days, 14 for last two weeks, 30 for last month.',
                   },
                 },
               },
               limit: {
                 type: 'integer',
-                description: 'Max meetings to return (1–5, default 3)',
+                description: 'Max meetings to return (1–10, default 5). For "summary of the week" / "all meetings", pass 10.',
               },
             },
-            required: ['query'],
+            required: [],
           },
         },
       },
@@ -1484,12 +1513,12 @@ How to answer:
           args.filters && typeof args.filters === 'object'
             ? { recent_days: typeof args.filters.recent_days === 'number' ? args.filters.recent_days : undefined }
             : undefined;
-        const limit: number = typeof args.limit === 'number' ? args.limit : 3;
+        const limit: number = typeof args.limit === 'number' ? args.limit : 5;
 
         log.debug('agent_tool_call_or', { callId, query, filters, limit });
         callbacks.onToolCallStart({ callId, query, filters, status: 'running' });
 
-        const doSearch = callbacks.searchFn ?? ((q, f, l) => executeSearchNotes(q, f, l ?? 3, meetings));
+        const doSearch = callbacks.searchFn ?? ((q, f, l) => executeSearchNotes(q, f, l ?? 5, meetings));
         const { results, contextText } = await doSearch(query, filters, limit);
 
         log.debug('agent_tool_result_or', { callId, resultCount: results?.length ?? 0 });
@@ -1561,12 +1590,12 @@ How to answer:
         rawFilters && typeof rawFilters === 'object' && !Array.isArray(rawFilters)
           ? { recent_days: typeof (rawFilters as any).recent_days === 'number' ? (rawFilters as any).recent_days : undefined }
           : undefined;
-      const limit: number = typeof fc.args?.limit === 'number' ? fc.args.limit : 3;
+      const limit: number = typeof fc.args?.limit === 'number' ? fc.args.limit : 5;
 
       log.debug('agent_tool_call', { callId, query, filters, limit });
       callbacks.onToolCallStart({ callId, query, filters, status: 'running' });
 
-      const doSearch = callbacks.searchFn ?? ((q, f, l) => executeSearchNotes(q, f, l ?? 3, meetings));
+      const doSearch = callbacks.searchFn ?? ((q, f, l) => executeSearchNotes(q, f, l ?? 5, meetings));
       const { results, contextText } = await doSearch(query, filters, limit);
 
       log.debug('agent_tool_result', { callId, resultCount: results?.length ?? 0, contextLen: contextText.length });
