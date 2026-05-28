@@ -6,9 +6,8 @@ const env = (import.meta as any).env || {};
 import { motion, AnimatePresence } from 'framer-motion';
 import ForceGraph2D from 'react-force-graph-2d';
 import { 
-  Search, 
-  Send, 
-  Loader2, 
+  Search,
+  Loader2,
   X, 
   Network, 
   Layout, 
@@ -38,7 +37,6 @@ import {
   buildGraphData as buildGraphDataUtil,
   findRelatedMeetings as findRelatedMeetingsUtil,
   searchNodes,
-  buildChatContext,
 } from '../lib/knowledgeGraph.utils';
 import { buildFingerprint, loadCachedArtifact, saveCachedArtifact } from '../lib/kgArtifactCache';
 import { useTheme } from '../theme/ThemeProvider';
@@ -71,10 +69,6 @@ export default function KnowledgePage({
   const [searchQuery, setSearchQuery] = useState('');
   const [searchResults, setSearchResults] = useState<any[]>([]);
   const [isSearching, setIsSearching] = useState(false);
-  const [chatMessages, setChatMessages] = useState<Array<{ role: 'user' | 'assistant'; content: string }>>([]);
-  const [chatInput, setChatInput] = useState('');
-  const [isChatting, setIsChatting] = useState(false);
-  const [showChat, setShowChat] = useState(false);
   const [filterType, setFilterType] = useState<string | null>(null);
   /** meetings-only graph vs full detail (topics, people, …) */
   const [graphViewMode, setGraphViewMode] = useState<'overview' | 'full'>('overview');
@@ -88,7 +82,6 @@ export default function KnowledgePage({
 
   const kgContainerRef = useRef<HTMLDivElement>(null);
   const graphRef = useRef<any>(null);
-  const chatEndRef = useRef<HTMLDivElement>(null);
   /** Kept in React state (not a ref) so graph data / related-meeting chips re-render when cache or pipeline finishes. */
   const [kgBuildArtifact, setKgBuildArtifact] = useState<KGBuildArtifact | null>(null);
   const [isEmbedding, setIsEmbedding] = useState(false);
@@ -188,13 +181,6 @@ export default function KnowledgePage({
     void run();
     return () => { cancelled = true; };
   }, [kgBuilt, kgDataKey]);
-
-  // Scroll chat to bottom
-  useEffect(() => {
-    if (chatEndRef.current) {
-      chatEndRef.current.scrollIntoView({ behavior: 'smooth' });
-    }
-  }, [chatMessages]);
 
   // Build graph data using the artifact from the embedding pipeline
   // Falls back to a basic graph (no embedding features) while pipeline runs
@@ -496,97 +482,6 @@ export default function KnowledgePage({
     );
   };
 
-  // Chat with knowledge graph
-  const handleChatSubmit = async () => {
-    if (!chatInput.trim() || isChatting) return;
-
-    const userMessage = chatInput.trim();
-    setChatInput('');
-    setChatMessages(prev => [...prev, { role: 'user', content: userMessage }]);
-    setIsChatting(true);
-
-    try {
-      const systemPrompt = kgBuildArtifact
-        ? buildChatContext(
-            kgData as MeetingRecord[],
-            kgBuildArtifact.meetingEdgeMatrix,
-            kgBuildArtifact.relationships
-          )
-        : `You are a helpful assistant that answers questions about the user's meeting knowledge graph.\n${kgData.map((m: any, i: number) => `Meeting ${i + 1}: ${m.meetingTitle}\n- Topics: ${(m.topics || []).map((t: any) => `${t.name} (${t.status}): ${t.summary}`).join('; ') || 'None'}\n- Decisions: ${(m.decisions || []).map((d: any) => d.decision).join('; ') || 'None'}\n- People: ${(m.people || []).join(', ') || 'None'}\n- Actions: ${(m.actionItems || []).map((a: any) => `${a.owner}: ${a.task}`).join('; ') || 'None'}`).join('\n\n')}\n\nAnswer the user's question based on this data. Be concise and helpful.`;
-
-      const aiProvider = env.VITE_AI_PROVIDER || process.env.VITE_AI_PROVIDER || 'gemini';
-      let assistantMessage: string;
-
-      const historyForApi = chatMessages.slice(-10).map(m => ({
-        role: m.role === 'assistant' ? 'model' as const : m.role as 'user',
-        content: m.content,
-      }));
-
-      if (aiProvider === 'openrouter') {
-        const openRouterKey = env.VITE_OPENROUTER_API_KEY || process.env.VITE_OPENROUTER_API_KEY;
-        if (!openRouterKey) throw new Error('Missing OpenRouter API key');
-
-        const response = await fetch('https://openrouter.ai/api/v1/chat/completions', {
-          method: 'POST',
-          headers: {
-            'Authorization': `Bearer ${openRouterKey}`,
-            'Content-Type': 'application/json',
-            'HTTP-Referer': window.location.origin,
-            'X-Title': 'Lumina AI',
-          },
-          body: JSON.stringify({
-            model: 'google/gemini-3-flash-preview',
-            messages: [
-              { role: 'system', content: systemPrompt },
-              ...historyForApi.map(m => ({ role: m.role === 'model' ? 'assistant' : m.role, content: m.content })),
-              { role: 'user', content: userMessage },
-            ],
-            temperature: 0.15,
-            max_tokens: 2400,
-          })
-        });
-
-        const data = await response.json();
-        assistantMessage = data.choices?.[0]?.message?.content || 'Sorry, I could not generate a response.';
-      } else {
-        const geminiApiKey = env.VITE_GEMINI_API_KEY || env.GEMINI_API_KEY || process.env.GEMINI_API_KEY;
-        if (!geminiApiKey) throw new Error('Missing Gemini API key');
-
-        const geminiHistory = historyForApi.map(m => ({
-          role: m.role === 'model' ? 'model' : 'user',
-          parts: [{ text: m.content }],
-        }));
-
-        const response = await fetch(
-          `https://generativelanguage.googleapis.com/v1beta/models/gemini-3-flash-preview:generateContent?key=${geminiApiKey}`,
-          {
-            method: 'POST',
-            headers: { 'Content-Type': 'application/json' },
-            body: JSON.stringify({
-              contents: [
-                { role: 'user', parts: [{ text: systemPrompt }] },
-                { role: 'model', parts: [{ text: 'I understand. I will help answer questions about your meeting knowledge graph based on the data provided. I will only state facts supported by the data.' }] },
-                ...geminiHistory,
-                { role: 'user', parts: [{ text: userMessage }] }
-              ],
-              generationConfig: { temperature: 0.15, maxOutputTokens: 2400 }
-            })
-          }
-        );
-
-        const data = await response.json();
-        assistantMessage = data.candidates?.[0]?.content?.parts?.[0]?.text || 'Sorry, I could not generate a response.';
-      }
-      
-      setChatMessages(prev => [...prev, { role: 'assistant', content: assistantMessage }]);
-    } catch (error) {
-      log.error('chat_failed', { error: error instanceof Error ? error : undefined });
-      setChatMessages(prev => [...prev, { role: 'assistant', content: 'Sorry, there was an error processing your question.' }]);
-    } finally {
-      setIsChatting(false);
-    }
-  };
-
   // Node type colors for legend
   const nodeTypes = [
     { type: 'meeting', color: '#475569', label: 'Meeting', shape: 'large' },
@@ -653,17 +548,6 @@ export default function KnowledgePage({
                 </div>
               )}
             </div>
-
-            {/* Chat Toggle */}
-            <button
-              onClick={() => setShowChat(!showChat)}
-              className={`px-3 sm:px-4 py-2 text-[10px] sm:text-xs font-mono uppercase tracking-wider flex items-center gap-1.5 sm:gap-2 rounded-lg transition-colors flex-shrink-0 ${
-                showChat ? 'bg-[#141414] dark:bg-zinc-100 text-white dark:text-zinc-900' : 'border border-zinc-300/80 dark:border-app-border text-zinc-700 dark:text-app-fg-muted hover:bg-zinc-50 dark:hover:bg-app-chip'
-              }`}
-            >
-              <Sparkles className="w-3.5 sm:w-4 h-3.5 sm:h-4" />
-              <span className="hidden sm:inline">Chat</span>
-            </button>
 
             {/* Build/Rebuild Button */}
             <button 
@@ -1130,101 +1014,9 @@ export default function KnowledgePage({
           )}
         </div>
 
-        {/* Chat Panel - Bottom Sheet on Mobile, Side Panel on Desktop */}
-        <AnimatePresence>
-          {showChat && kgBuilt && (
-            <>
-              {/* Mobile Backdrop */}
-              <motion.div
-                initial={{ opacity: 0 }}
-                animate={{ opacity: 1 }}
-                exit={{ opacity: 0 }}
-                className="fixed inset-0 bg-black/30 z-30 sm:hidden"
-                onClick={() => setShowChat(false)}
-              />
-              
-              {/* Chat Panel */}
-              <motion.div
-                initial={{ y: '100%', opacity: 0 }}
-                animate={{ y: 0, opacity: 1 }}
-                exit={{ y: '100%', opacity: 0 }}
-                transition={{ type: 'spring', damping: 25, stiffness: 300 }}
-                className="fixed bottom-0 left-0 right-0 sm:relative sm:bottom-auto sm:left-auto sm:right-auto w-full sm:w-[380px] h-[70vh] sm:h-auto max-h-[70vh] sm:max-h-none flex-shrink-0 border-t sm:border-t-0 sm:border-l border-zinc-200 dark:border-app-border bg-app-panel dark:bg-app-raised flex flex-col z-40 sm:z-20 rounded-t-2xl sm:rounded-none shadow-[0_-4px_30px_rgba(0,0,0,0.15)] sm:shadow-[0_0_15px_rgba(0,0,0,0.05)] dark:sm:shadow-[0_0_20px_rgba(0,0,0,0.4)]"
-              >
-                {/* Drag Handle - Mobile Only */}
-                <div className="flex justify-center py-2 sm:hidden">
-                  <div className="w-10 h-1 bg-zinc-300 dark:bg-zinc-600 rounded-full" />
-                </div>
-                
-                <div className="flex-none px-4 py-3 border-b border-zinc-100 dark:border-app-border flex items-center justify-between">
-                  <div className="flex items-center gap-2">
-                    <Sparkles className="w-4 h-4 text-purple-500 dark:text-purple-400" />
-                    <span className="text-sm font-bold text-zinc-900 dark:text-app-fg">Chat with Knowledge</span>
-                  </div>
-                  <button onClick={() => setShowChat(false)} className="p-1.5 hover:bg-zinc-100 dark:hover:bg-app-chip rounded-lg text-zinc-700 dark:text-app-fg">
-                    <X className="w-4 h-4" />
-                  </button>
-                </div>
-
-                {/* Chat Messages */}
-                <div className="flex-1 overflow-y-auto p-4 space-y-3">
-                  {chatMessages.length === 0 && (
-                    <div className="text-center py-6">
-                      <Sparkles className="w-8 h-8 mx-auto mb-3 text-zinc-300 dark:text-zinc-600" />
-                      <p className="text-sm text-zinc-600 dark:text-zinc-300">Ask questions about your meetings</p>
-                      <p className="text-xs text-zinc-500 dark:text-zinc-400 mt-1">e.g., "What decisions were made?"</p>
-                    </div>
-                  )}
-                  {chatMessages.map((msg, idx) => (
-                    <div key={idx} className={`flex ${msg.role === 'user' ? 'justify-end' : 'justify-start'}`}>
-                      <div className={`max-w-[85%] px-3 py-2 rounded-2xl text-sm ${
-                        msg.role === 'user' 
-                          ? 'bg-zinc-900 text-white dark:bg-zinc-100 dark:text-zinc-900 rounded-br-md' 
-                          : 'bg-zinc-100 dark:bg-app-chip text-zinc-800 dark:text-app-fg rounded-bl-md'
-                      }`}>
-                        {msg.content}
-                      </div>
-                    </div>
-                  ))}
-                  {isChatting && (
-                    <div className="flex justify-start">
-                      <div className="bg-zinc-100 dark:bg-app-chip px-4 py-3 rounded-2xl rounded-bl-md text-zinc-700 dark:text-app-fg">
-                        <Loader2 className="w-4 h-4 animate-spin" />
-                      </div>
-                    </div>
-                  )}
-                  <div ref={chatEndRef} />
-                </div>
-
-                {/* Chat Input */}
-                <div className="flex-none p-3 sm:p-4 border-t border-zinc-100 dark:border-app-border bg-app-panel dark:bg-app-raised">
-                  <div className="flex items-center gap-2">
-                    <input
-                      type="text"
-                      value={chatInput}
-                      onChange={(e) => setChatInput(e.target.value)}
-                      onKeyDown={(e) => e.key === 'Enter' && handleChatSubmit()}
-                      placeholder="Ask about your meetings..."
-                      className="flex-1 px-4 py-2.5 border border-zinc-200 dark:border-app-border rounded-full text-sm outline-none focus:border-zinc-900 dark:focus:border-zinc-300 bg-zinc-50 dark:bg-app-canvas text-zinc-900 dark:text-app-fg placeholder:text-zinc-400 dark:placeholder:text-zinc-500"
-                      disabled={isChatting}
-                    />
-                    <button
-                      onClick={handleChatSubmit}
-                      disabled={isChatting || !chatInput.trim()}
-                      className="p-2.5 bg-zinc-900 text-white dark:bg-zinc-100 dark:text-zinc-900 rounded-full disabled:opacity-30 hover:bg-zinc-800 dark:hover:bg-white transition-colors"
-                    >
-                      <Send className="w-4 h-4" />
-                    </button>
-                  </div>
-                </div>
-              </motion.div>
-            </>
-          )}
-        </AnimatePresence>
-
         {/* Node Detail Panel - Bottom Sheet on Mobile */}
         <AnimatePresence>
-          {selectedNode && !showChat && (
+          {selectedNode && (
             <>
               {/* Mobile Backdrop */}
               <motion.div
