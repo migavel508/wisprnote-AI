@@ -1,5 +1,5 @@
 import { Turbopuffer } from '@turbopuffer/turbopuffer';
-import { fetch as tauriFetch } from '@tauri-apps/plugin-http';
+import { aiProxyFetch } from './aiProxyService';
 import { logger } from '../lib/logger';
 import {
   getTurbopufferIndexedSet,
@@ -13,24 +13,17 @@ const log = logger.scope('Turbopuffer');
 const NAMESPACE = 'lumina-meetings';
 const RRF_K = 60;
 
-function getTurbopufferApiKey(): string {
-  return (
-    (import.meta as any).env?.VITE_TURBOPUFFER_API_KEY ||
-    process.env.TURBOPUFFER_API_KEY ||
-    ''
-  );
-}
-
 let _client: Turbopuffer | null = null;
 
 function getClient(): Turbopuffer {
   if (!_client) {
-    const apiKey = getTurbopufferApiKey();
-    if (!apiKey) throw new Error('VITE_TURBOPUFFER_API_KEY is not configured');
+    // The real Turbopuffer key lives server-side. aiProxyFetch reroutes every
+    // *.turbopuffer.com request through our authed Lambda proxy, which injects
+    // the key — so the placeholder key below is never sent to Turbopuffer.
     _client = new Turbopuffer({
-      apiKey,
+      apiKey: 'proxied-via-lambda',
       region: 'gcp-us-central1',
-      fetch: tauriFetch as unknown as typeof globalThis.fetch,
+      fetch: aiProxyFetch,
     });
   }
   return _client;
@@ -41,7 +34,8 @@ function getNamespace() {
 }
 
 export function isTurbopufferConfigured(): boolean {
-  return !!getTurbopufferApiKey();
+  // Always available now — auth is handled server-side by the proxy.
+  return true;
 }
 
 // ─── Indexing ────────────────────────────────────────────────────────────────

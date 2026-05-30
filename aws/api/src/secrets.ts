@@ -15,6 +15,11 @@ import { SecretsManagerClient, GetSecretValueCommand } from '@aws-sdk/client-sec
 export interface ApiSecrets {
   DB_PASSWORD: string;
   RESEND_API_KEY: string;
+  // AI provider keys — held server-side so they never ship in the client bundle.
+  GEMINI_API_KEY: string;
+  DEEPGRAM_API_KEY: string;
+  OPENROUTER_API_KEY: string;
+  TURBOPUFFER_API_KEY: string;
 }
 
 const SECRET_ID = process.env.API_SECRETS_ID || 'wisprnote/prod/api';
@@ -29,6 +34,10 @@ export function getSecrets(): Promise<ApiSecrets> {
       const fallback: ApiSecrets = {
         DB_PASSWORD: process.env.DB_PASSWORD || '',
         RESEND_API_KEY: process.env.RESEND_API_KEY || '',
+        GEMINI_API_KEY: process.env.GEMINI_API_KEY || '',
+        DEEPGRAM_API_KEY: process.env.DEEPGRAM_API_KEY || '',
+        OPENROUTER_API_KEY: process.env.OPENROUTER_API_KEY || '',
+        TURBOPUFFER_API_KEY: process.env.TURBOPUFFER_API_KEY || '',
       };
       try {
         const resp = await client.send(new GetSecretValueCommand({ SecretId: SECRET_ID }));
@@ -37,6 +46,10 @@ export function getSecrets(): Promise<ApiSecrets> {
           return {
             DB_PASSWORD: parsed.DB_PASSWORD || fallback.DB_PASSWORD,
             RESEND_API_KEY: parsed.RESEND_API_KEY || fallback.RESEND_API_KEY,
+            GEMINI_API_KEY: parsed.GEMINI_API_KEY || fallback.GEMINI_API_KEY,
+            DEEPGRAM_API_KEY: parsed.DEEPGRAM_API_KEY || fallback.DEEPGRAM_API_KEY,
+            OPENROUTER_API_KEY: parsed.OPENROUTER_API_KEY || fallback.OPENROUTER_API_KEY,
+            TURBOPUFFER_API_KEY: parsed.TURBOPUFFER_API_KEY || fallback.TURBOPUFFER_API_KEY,
           };
         }
       } catch (e) {

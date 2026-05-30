@@ -13,11 +13,15 @@ export default defineConfig(({mode}) => {
   return {
     plugins: [react(), tailwindcss()],
     define: {
-      'process.env.GEMINI_API_KEY': JSON.stringify(getEnv('GEMINI_API_KEY')),
-      'process.env.TURBOPUFFER_API_KEY': JSON.stringify(getEnv('VITE_TURBOPUFFER_API_KEY')),
+      // Provider API keys are NO LONGER injected into the client bundle — all
+      // provider calls go through the authenticated Lambda proxy, which reads the
+      // real keys from Secrets Manager server-side. Only non-secret config below.
       'process.env.VITE_AI_PROVIDER': JSON.stringify(getEnv('VITE_AI_PROVIDER', 'gemini')),
-      'process.env.VITE_OPENROUTER_API_KEY': JSON.stringify(getEnv('VITE_OPENROUTER_API_KEY')),
       'process.env.VITE_OPENROUTER_EMBED_MODEL': JSON.stringify(getEnv('VITE_OPENROUTER_EMBED_MODEL')),
+      'process.env.VITE_OPENROUTER_IMAGE_MODEL': JSON.stringify(getEnv('VITE_OPENROUTER_IMAGE_MODEL')),
+      // Defined as empty so the (dormant) Gemini SDK reference compiles without a
+      // runtime error — the real key is NEVER bundled; calls go via the proxy.
+      'process.env.GEMINI_API_KEY': JSON.stringify(''),
       'import.meta.env.VITE_AWS_REGION': JSON.stringify(getEnv('VITE_AWS_REGION', 'us-east-1')),
       'import.meta.env.VITE_COGNITO_USER_POOL_ID': JSON.stringify(getEnv('VITE_COGNITO_USER_POOL_ID')),
       'import.meta.env.VITE_COGNITO_CLIENT_ID': JSON.stringify(getEnv('VITE_COGNITO_CLIENT_ID')),

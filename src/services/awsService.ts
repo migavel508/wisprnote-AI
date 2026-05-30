@@ -143,7 +143,26 @@ export async function getTaskById(taskId: string): Promise<TaskHistory | null> {
   try {
     // Larger timeout: a task row carries the full transcription/notes, which can
     // be sizable for long meetings and slow to transfer over a cold connection.
+    // NOTE: this no longer includes visualization_image — fetch that lazily via
+    // getTaskVisualization() only when the Notes tab actually needs it.
     return await apiRequest<TaskHistory>('GET', `/tasks/${taskId}`, undefined, true, 30000);
+  } catch (e: any) {
+    if (e.status === 404) return null;
+    throw e;
+  }
+}
+
+/**
+ * Fetches just the (heavy, base64) visualization image for a task. Kept separate
+ * from getTaskById so the image is only transferred when the user views it,
+ * instead of bloating every note open.
+ */
+export async function getTaskVisualization(taskId: string): Promise<string | null> {
+  try {
+    const res = await apiRequest<{ visualization_image: string | null }>(
+      'GET', `/tasks/${taskId}/visualization`, undefined, true, 30000
+    );
+    return res?.visualization_image ?? null;
   } catch (e: any) {
     if (e.status === 404) return null;
     throw e;

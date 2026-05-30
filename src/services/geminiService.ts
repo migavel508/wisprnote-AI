@@ -1,12 +1,16 @@
 import { GoogleGenAI, GenerateContentResponse, Type } from "@google/genai";
 import { fetch as tauriFetch } from '@tauri-apps/plugin-http';
+import { aiProxyFetch } from './aiProxyService';
 import { AudioBatch, blobToBase64, BlobReadError } from "./audioService";
 import { logger } from '../lib/logger';
 import { formatDisplayName } from '../lib/displayName';
 
 const log = logger.scope('Gemini');
 
-const GEMINI_API_KEY = process.env.GEMINI_API_KEY || "";
+// No real key on the client — Gemini calls are proxied through the authed
+// Lambda (aiProxyFetch / geminiGenerateContentRest), which injects the key
+// server-side. The SDK instance is kept only for type/shape compatibility.
+const GEMINI_API_KEY = "proxied-via-lambda";
 const ai = new GoogleGenAI({ apiKey: GEMINI_API_KEY });
 
 // In the Tauri desktop app, route large uploads (inline audio) through the Rust
@@ -24,7 +28,8 @@ const httpFetch: typeof globalThis.fetch = isTauri
  * minimal shape (`text` + `candidates`) the rest of the code expects.
  */
 async function geminiGenerateContentRest(requestOptions: any, timeoutMs = 120000): Promise<GenerateContentResponse> {
-  if (!GEMINI_API_KEY) throw new Error('GEMINI_API_KEY is not configured');
+  // Auth (the Gemini key) is injected server-side by the authed proxy, so no
+  // client-side key is needed here.
 
   const url = `https://generativelanguage.googleapis.com/v1beta/models/${encodeURIComponent(requestOptions.model)}:generateContent`;
   const body: any = { contents: requestOptions.contents };
@@ -46,9 +51,11 @@ async function geminiGenerateContentRest(requestOptions: any, timeoutMs = 120000
   const timer = setTimeout(() => controller.abort(), timeoutMs);
   let resp: Response;
   try {
-    resp = await httpFetch(url, {
+    // aiProxyFetch reroutes this generativelanguage.googleapis.com request
+    // through the authed Lambda proxy, which injects the Gemini key server-side.
+    resp = await aiProxyFetch(url, {
       method: 'POST',
-      headers: { 'Content-Type': 'application/json', 'x-goog-api-key': GEMINI_API_KEY },
+      headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify(body),
       signal: controller.signal,
     });
@@ -87,8 +94,10 @@ function getProvider(): AIProvider {
 }
 
 function getOpenRouterKey(): string {
-  return (import.meta as any).env?.VITE_OPENROUTER_API_KEY ||
-    process.env.VITE_OPENROUTER_API_KEY || '';
+  // The real OpenRouter key is injected server-side by the authed proxy and no
+  // longer ships in the bundle. Return a non-empty placeholder so existing
+  // "key configured" guards pass; aiProxyFetch ignores this client-side value.
+  return 'proxied-via-lambda';
 }
 
 function toOpenRouterModel(model: string): string {
@@ -126,7 +135,9 @@ async function fetchWithTimeout(
   const timer = setTimeout(() => controller.abort(), timeoutMs);
 
   try {
-    return await fetch(input, { ...init, signal: controller.signal });
+    // aiProxyFetch transparently reroutes provider hosts (OpenRouter, Gemini,
+    // Turbopuffer) through the authed Lambda proxy; other URLs pass through.
+    return await aiProxyFetch(input, { ...init, signal: controller.signal });
   } catch (e: any) {
     const isAbort = e?.name === 'AbortError' || controller.signal.aborted;
     if (isAbort) {
@@ -415,8 +426,8 @@ async function generateImageWithOpenRouter(prompt: string): Promise<string | nul
 }
 
 function getApiKey(): string {
-  return (process.env.GEMINI_API_KEY as string) ||
-    ((import.meta as any).env?.VITE_GEMINI_API_KEY ?? '');
+  // Real key injected server-side by the authed proxy; never bundled.
+  return 'proxied-via-lambda';
 }
 
 // Utility to try a model and fallback if it fails (e.g. 503 Service Unavailable)
@@ -2081,7 +2092,7 @@ export async function extractKnowledgeGraph(meetingId: string, meetingTitle: str
   }
 
   const provider = getProvider();
-  const geminiApiKey = (import.meta as any).env?.VITE_GEMINI_API_KEY || (import.meta as any).env?.GEMINI_API_KEY || process.env.GEMINI_API_KEY;
+  const geminiApiKey = 'proxied-via-lambda'; // injected server-side by the proxy; never bundled
   const openRouterKey = getOpenRouterKey();
   
   if (provider === 'gemini' && !geminiApiKey) {
