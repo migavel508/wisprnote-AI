@@ -58,6 +58,33 @@ export async function cacheGet<T>(key: string): Promise<T | null> {
   }
 }
 
+/**
+ * Returns cached data ONLY if it was written within `maxAgeMs`; otherwise null.
+ * This is the cautious primitive for "skip the network if the cache is still
+ * fresh" — it never serves indefinitely stale data, so callers can avoid a
+ * redundant cloud request without risking a perpetually outdated UI.
+ */
+export async function cacheGetFresh<T>(key: string, maxAgeMs: number): Promise<T | null> {
+  try {
+    const db = await openDb();
+    return new Promise((resolve, reject) => {
+      const tx = db.transaction(STORE, 'readonly');
+      const r = tx.objectStore(STORE).get(key);
+      r.onsuccess = () => {
+        const row = r.result as CacheRecord | undefined;
+        if (!row || Date.now() - row.updatedAt > maxAgeMs) {
+          resolve(null);
+          return;
+        }
+        resolve(row.data as T);
+      };
+      r.onerror = () => reject(r.error);
+    });
+  } catch {
+    return null;
+  }
+}
+
 export async function cacheSet(key: string, data: unknown): Promise<void> {
   const db = await openDb();
   return new Promise((resolve, reject) => {
@@ -97,6 +124,7 @@ export async function cacheClearUser(userId: string): Promise<void> {
     `notes:${userId}`,
     `kg:${userId}`,
     `meta:${userId}`,
+    `contacts:${userId}`,
     'chat:all-meetings',
   ]);
   for (const id of taskIds) {

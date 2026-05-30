@@ -1,11 +1,81 @@
 import { GoogleGenAI, GenerateContentResponse, Type } from "@google/genai";
+import { fetch as tauriFetch } from '@tauri-apps/plugin-http';
 import { AudioBatch, blobToBase64, BlobReadError } from "./audioService";
 import { logger } from '../lib/logger';
 import { formatDisplayName } from '../lib/displayName';
 
 const log = logger.scope('Gemini');
 
-const ai = new GoogleGenAI({ apiKey: process.env.GEMINI_API_KEY || "" });
+const GEMINI_API_KEY = process.env.GEMINI_API_KEY || "";
+const ai = new GoogleGenAI({ apiKey: GEMINI_API_KEY });
+
+// In the Tauri desktop app, route large uploads (inline audio) through the Rust
+// HTTP stack instead of the WebView's fetch. WebKit drops big multi-MB request
+// bodies with "Load failed" / "connection lost"; the Rust client doesn't.
+const isTauri = typeof window !== 'undefined' && !!(window as any).__TAURI_INTERNALS__;
+const httpFetch: typeof globalThis.fetch = isTauri
+  ? (tauriFetch as unknown as typeof globalThis.fetch)
+  : globalThis.fetch;
+
+/**
+ * Calls the Gemini generateContent REST endpoint directly via the Tauri HTTP
+ * plugin (Rust networking). Used for the audio-transcription batches whose large
+ * inline-base64 payloads fail through the WebView's fetch. Returns the same
+ * minimal shape (`text` + `candidates`) the rest of the code expects.
+ */
+async function geminiGenerateContentRest(requestOptions: any, timeoutMs = 120000): Promise<GenerateContentResponse> {
+  if (!GEMINI_API_KEY) throw new Error('GEMINI_API_KEY is not configured');
+
+  const url = `https://generativelanguage.googleapis.com/v1beta/models/${encodeURIComponent(requestOptions.model)}:generateContent`;
+  const body: any = { contents: requestOptions.contents };
+  const cfg = requestOptions.config;
+  if (cfg) {
+    if (cfg.systemInstruction) {
+      body.systemInstruction = typeof cfg.systemInstruction === 'string'
+        ? { parts: [{ text: cfg.systemInstruction }] }
+        : cfg.systemInstruction;
+    }
+    const gen: any = {};
+    if (cfg.temperature !== undefined) gen.temperature = cfg.temperature;
+    if (cfg.maxOutputTokens !== undefined) gen.maxOutputTokens = cfg.maxOutputTokens;
+    if (cfg.responseMimeType) gen.responseMimeType = cfg.responseMimeType;
+    if (Object.keys(gen).length) body.generationConfig = gen;
+  }
+
+  const controller = new AbortController();
+  const timer = setTimeout(() => controller.abort(), timeoutMs);
+  let resp: Response;
+  try {
+    resp = await httpFetch(url, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json', 'x-goog-api-key': GEMINI_API_KEY },
+      body: JSON.stringify(body),
+      signal: controller.signal,
+    });
+  } catch (e: any) {
+    const aborted = e?.name === 'AbortError' || controller.signal.aborted;
+    const err: any = new Error(aborted
+      ? `Gemini request timed out after ${Math.round(timeoutMs / 1000)}s`
+      : `Network error: ${e?.message || 'fetch failed'}`);
+    err.status = 0;
+    err.code = aborted ? 'TIMEOUT' : 'NETWORK';
+    throw err;
+  } finally {
+    clearTimeout(timer);
+  }
+
+  if (!resp.ok) {
+    const errText = await resp.text();
+    const error: any = new Error(`Gemini error (${resp.status}): ${errText}`);
+    error.status = resp.status;
+    throw error;
+  }
+
+  const data = await resp.json();
+  const parts = data.candidates?.[0]?.content?.parts ?? [];
+  const text = parts.map((p: any) => (typeof p.text === 'string' ? p.text : '')).join('');
+  return { text, candidates: data.candidates } as any;
+}
 
 // ─── AI Provider Configuration ───────────────────────────────────────────────
 type AIProvider = 'gemini' | 'openrouter';
@@ -352,7 +422,10 @@ function getApiKey(): string {
 // Utility to try a model and fallback if it fails (e.g. 503 Service Unavailable)
 async function generateWithFallback(
   requestOptions: any,
-  fallbackModels: string[] = ["gemini-3.1-flash-lite"]
+  fallbackModels: string[] = ["gemini-3.1-flash-lite"],
+  // When true, Gemini calls go through the Tauri HTTP plugin instead of the SDK
+  // (for large inline-audio uploads that the WebView fetch can't handle).
+  useRestTransport = false,
 ): Promise<GenerateContentResponse> {
   const provider = getProvider();
   let lastError: Error | null = null;
@@ -366,7 +439,9 @@ async function generateWithFallback(
       return await withRetry(
         () => provider === 'openrouter'
           ? callOpenRouter({ ...requestOptions, model })
-          : ai.models.generateContent({ ...requestOptions, model }),
+          : useRestTransport
+            ? geminiGenerateContentRest({ ...requestOptions, model })
+            : ai.models.generateContent({ ...requestOptions, model }),
         retries
       );
     } catch (error: any) {
@@ -444,24 +519,28 @@ ${prompt ? `Additional context (domain vocabulary to look out for): ${prompt}` :
 
 Now transcribe the spoken audio verbatim. If no speech is present, return empty text. Do not apologize or explain — just output the transcript:`;
 
-  const response = await generateWithFallback({
-    model: "gemini-3-flash-preview",
-    contents: [
-      {
-        parts: [
-          {
-            inlineData: {
-              mimeType: batch.mimeType,
-              data: base64Data,
+  const response = await generateWithFallback(
+    {
+      model: "gemini-3-flash-preview",
+      contents: [
+        {
+          parts: [
+            {
+              inlineData: {
+                mimeType: batch.mimeType,
+                data: base64Data,
+              },
             },
-          },
-          {
-            text: transcriptionPrompt,
-          },
-        ],
-      },
-    ],
-  });
+            {
+              text: transcriptionPrompt,
+            },
+          ],
+        },
+      ],
+    },
+    undefined,
+    true, // route the large inline-audio upload through the Tauri HTTP plugin
+  );
 
   return {
     text: response.text || "",
@@ -990,6 +1069,8 @@ export interface AgentPlan {
   intent: string;
   scope: 'single' | 'many';
   isBroad: boolean;
+  /** 1–3 short, human-readable steps describing how the assistant will answer. */
+  plan: string[];
 }
 
 export async function agentPlanQuery(
@@ -1010,25 +1091,35 @@ Your job is to deeply understand exactly what the user is asking for — not mor
 Output ONLY valid JSON (no markdown fences):
 {
   "intent": "<precise, actionable 1-sentence description that captures EXACTLY what the user wants — include the specific deliverable, scope, and any constraints they mentioned>",
-  "isBroad": ${isSingleMeeting ? 'false' : '<true if the user explicitly or implicitly wants to cover ALL/EVERY meeting, or asks for exhaustive cross-meeting analysis like "key topics from all meetings" or "summarize everything". false if they want specific information that likely lives in a few meetings>'}
+  "isBroad": ${isSingleMeeting ? 'false' : '<true if the user explicitly or implicitly wants to cover ALL/EVERY meeting, or asks for exhaustive cross-meeting analysis like "key topics from all meetings" or "summarize everything". false if they want specific information that likely lives in a few meetings>'},
+  "plan": ["<step 1>", "<step 2>"]
 }
 
 CRITICAL RULES for intent:
 - Preserve the user's exact scope: if they say "key topics" write "key topics", not "decisions" or "action items"
 - If they say "all meetings", the intent MUST reflect covering ALL meetings, not a subset
 - If they ask for one specific thing (e.g. "key topics"), do NOT expand it to multiple things (e.g. don't add "decisions, action items, and next steps")
-- The intent should be a direct instruction that could be given to another AI to execute`,
-      maxOutputTokens: 200,
+- The intent should be a direct instruction that could be given to another AI to execute
+
+RULES for plan (1–3 short steps, each ≤ 12 words, describing HOW you'll answer):
+- Name the retrieval approach concretely. For a date window (e.g. "this month") say e.g. "List every meeting from the last 30 days". For a person say "Look up <name> in the contacts directory". For a topic say "Search notes for <topic> across meetings".
+- Then a synthesis step, e.g. "Summarize the key themes across all of them".
+- Be specific to THIS request — do not write generic filler.`,
+      maxOutputTokens: 260,
     },
   });
 
   try {
     const raw = (response.text || '').replace(/```json\s*/gi, '').replace(/```\s*/gi, '').trim();
     const parsed = JSON.parse(raw);
+    const plan = Array.isArray(parsed.plan)
+      ? parsed.plan.filter((s: unknown): s is string => typeof s === 'string' && s.trim().length > 0).slice(0, 3)
+      : [];
     return {
       intent: parsed.intent || userQuery,
       scope: isSingleMeeting ? 'single' : 'many',
       isBroad: !!parsed.isBroad,
+      plan,
     };
   } catch {
     const broadPatterns = [
@@ -1042,6 +1133,7 @@ CRITICAL RULES for intent:
       intent: userQuery,
       scope: isSingleMeeting ? 'single' : 'many',
       isBroad,
+      plan: ['Search the relevant meeting notes', 'Synthesize a direct answer from what I find'],
     };
   }
 }
@@ -1236,6 +1328,8 @@ export interface AgentSearchStep {
 }
 
 export interface AgentChatCallbacks {
+  /** Fired once, before any tool call, with the assistant's plan for this query. */
+  onPlan?: (plan: { intent: string; steps: string[] }) => void;
   onToolCallStart: (step: AgentSearchStep) => void;
   onToolCallDone: (step: AgentSearchStep) => void;
   searchFn?: (
@@ -1286,10 +1380,11 @@ async function executeSearchNotes(
   let top: { m: SearchableMeeting; score: number }[];
 
   if (trimmedQuery.length === 0) {
+    // Date-range listing: return EVERY meeting in the window (no top-N cap), so
+    // recaps like "this month" cover all meetings rather than just 10.
     top = pool
       .slice()
       .sort((a, b) => (b.createdAt ?? '').localeCompare(a.createdAt ?? ''))
-      .slice(0, cap)
       .map(m => ({ m, score: 1 }));
   } else {
     const scored = pool
@@ -1357,7 +1452,7 @@ export async function agentChatAllMeetings(
     })
     .join('\n');
 
-  const systemInstruction = `Today's date: ${today}
+  let systemInstruction = `Today's date: ${today}
 Current week: ${weekStartLabel} – ${todayLabel} (Monday through today)
 
 You are WisprNote AI, a meeting intelligence assistant.
@@ -1367,9 +1462,9 @@ Available meetings (newest first):
 ${meetingIndex}
 
 How to use the search_notes tool:
-- query: a topic/person/keyword string. LEAVE IT EMPTY ("") when the user is asking for a date-range listing such as "this week", "today", "yesterday", "last week", "summary of my week" — combine an empty query with filters.recent_days so the tool returns EVERY meeting in the range rather than only ones whose text happens to contain the word you searched for.
-- filters.recent_days: 1 = today, 2 = today + yesterday, 7 = this week / last 7 days, 14 = last 2 weeks, 30 = last month. For "this week" specifically use 7. For "this month" use 30.
-- limit: pick a number that covers what the user asked for. For "summary of the week" or "all meetings", set limit to at least the number of meetings shown above for that window (max 10). When the topic could plausibly span multiple meetings, pass a higher limit (8–10) — semantic similarity will surface every meeting that discusses the topic, not just keyword matches.
+- query: a topic/person/keyword string. LEAVE IT EMPTY ("") when the user is asking for a date-range listing such as "this week", "today", "yesterday", "last week", "this month", "summary of my week/month" — combine an empty query with filters.recent_days. An empty-query listing returns EVERY meeting in the range (the limit is ignored for listings), so you always get the COMPLETE set — even if that's 30+ meetings — not a truncated top-10.
+- filters.recent_days: 1 = today, 2 = today + yesterday, 7 = this week / last 7 days, 14 = last 2 weeks, 30 = last month. For "this week" specifically use 7. For "this month" use 30 (or 31). A recap of "the whole month" MUST use an empty query + recent_days so nothing is dropped.
+- limit: ONLY applies to topic/keyword searches (non-empty query); it caps how many semantically-matching meetings come back (1–10). It does NOT cap empty-query date-range listings — those always return everything in the window. When a topic could span multiple meetings, pass a higher limit (8–10).
 - search_notes uses Turbopuffer semantic similarity (ANN + BM25 hybrid) over transcript chunks, so it surfaces meetings that discuss the topic even when the wording differs from the query (e.g. "obsidian changes" finds meetings discussing "migrating notes into the vault" or "Granola export"). Always pick the higher limit when the question is open-ended like "what changes do I need to make on X" — the answer likely spans several meetings.
 - You may call search_notes multiple times: e.g. one empty-query date-range call to list all meetings, then targeted follow-up calls with specific names or topics.
 
@@ -1385,7 +1480,7 @@ How to answer:
    a. Call search_contacts(query=person_name) ONCE. That single call returns all the evidence you need.
    b. Synthesize the answer DIRECTLY from the EVIDENCE blocks. Cover ALL the meetings listed there. Reference meeting titles when citing facts. Use the Knowledge Graph topics/decisions/action_items as your primary structure when relevant.
    c. DO NOT call search_notes for the same person — it would only re-fetch a subset of what search_contacts already gave you, and it filters by transcript keyword match which drops meetings where the person attended but wasn't named in the text.
-3. When summarizing a time window without a specific person, call search_notes with query="" + the right recent_days + limit=10.
+3. When summarizing a time window without a specific person (e.g. "recap this month"), call search_notes with query="" + the right recent_days. The listing returns ALL meetings in that window — cover every one of them in your answer.
 4. Only state facts found in the retrieved content — never invent or assume.
 5. If search_contacts returns no matches, only then fall back to search_notes with the name as the query.
 6. MEETING SUMMARIES are AI-generated and may contain errors. When a claim about a person's specific role, task ownership, or assignment comes only from a summary (no transcript evidence), add a brief caveat: "(from AI-generated summary — verify in transcript)". Never repeat a summary claim as a certain fact without transcript backup.`;
@@ -1417,7 +1512,7 @@ How to answer:
             },
             limit: {
               type: Type.INTEGER,
-              description: 'Max meetings to return (1–10, default 5). For "summary of the week" / "all meetings", pass 10.',
+              description: 'Caps topic/keyword searches only (1–10, default 5). IGNORED for empty-query date-range listings, which always return every meeting in the window.',
             },
           },
           required: [],
@@ -1444,6 +1539,20 @@ How to answer:
       },
     ],
   };
+
+  // ── Think first: produce a short plan before acting ─────────────────────────
+  // A single cheap classifier call decides intent + the concrete steps. We show
+  // it to the user (onPlan) AND feed it back to the agent so it executes the
+  // plan instead of jumping straight into an arbitrary tool call.
+  try {
+    const plan = await agentPlanQuery(userQuery, meetings.map(m => m.title), false);
+    if (plan.plan.length > 0) {
+      callbacks.onPlan?.({ intent: plan.intent, steps: plan.plan });
+      systemInstruction += `\n\nYOUR PLAN FOR THIS REQUEST (follow it):\n- Goal: ${plan.intent}\n${plan.plan.map((s, i) => `- Step ${i + 1}: ${s}`).join('\n')}`;
+    }
+  } catch (e) {
+    log.warn('agent_plan_failed', { error: e instanceof Error ? e : undefined });
+  }
 
   const recentHistory = trimHistoryToTokenBudget(history, 1200);
   const MAX_STEPS = 5;
@@ -1478,7 +1587,7 @@ How to answer:
               },
               limit: {
                 type: 'integer',
-                description: 'Max meetings to return (1–10, default 5). For "summary of the week" / "all meetings", pass 10.',
+                description: 'Caps topic/keyword searches only (1–10, default 5). IGNORED for empty-query date-range listings, which always return every meeting in the window.',
               },
             },
             required: [],

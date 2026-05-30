@@ -4,6 +4,7 @@ import { query, queryOne, queryCount } from './db';
 import { ok, created, noContent, badRequest, notFound, unauthorized, serverError, corsPreflightResponse } from './response';
 import { S3Client, PutObjectCommand } from '@aws-sdk/client-s3';
 import { getSignedUrl } from '@aws-sdk/s3-request-presigner';
+import { getSecrets } from './secrets';
 
 const S3_BUCKET = process.env.S3_BUCKET || '';
 const S3_REGION = process.env.AWS_REGION || 'us-east-1';
@@ -21,7 +22,6 @@ void (async () => {
 })();
 
 const FROM_EMAIL = process.env.SES_FROM_EMAIL || 'noreply@wisprnote.com';
-const RESEND_API_KEY = process.env.RESEND_API_KEY || '';
 const SITE_URL = (process.env.WISPRNOTE_PUBLIC_URL || 'https://www.wisprnote.com').replace(/\/$/, '');
 
 const COGNITO_USER_POOL_ID = process.env.COGNITO_USER_POOL_ID || '';
@@ -152,6 +152,7 @@ async function sendShareInviteEmails(options: {
 
   const text = `${sharedBy} shared a meeting with you on Wisprnote AI\n\nMeeting: ${options.meetingTitle}\n\nView it here: ${shareUrl}`;
 
+  const { RESEND_API_KEY } = await getSecrets();
   const results = await Promise.allSettled(
     options.to.map(email =>
       fetch('https://api.resend.com/emails', {
@@ -255,7 +256,10 @@ async function handleTasks(method: string, segments: string[], userId: string, e
     }
 
     const total = await queryCount(`SELECT COUNT(*) FROM task_history WHERE ${whereClause}`, params);
-    const fields = full ? '*' : 'id, created_at, filename, summary, status, duration';
+    // Include attendees in the lightweight payload so the People chip renders on
+    // first paint instead of waiting for the per-task detail fetch. It's a small
+    // JSONB column (GIN-indexed) so it adds negligible cost to the list query.
+    const fields = full ? '*' : 'id, created_at, filename, summary, status, duration, attendees';
     const rows = await query(
       `SELECT ${fields} FROM task_history WHERE ${whereClause} ORDER BY created_at DESC LIMIT $${params.length + 1} OFFSET $${params.length + 2}`,
       [...params, pageSize, page * pageSize]
