@@ -389,11 +389,15 @@ export default function WorkspacePage({ allTasks, onSelectTask }: WorkspacePageP
           return;
         }
 
-        const wsMeetings = await getWorkspaceMeetings(activeWs.id);
         const folders = foldersByWs[activeWs.id] || [];
-        const folderResults = await Promise.all(
-          folders.map(f => getFolderMeetings(f.id).then(list => ({ folderId: f.id, list })).catch(() => ({ folderId: f.id, list: [] as WorkspaceMeeting[] })))
-        );
+        // Fetch the workspace's own meetings and every folder's meetings in ONE
+        // parallel batch (was: ws call awaited first, then a second await wave).
+        const [wsMeetings, folderResults] = await Promise.all([
+          getWorkspaceMeetings(activeWs.id),
+          Promise.all(
+            folders.map(f => getFolderMeetings(f.id).then(list => ({ folderId: f.id, list })).catch(() => ({ folderId: f.id, list: [] as WorkspaceMeeting[] })))
+          ),
+        ]);
         const folderMap: Record<string, string> = {};
         const merged: Record<string, WorkspaceMeeting> = {};
         for (const m of wsMeetings) merged[m.id] = m;
@@ -413,7 +417,11 @@ export default function WorkspacePage({ allTasks, onSelectTask }: WorkspacePageP
       }
     };
     run();
-  }, [activeWs?.id, activeFolder?.id, foldersByWs]);
+    // Depend on THIS workspace's folder list (stable) rather than the whole
+    // foldersByWs object, whose identity changes when the mount prefetch resolves
+    // — that previously triggered a redundant second N+1 reload of every folder.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [activeWs?.id, activeFolder?.id, foldersByWs[activeWs?.id ?? '']]);
 
   // Click-outside for header menu
   useEffect(() => {
@@ -782,13 +790,24 @@ export default function WorkspacePage({ allTasks, onSelectTask }: WorkspacePageP
                   <div key={label} className="mb-3">
                     <div className="px-3 py-1.5 text-[11px] text-app-fg-subtle tracking-tight">{label}</div>
                     {items.map(m => {
-                      const task = allTasks.find(t => t.id === m.id);
+                      // Use the loaded history entry when available, otherwise build
+                      // a minimal task from the workspace meeting itself. Workspace
+                      // meetings frequently live outside the paginated history, and
+                      // requiring them to be present made those rows un-openable.
+                      const task: TaskHistory = allTasks.find(t => t.id === m.id) ?? {
+                        id: m.id,
+                        filename: m.filename,
+                        created_at: m.created_at,
+                        duration: m.duration,
+                        status: (m.status === 'error' ? 'error' : 'completed'),
+                        summary: m.summary ?? undefined,
+                      };
                       const folderId = activeFolder?.id ?? meetingFolderMap[m.id] ?? null;
                       return (
                         <NoteRow
                           key={m.id}
                           meeting={m}
-                          onSelect={() => task && onSelectTask(task)}
+                          onSelect={() => onSelectTask(task)}
                           onRemove={() => handleRemoveMeeting(m.id)}
                           workspaces={workspaces}
                           foldersByWs={foldersByWs}

@@ -1,26 +1,31 @@
 import { Pool } from 'pg';
+import { getSecrets } from './secrets';
 
-let pool: Pool | null = null;
+let poolPromise: Promise<Pool> | null = null;
 
-export function getPool(): Pool {
-  if (!pool) {
-    pool = new Pool({
-      host: process.env.DB_HOST,
-      port: parseInt(process.env.DB_PORT || '5432', 10),
-      database: process.env.DB_NAME || 'wisprnote',
-      user: process.env.DB_USER,
-      password: process.env.DB_PASSWORD,
-      ssl: { rejectUnauthorized: false },
-      max: 5,
-      idleTimeoutMillis: 60000,
-      connectionTimeoutMillis: 10000,
-    });
+async function getPool(): Promise<Pool> {
+  if (!poolPromise) {
+    poolPromise = (async () => {
+      const { DB_PASSWORD } = await getSecrets();
+      return new Pool({
+        host: process.env.DB_HOST,
+        port: parseInt(process.env.DB_PORT || '5432', 10),
+        database: process.env.DB_NAME || 'wisprnote',
+        user: process.env.DB_USER,
+        password: DB_PASSWORD,
+        ssl: { rejectUnauthorized: false },
+        max: 5,
+        idleTimeoutMillis: 60000,
+        connectionTimeoutMillis: 10000,
+      });
+    })();
   }
-  return pool;
+  return poolPromise;
 }
 
 export async function query<T = any>(text: string, values?: any[]): Promise<T[]> {
-  const result = await getPool().query(text, values);
+  const pool = await getPool();
+  const result = await pool.query(text, values);
   return result.rows as T[];
 }
 

@@ -13,6 +13,7 @@
     {
       "identifier": "http:default",
       "allow": [
+        { "url": "https://generativelanguage.googleapis.com/**" },
         { "url": "https://*.turbopuffer.com/**" },
         { "url": "https://*.supabase.co/**" },
         { "url": "https://*.execute-api.*.amazonaws.com/**" },

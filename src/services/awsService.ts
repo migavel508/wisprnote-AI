@@ -15,7 +15,8 @@ async function apiRequest<T = any>(
   method: string,
   path: string,
   body?: any,
-  requireAuth = true
+  requireAuth = true,
+  timeoutMs = 20000
 ): Promise<T> {
   const headers: Record<string, string> = {
     'Content-Type': 'application/json',
@@ -27,11 +28,30 @@ async function apiRequest<T = any>(
   }
 
   const url = `${API_BASE}${path}`;
-  const resp = await httpFetch(url, {
-    method,
-    headers,
-    body: body ? JSON.stringify(body) : undefined,
-  });
+  // Abort the request if it stalls — a hung fetch (cold start, flaky network)
+  // otherwise leaves the UI spinning forever. The caller can retry.
+  const controller = new AbortController();
+  const timer = setTimeout(() => controller.abort(), timeoutMs);
+  let resp: Response;
+  try {
+    resp = await httpFetch(url, {
+      method,
+      headers,
+      body: body ? JSON.stringify(body) : undefined,
+      signal: controller.signal,
+    });
+  } catch (err: any) {
+    if (err?.name === 'AbortError') {
+      throw Object.assign(new Error(`Request timed out after ${timeoutMs}ms`), {
+        isTimeout: true,
+        status: 0,
+        statusCode: 0,
+      });
+    }
+    throw err;
+  } finally {
+    clearTimeout(timer);
+  }
 
   if (!resp.ok) {
     const errorText = await resp.text();
@@ -79,6 +99,9 @@ export interface TaskMetadata {
   summary?: string;
   status: 'completed' | 'error';
   duration: number;
+  // Returned by the lightweight list so the People chip can render immediately,
+  // before the full per-task detail fetch completes.
+  attendees?: string[];
 }
 
 export async function saveTask(task: TaskHistory): Promise<TaskHistory> {
@@ -118,7 +141,9 @@ export async function getTasksLightweight(
 
 export async function getTaskById(taskId: string): Promise<TaskHistory | null> {
   try {
-    return await apiRequest<TaskHistory>('GET', `/tasks/${taskId}`);
+    // Larger timeout: a task row carries the full transcription/notes, which can
+    // be sizable for long meetings and slow to transfer over a cold connection.
+    return await apiRequest<TaskHistory>('GET', `/tasks/${taskId}`, undefined, true, 30000);
   } catch (e: any) {
     if (e.status === 404) return null;
     throw e;
@@ -282,7 +307,7 @@ export interface ChatMessage {
     label: string;
     status: 'pending' | 'running' | 'done' | 'error';
     detail?: string;
-    type?: 'search-tool';
+    type?: 'search-tool' | 'plan';
     search_kind?: 'notes' | 'people';
     search_query?: string;
     search_results?: Array<{
@@ -290,6 +315,7 @@ export interface ChatMessage {
       meeting_title: string;
       score: number;
     }>;
+    plan_steps?: string[];
   }>;
 }
 

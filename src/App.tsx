@@ -72,6 +72,7 @@ import {
   indexMeetingTranscription,
   backfillExistingMeetings,
   isTurbopufferConfigured,
+  isAlreadyIndexed,
   embedQuery,
   queryHybrid,
 } from './services/turbopufferService';
@@ -172,10 +173,11 @@ interface AgentStep {
   label: string;
   status: 'pending' | 'running' | 'done' | 'error';
   detail?: string;
-  type?: 'search-tool';
+  type?: 'search-tool' | 'plan';
   searchKind?: 'notes' | 'people';
   searchQuery?: string;
   searchResults?: Array<{ meetingId: string; meetingTitle: string; score: number }>;
+  planSteps?: string[];
 }
 
 interface Message {
@@ -369,6 +371,10 @@ export default function App() {
   const [realtimeTranscript, setRealtimeTranscript] = useState<string[]>([]);
   const [interimTranscript, setInterimTranscript] = useState('');
   const unlistenRef = useRef<(() => void) | null>(null);
+  // Mirrors the live agent thought-process steps so it can be persisted reliably
+  // (React setState updaters run async, so reading it back inline was racy and
+  // dropped agent_plan from the saved message — making the steps vanish on reload).
+  const liveAgentPlanRef = useRef<AgentStep[] | undefined>(undefined);
   const realtimeTranscriptRef = useRef<string[]>([]);
   const isRealtimePausedRef = useRef(false);
   const pausedBatchSegmentsRef = useRef<File[]>([]);
@@ -389,6 +395,15 @@ export default function App() {
   const [totalHistoryCount, setTotalHistoryCount] = useState(0);
   const historyPageRef = useRef(0);
   const HISTORY_PAGE_SIZE = 24;
+  // Max WAV size per batch chunk. Large uploads now go through the Tauri HTTP
+  // plugin (Rust networking, see geminiService), which handles big payloads
+  // reliably — so we use large chunks again: far fewer Gemini calls per file
+  // (~4 chunks for a 30-min recording instead of ~14) = much faster batches.
+  // MUST be identical at every splitAudio call site so resume / blob-eviction
+  // re-split produce the same chunk boundaries.
+  // Capped at 12 MB: base64 inflates ~1.33×, so 12 MB → ~16 MB, safely under
+  // Gemini's ~20 MB inline-request limit (15 MB would land right at the edge).
+  const BATCH_CHUNK_SIZE_MB = 12;
   const [chatMessages, setChatMessages] = useState<Message[]>([]);
   const [allMeetingsChatMessages, setAllMeetingsChatMessages] = useState<Message[]>([]);
   const [chatThreads, setChatThreads] = useState<ChatThread[]>(() => {
@@ -439,10 +454,27 @@ export default function App() {
           setIsLoadingTaskDetails(false);
           return;
         }
-        const full = await getTaskById(selectedTask.id!);
+
+        // Retry with backoff so a stalled/slow fetch (cold start, flaky network,
+        // large transcription) recovers on its own instead of leaving the
+        // "Loading transcription…" spinner stuck forever.
+        const MAX_ATTEMPTS = 3;
+        let full: TaskHistory | null = null;
+        for (let attempt = 1; attempt <= MAX_ATTEMPTS && !cancelled; attempt++) {
+          try {
+            full = await getTaskById(selectedTask.id!);
+            break;
+          } catch (err: any) {
+            if (err?.status === 404) throw err; // genuinely missing — don't retry
+            if (attempt === MAX_ATTEMPTS) throw err;
+            log.warn('fetch_task_details_retry', { attempt, error: err instanceof Error ? err : undefined });
+            await new Promise(r => setTimeout(r, 800 * attempt));
+          }
+        }
+
         if (cancelled || !full) return;
-        setHistory(prev => prev.map(t => t.id === full.id ? { ...t, ...full } : t));
-        setSelectedTask(prev => prev?.id === full.id ? { ...prev, ...full } : prev);
+        setHistory(prev => prev.map(t => t.id === full!.id ? { ...t, ...full } : t));
+        setSelectedTask(prev => prev?.id === full!.id ? { ...prev, ...full } : prev);
         if (full.id) await cacheSet(`task:${full.id}`, full);
       } catch (err) {
         log.error('fetch_task_details_failed', { error: err instanceof Error ? err : undefined });
@@ -831,6 +863,7 @@ export default function App() {
                   score: r.score,
                 }))
               : undefined,
+            planSteps: Array.isArray(s.plan_steps) ? s.plan_steps : undefined,
           }))
         : undefined,
     }));
@@ -2487,11 +2520,14 @@ export default function App() {
     setChatInput('');
     setIsChatting(true);
 
+    liveAgentPlanRef.current = undefined;
     const updateAgentMessage = (updater: (prev: Message) => Partial<Message>) => {
       setChatMessages(prev => {
         const last = prev[prev.length - 1];
         if (last?.role === 'model' && last.agentStatus) {
           const updated = { ...last, ...updater(last) };
+          // Keep a synchronous mirror of the plan for reliable persistence.
+          if (updated.agentPlan) liveAgentPlanRef.current = updated.agentPlan;
           return [...prev.slice(0, -1), updated];
         }
         return prev;
@@ -2714,26 +2750,33 @@ export default function App() {
           // throw away meetings whose text doesn't contain a buzzword. Return them all
           // sorted by date desc, with their notes/summaries as context.
           if (trimmedQuery.length === 0) {
+            // A date-range listing means "everything in this window" (e.g. a
+            // monthly recap). Return EVERY meeting in range — never cap at the
+            // semantic top-N, which truncated long months to 10. Content length
+            // per meeting scales down as the count grows so the total context
+            // stays bounded.
             const sorted = docsToSearch
               .slice()
               .sort((a, b) => {
                 const da = dateMap.get(a.meetingId) ?? '';
                 const db = dateMap.get(b.meetingId) ?? '';
                 return db.localeCompare(da);
-              })
-              .slice(0, maxCandidates);
+              });
 
+            const perMeetingChars = sorted.length > 24 ? 500 : sorted.length > 12 ? 900 : 1800;
             const sections = sorted.map((m, i) => {
               const dateStr = dateMap.get(m.meetingId);
               const dateLabel = dateStr
                 ? new Date(dateStr).toLocaleDateString('en-US', { weekday: 'short', month: 'short', day: 'numeric', year: 'numeric' })
                 : 'unknown date';
-              const content = (m.notes?.trim() || m.summary?.trim() || (m.transcription?.slice(0, 1800) ?? '')).trim();
+              // Prefer the (compact) summary for recaps, then notes, then a transcript slice.
+              const raw = (m.summary?.trim() || m.notes?.trim() || (m.transcription ?? '')).trim();
+              const content = raw.length > perMeetingChars ? `${raw.slice(0, perMeetingChars)}…` : raw;
               return `${i + 1}. ${m.title} (${dateLabel})\n${content || '(no content available)'}`;
             });
 
             const rangeContext = [
-              `=== COVERAGE ===\nListed ${sorted.length} of ${docsToSearch.length} meetings in this date range (${allMeetings.length} total)`,
+              `=== COVERAGE ===\nListed ALL ${sorted.length} meetings in this date range (${allMeetings.length} total). This is the COMPLETE set — base your recap on every meeting below.`,
               `=== MEETINGS ===\n${sections.join('\n\n---\n\n')}`,
             ].join('\n\n');
 
@@ -3115,6 +3158,21 @@ export default function App() {
           {
             searchFn: turbopufferSearchFn,
             contactsFn: contactsSearchFn,
+            onPlan: ({ intent, steps }) => {
+              updateAgentMessage(prev => ({
+                agentStatus: 'planning',
+                agentPlan: [
+                  {
+                    id: 'plan',
+                    label: intent,
+                    status: 'done' as const,
+                    type: 'plan' as const,
+                    planSteps: steps,
+                  },
+                  ...(prev.agentPlan ?? []),
+                ],
+              }));
+            },
             onToolCallStart: (step) => {
               const isContacts = step.kind === 'contacts';
               updateAgentMessage(prev => ({
@@ -3205,11 +3263,11 @@ export default function App() {
         citations: responseCitations,
         retrievalMeta: responseRetrievalMeta,
       };
-      let savedAgentPlan: AgentStep[] | undefined;
+      // Read the plan from the synchronous ref — NOT from inside the setState
+      // updater, which runs async and left agent_plan undefined at save time.
+      const savedAgentPlan: AgentStep[] | undefined = liveAgentPlanRef.current;
+      modelMessage = { ...modelMessage, agentPlan: savedAgentPlan };
       setChatMessages(prev => {
-        const placeholder = prev.find(m => m.role === 'model' && m.agentStatus && m.agentStatus !== 'done');
-        savedAgentPlan = placeholder?.agentPlan;
-        modelMessage = { ...modelMessage, agentPlan: savedAgentPlan };
         return [...prev.filter(m => !(m.role === 'model' && m.agentStatus && m.agentStatus !== 'done')), modelMessage];
       });
 
@@ -3244,6 +3302,7 @@ export default function App() {
             meeting_title: r.meetingTitle,
             score: r.score,
           })),
+          plan_steps: s.planSteps,
         })),
       };
 
@@ -3351,8 +3410,14 @@ export default function App() {
         });
       }
 
-      // Turbopuffer backfill uses lightweight ID list + lazy transcription fetch
-      deferredBackfill().catch(err => log.warn('turbopuffer_backfill_error', { error: err instanceof Error ? err : undefined }));
+      // Turbopuffer backfill is a background indexing chore — defer it until the
+      // app is idle so it never competes with first render or the initial data
+      // fetches. The ledger gate inside makes repeat runs essentially free.
+      const runBackfill = () =>
+        deferredBackfill().catch(err => log.warn('turbopuffer_backfill_error', { error: err instanceof Error ? err : undefined }));
+      const ric = (window as any).requestIdleCallback as undefined | ((cb: () => void, opts?: { timeout: number }) => void);
+      if (ric) ric(runBackfill, { timeout: 8000 });
+      else setTimeout(runBackfill, 4000);
     } catch (err) {
       log.error('fetch_history_failed', { error: err instanceof Error ? err : undefined });
     } finally {
@@ -3387,11 +3452,21 @@ export default function App() {
 
   const deferredBackfill = async () => {
     try {
+      // Nothing to index into Turbopuffer? Don't touch AWS at all.
+      if (!isTurbopufferConfigured()) return;
+
       const allMeta = await getAllTaskIds();
-      const completed = allMeta.filter(t => t.id && t.status === 'completed');
+      // Filter against the local index ledger FIRST so we never re-fetch the
+      // (heavy) transcription of meetings we've already indexed. Previously this
+      // pulled up to 50 full transcriptions from AWS on every launch, even when
+      // everything was already indexed — the biggest source of needless calls.
+      const candidates = allMeta.filter(
+        t => t.id && t.status === 'completed' && !isAlreadyIndexed(t.id)
+      );
+      if (candidates.length === 0) return; // already fully indexed — skip all getTaskById calls
 
       const toBackfill: { id: string; title: string; transcription: string }[] = [];
-      for (const meta of completed.slice(0, 50)) {
+      for (const meta of candidates.slice(0, 50)) {
         const full = await getTaskById(meta.id);
         if (full?.transcription?.trim()) {
           toBackfill.push({ id: full.id!, title: full.filename || 'Untitled', transcription: full.transcription });
@@ -3654,7 +3729,7 @@ export default function App() {
           setBatches(results);
           
           // Re-split audio to get batch blobs
-          audioBatches = await splitAudio(currentFile, 15);
+          audioBatches = await splitAudio(currentFile, BATCH_CHUNK_SIZE_MB);
           
           // Merge blob data back into results
           results = results.map((r, idx) => ({
@@ -3673,11 +3748,12 @@ export default function App() {
           setProcessingHeadline('Audio prep party 🎧');
           setProcessingSubtext('Cutting it nice and neat ✂️');
 
-          // Split with overlapping chunks for better boundary handling
-          audioBatches = await splitAudio(currentFile, 15, {
+          // Split with overlapping chunks for better boundary handling.
+          // Use default processing (normalize/noise-gate OFF, silence-removal ON)
+          // so this MATCHES the resume / blob-eviction re-split calls below —
+          // identical settings keep chunk boundaries deterministic across calls.
+          audioBatches = await splitAudio(currentFile, BATCH_CHUNK_SIZE_MB, {
             overlapSeconds: 10,
-            enableNoiseGate: true,
-            enableNormalization: true,
           });
           const initialBatches: BatchStatus[] = audioBatches.map(b => ({ ...b, status: 'pending' as const }));
           setBatches(initialBatches);
@@ -3708,14 +3784,18 @@ export default function App() {
         setStatus('processing');
         setProcessingHeadline('Listening with big ears 👂');
         setProcessingSubtext('Turning talk into gold 🪄');
-        const CONCURRENCY = 3;
+        // Now that chunks are small and upload reliably, push more through at once.
+        // gemini-3-flash-preview has generous RPM limits and withRetry() self-heals
+        // any occasional 429, so 5-wide with a short stagger is safe and far faster
+        // than the old 3-wide / 2.5s-apart pacing (which dominated wall-clock).
+        const CONCURRENCY = 5;
         // Max times we'll retry a wave of chunks due to transient failures before
         // handing off to the offline-resume flow.
         const MAX_WAVE_RETRIES = 8;
 
-        // Rate-limiter: stagger individual API calls within a wave so they don't
-        // all fire simultaneously and collectively trigger Gemini rate limits.
-        const STAGGER_MS = 2500;
+        // Rate-limiter: stagger individual API calls so a wave doesn't fire all at
+        // once. 800ms × 5 ≈ 75 req/min peak — well under the model's limit.
+        const STAGGER_MS = 800;
         let nextBatchSlotAt = 0;
         const acquireBatchSlot = async () => {
           const wait = nextBatchSlotAt - Date.now();
@@ -3816,7 +3896,7 @@ export default function App() {
               log.warn('blob_evicted_resplitting');
               setProcessingSubtext('Regenerating audio chunks…');
               try {
-                const freshBatches = await splitAudio(currentFile, 15);
+                const freshBatches = await splitAudio(currentFile, BATCH_CHUNK_SIZE_MB);
                 // Patch blob data back into all unfinished results
                 for (const item of batchesToProcess) {
                   if (results[item.originalIndex].status !== 'completed') {
@@ -4407,7 +4487,14 @@ export default function App() {
               >
                 <WorkspacePage
                   allTasks={history}
-                  onSelectTask={(task) => setCurrentView('notes', task.id)}
+                  onSelectTask={(task) => {
+                    // Set the task directly so the note opens even when it isn't
+                    // in the loaded (paginated) history — the detail-fetch effect
+                    // hydrates transcription/notes from its id. Relying on the URL
+                    // effect alone left workspace meetings stuck "loading".
+                    setSelectedTask(task);
+                    setCurrentView('notes', task.id);
+                  }}
                 />
               </motion.div>
             )}

@@ -19,6 +19,7 @@ import {
   Search,
   Clock,
   History,
+  ListChecks,
 } from 'lucide-react';
 import Markdown from 'react-markdown';
 import remarkGfm from 'remark-gfm';
@@ -72,10 +73,11 @@ interface AgentStep {
   label: string;
   status: 'pending' | 'running' | 'done' | 'error';
   detail?: string;
-  type?: 'search-tool';
+  type?: 'search-tool' | 'plan';
   searchKind?: 'notes' | 'people';
   searchQuery?: string;
   searchResults?: Array<{ meetingId: string; meetingTitle: string; score: number }>;
+  planSteps?: string[];
 }
 
 // ─── Step icon ────────────────────────────────────────────────────────────────
@@ -84,6 +86,13 @@ function StepIcon({ status, type }: { status: AgentStep['status']; type?: string
     return (
       <span className="relative flex-shrink-0 w-[18px] h-[18px] flex items-center justify-center">
         <Clock className="w-[14px] h-[14px] text-zinc-500 dark:text-zinc-400 animate-pulse" />
+      </span>
+    );
+  }
+  if (type === 'plan') {
+    return (
+      <span className="flex-shrink-0 w-[18px] h-[18px] flex items-center justify-center">
+        <ListChecks className="w-[14px] h-[14px] text-zinc-500 dark:text-zinc-400" />
       </span>
     );
   }
@@ -176,21 +185,47 @@ function ThoughtProcess({ steps, isLive }: { steps: AgentStep[]; isLive: boolean
                     {/* Content */}
                     <div className="flex-1 min-w-0 pb-3">
                       <span className={`text-[13px] leading-snug ${
-                        step.status === 'running'
-                          ? 'text-zinc-800 dark:text-zinc-200 font-medium'
-                          : 'text-zinc-500 dark:text-zinc-400'
+                        step.type === 'plan'
+                          ? 'text-zinc-700 dark:text-zinc-200 font-medium'
+                          : step.status === 'running'
+                            ? 'text-zinc-800 dark:text-zinc-200 font-medium'
+                            : 'text-zinc-500 dark:text-zinc-400'
                       }`}>
-                        {step.type === 'search-tool'
-                          ? (step.searchKind === 'people'
-                              ? (step.status === 'running' ? 'Searching people' : 'Searched people')
-                              : (step.status === 'running' ? 'Searching notes' : 'Searched notes'))
-                          : step.label}
+                        {step.type === 'plan'
+                          ? 'Planned approach'
+                          : step.type === 'search-tool'
+                            ? (step.searchKind === 'people'
+                                ? (step.status === 'running' ? 'Searching people' : 'Searched people')
+                                : (step.status === 'running' ? 'Searching notes' : 'Searched notes'))
+                            : step.label}
                         {step.type === 'search-tool' && step.searchQuery && (
                           <span className="ml-1.5 text-zinc-400 dark:text-zinc-500 font-normal">
                             for &ldquo;{step.searchQuery.length > 45 ? step.searchQuery.slice(0, 45) + '…' : step.searchQuery}&rdquo;
                           </span>
                         )}
                       </span>
+
+                      {/* Plan sub-row: the goal + the ordered steps the agent will take */}
+                      {step.type === 'plan' && (step.planSteps?.length ?? 0) > 0 && (
+                        <motion.div
+                          initial={{ opacity: 0, y: -2 }}
+                          animate={{ opacity: 1, y: 0 }}
+                          transition={{ duration: 0.14 }}
+                          className="mt-1.5 rounded-md bg-zinc-100 dark:bg-zinc-800/60 border border-zinc-200/70 dark:border-zinc-700/50 px-3 py-2"
+                        >
+                          {step.label && (
+                            <div className="text-[11.5px] text-zinc-600 dark:text-zinc-300 mb-1.5 leading-snug">{step.label}</div>
+                          )}
+                          <ol className="space-y-1">
+                            {step.planSteps!.map((p, i) => (
+                              <li key={i} className="flex gap-2 text-[12px] text-zinc-600 dark:text-zinc-300 leading-snug">
+                                <span className="flex-shrink-0 text-zinc-400 dark:text-zinc-500 font-medium tabular-nums">{i + 1}.</span>
+                                <span>{p}</span>
+                              </li>
+                            ))}
+                          </ol>
+                        </motion.div>
+                      )}
 
                       {/* Result sub-row */}
                       {step.status === 'done' && step.detail && (

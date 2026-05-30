@@ -2,6 +2,12 @@ import { useState, useEffect, useMemo } from 'react';
 import { Search, Users, Briefcase, Mail, Calendar, Loader2, ChevronRight } from 'lucide-react';
 import { getContacts, type Contact } from '../services/workspaceService';
 import type { TaskHistory } from '../services/awsService';
+import { getUserId } from '../services/awsAuthService';
+import { cacheGetFresh, cacheSet } from '../services/appCache';
+
+// Contacts change rarely; serve a fresh cached copy instantly and only hit the
+// API when it's stale. Cuts a /contacts request on every visit to this page.
+const CONTACTS_TTL_MS = 10 * 60 * 1000;
 
 function formatDate(iso: string) {
   return new Date(iso).toLocaleDateString('en-US', { month: 'short', day: 'numeric', year: 'numeric' });
@@ -130,10 +136,34 @@ export default function PeoplePage({ allTasks, onSelectTask }: PeoplePageProps) 
   const [search, setSearch] = useState('');
 
   useEffect(() => {
-    getContacts()
-      .then(setApiContacts)
-      .catch(() => setApiContacts([]))
-      .finally(() => setLoading(false));
+    let cancelled = false;
+    (async () => {
+      const uid = await getUserId().catch(() => null);
+      const cacheKey = uid ? `contacts:${uid}` : null;
+
+      // 1) Fresh cache hit → render immediately, no network call.
+      if (cacheKey) {
+        const cached = await cacheGetFresh<Contact[]>(cacheKey, CONTACTS_TTL_MS);
+        if (cached && !cancelled) {
+          setApiContacts(cached);
+          setLoading(false);
+          return;
+        }
+      }
+
+      // 2) Miss/stale → fetch once and refresh the cache.
+      try {
+        const fresh = await getContacts();
+        if (cancelled) return;
+        setApiContacts(fresh);
+        if (cacheKey) void cacheSet(cacheKey, fresh);
+      } catch {
+        if (!cancelled) setApiContacts([]);
+      } finally {
+        if (!cancelled) setLoading(false);
+      }
+    })();
+    return () => { cancelled = true; };
   }, []);
 
   // Build contacts from manually added attendees in tasks, merging with API contacts

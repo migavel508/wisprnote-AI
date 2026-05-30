@@ -1,11 +1,20 @@
 use anyhow::{Context, Result};
 use futures_util::{SinkExt, StreamExt};
 use serde::{Deserialize, Serialize};
-use std::sync::Arc;
+use std::time::Duration;
 use tokio::sync::mpsc;
 use tokio_tungstenite::tungstenite::Message;
 
 const DEEPGRAM_WS_URL: &str = "wss://api.deepgram.com/v1/listen";
+
+enum StreamOutcome {
+    /// Recorder closed the audio channel; the session is complete.
+    Finished,
+    /// Could not establish the connection (apply backoff before retrying).
+    ConnectFailed(String),
+    /// A live connection dropped mid-stream (reconnect promptly).
+    Disconnected(String),
+}
 
 #[derive(Debug, Serialize)]
 struct KeepAliveMessage {
@@ -136,6 +145,11 @@ impl DeepgramTranscriber {
         self.transcript_rx.try_recv().ok()
     }
 
+    /// Supervisor loop: keeps a Deepgram connection alive for the whole
+    /// recording. If the socket drops (network blip, server-side close), it
+    /// reconnects with backoff and resumes. Audio captured during an outage is
+    /// discarded so transcription "pauses" and picks back up with live audio,
+    /// matching the recorder's expectation of an uninterrupted session.
     async fn run_websocket(
         api_key: String,
         sample_rate: u32,
@@ -143,12 +157,42 @@ impl DeepgramTranscriber {
         mut audio_rx: mpsc::UnboundedReceiver<Vec<f32>>,
         transcript_tx: mpsc::UnboundedSender<String>,
     ) -> Result<()> {
+        let url = Self::build_url(sample_rate, keyterms);
+        let mut backoff_ms = 500u64;
+
+        loop {
+            match Self::stream_once(&api_key, &url, &mut audio_rx, &transcript_tx).await {
+                StreamOutcome::Finished => break,
+                StreamOutcome::Disconnected(reason) => {
+                    // Healthy connection that dropped mid-stream: reset backoff.
+                    backoff_ms = 500;
+                    eprintln!("Deepgram disconnected ({}); reconnecting in {}ms", reason, backoff_ms);
+                    if Self::pause_until(&mut audio_rx, backoff_ms).await {
+                        break;
+                    }
+                }
+                StreamOutcome::ConnectFailed(reason) => {
+                    eprintln!("Deepgram connect failed ({}); retrying in {}ms", reason, backoff_ms);
+                    if Self::pause_until(&mut audio_rx, backoff_ms).await {
+                        break;
+                    }
+                    backoff_ms = (backoff_ms * 2).min(5000);
+                }
+            }
+        }
+
+        Ok(())
+    }
+
+    fn build_url(sample_rate: u32, keyterms: Option<Vec<String>>) -> String {
         // Deepgram tuning for live meetings:
+        // - language=multi enables Nova-3 multilingual code-switching (detect_language
+        //   is not supported on streaming, so multi is the real-time path)
         // - diarize + utterances for speaker segmentation
-        // - lower endpointing/utterance_end for faster stable finalization
+        // - endpointing/utterance_end tuned for stable finalization on long calls
         // - keyterm prompting for names/domain vocabulary
         let mut url = format!(
-            "{}?encoding=linear16&sample_rate={}&channels=1&model=nova-3&language=en&interim_results=true&smart_format=true&punctuate=true&numerals=true&diarize=true&utterances=true&filler_words=false&endpointing=400&utterance_end_ms=1200&vad_events=true&no_delay=true",
+            "{}?encoding=linear16&sample_rate={}&channels=1&model=nova-3&language=multi&interim_results=true&smart_format=true&punctuate=true&numerals=true&diarize=true&utterances=true&filler_words=false&endpointing=400&utterance_end_ms=1200&vad_events=true&no_delay=true",
             DEEPGRAM_WS_URL, sample_rate
         );
         if let Some(terms) = keyterms {
@@ -162,105 +206,133 @@ impl DeepgramTranscriber {
                 url.push_str(&percent_encode_query_value(&term));
             }
         }
+        url
+    }
 
+    /// Connect once and stream until the recorder finishes or the socket drops.
+    async fn stream_once(
+        api_key: &str,
+        url: &str,
+        audio_rx: &mut mpsc::UnboundedReceiver<Vec<f32>>,
+        transcript_tx: &mpsc::UnboundedSender<String>,
+    ) -> StreamOutcome {
         use tokio_tungstenite::tungstenite::client::IntoClientRequest;
-        let mut request = url.into_client_request()
-            .context("Failed to create WebSocket request")?;
-        
-        request.headers_mut().insert(
-            "Authorization",
-            format!("Token {}", api_key).parse()
-                .context("Failed to parse authorization header")?
-        );
-        
-        let (ws_stream, _response) = tokio_tungstenite::connect_async(request)
-            .await
-            .map_err(|e| anyhow::anyhow!("Failed to connect to Deepgram: {}", e))?;
 
-        let (ws_tx, mut ws_rx) = ws_stream.split();
-        let ws_tx = Arc::new(tokio::sync::Mutex::new(ws_tx));
+        let mut request = match url.to_string().into_client_request() {
+            Ok(r) => r,
+            Err(e) => return StreamOutcome::ConnectFailed(format!("request build: {}", e)),
+        };
+        match format!("Token {}", api_key).parse() {
+            Ok(value) => {
+                request.headers_mut().insert("Authorization", value);
+            }
+            Err(e) => return StreamOutcome::ConnectFailed(format!("auth header: {}", e)),
+        }
 
-        let keep_alive_handle = {
-            let ws_tx = Arc::clone(&ws_tx);
-            tokio::spawn(async move {
-                let mut interval = tokio::time::interval(tokio::time::Duration::from_secs(5));
-                loop {
-                    interval.tick().await;
-                    let keep_alive = serde_json::to_string(&KeepAliveMessage {
-                        msg_type: "KeepAlive".to_string(),
-                    })
-                    .unwrap();
-                    
-                    let mut tx = ws_tx.lock().await;
-                    if tx.send(Message::Text(keep_alive.into())).await.is_err() {
-                        break;
-                    }
-                }
-            })
+        let (ws_stream, _response) = match tokio_tungstenite::connect_async(request).await {
+            Ok(s) => s,
+            Err(e) => return StreamOutcome::ConnectFailed(format!("connect: {}", e)),
         };
 
-        let audio_send_handle = {
-            let ws_tx = Arc::clone(&ws_tx);
-            tokio::spawn(async move {
-                while let Some(samples) = audio_rx.recv().await {
-                    let bytes = Self::f32_to_i16_bytes(&samples);
-                    let mut tx = ws_tx.lock().await;
-                    if tx.send(Message::Binary(bytes)).await.is_err() {
-                        break;
-                    }
-                }
-                
-                let mut tx = ws_tx.lock().await;
-                let _ = tx.send(Message::Text(
-                    serde_json::to_string(&serde_json::json!({"type": "CloseStream"}))
-                        .unwrap()
-                        .into()
-                )).await;
-            })
-        };
+        let (mut ws_tx, mut ws_rx) = ws_stream.split();
+        let mut keep_alive = tokio::time::interval(Duration::from_secs(5));
+        keep_alive.tick().await; // consume the immediate first tick
 
-        while let Some(msg) = ws_rx.next().await {
-            match msg {
-                Ok(Message::Text(text)) => {
-                    if let Ok(response) = serde_json::from_str::<DeepgramResponse>(&text) {
-                        match response {
-                            DeepgramResponse::Results { channel, is_final, speech_final: _ } => {
-                                if let Some(alt) = channel.alternatives.first() {
-                                    if !alt.transcript.trim().is_empty() {
-                                        let kind = if is_final { "FINAL" } else { "INTERIM" };
-                                        let (speaker_hint, transcript_text) = if is_final {
-                                            format_transcript_with_speakers(&alt.words, &alt.transcript)
-                                        } else {
-                                            (alt.words.first().and_then(|w| w.speaker), alt.transcript.trim().to_string())
-                                        };
-                                        let speaker_tag = speaker_hint
-                                            .map(|s| s.to_string())
-                                            .unwrap_or_else(|| "U".to_string());
-                                        let msg = format!("[{}:{}] {}", kind, speaker_tag, transcript_text);
-                                        let _ = transcript_tx.send(msg);
+        loop {
+            tokio::select! {
+                maybe_audio = audio_rx.recv() => {
+                    match maybe_audio {
+                        Some(samples) => {
+                            let bytes = Self::f32_to_i16_bytes(&samples);
+                            if ws_tx.send(Message::Binary(bytes)).await.is_err() {
+                                return StreamOutcome::Disconnected("audio send failed".to_string());
+                            }
+                        }
+                        None => {
+                            // Recorder stopped: tell Deepgram to flush, drain trailing
+                            // results, then end the supervisor loop.
+                            let _ = ws_tx.send(Message::Text(
+                                serde_json::json!({"type": "CloseStream"}).to_string().into()
+                            )).await;
+                            let _ = tokio::time::timeout(Duration::from_secs(2), async {
+                                while let Some(Ok(msg)) = ws_rx.next().await {
+                                    match msg {
+                                        Message::Text(text) => Self::handle_text(&text, transcript_tx),
+                                        Message::Close(_) => break,
+                                        _ => {}
                                     }
                                 }
-                            }
-                            DeepgramResponse::Metadata { .. } => {}
-                            _ => {}
+                            }).await;
+                            return StreamOutcome::Finished;
                         }
                     }
                 }
-                Ok(Message::Close(_)) => {
-                    break;
+                maybe_msg = ws_rx.next() => {
+                    match maybe_msg {
+                        Some(Ok(Message::Text(text))) => Self::handle_text(&text, transcript_tx),
+                        Some(Ok(Message::Close(frame))) => {
+                            let reason = frame
+                                .map(|f| format!("{} {}", f.code, f.reason))
+                                .unwrap_or_else(|| "close".to_string());
+                            return StreamOutcome::Disconnected(reason);
+                        }
+                        Some(Ok(_)) => {}
+                        Some(Err(e)) => return StreamOutcome::Disconnected(format!("ws error: {}", e)),
+                        None => return StreamOutcome::Disconnected("stream ended".to_string()),
+                    }
                 }
-                Err(e) => {
-                    eprintln!("WebSocket error: {}", e);
-                    break;
+                _ = keep_alive.tick() => {
+                    let keep_alive_msg = serde_json::to_string(&KeepAliveMessage {
+                        msg_type: "KeepAlive".to_string(),
+                    }).unwrap();
+                    if ws_tx.send(Message::Text(keep_alive_msg.into())).await.is_err() {
+                        return StreamOutcome::Disconnected("keepalive send failed".to_string());
+                    }
                 }
-                _ => {}
             }
         }
+    }
 
-        keep_alive_handle.abort();
-        audio_send_handle.abort();
+    /// Wait `wait_ms` before reconnecting, discarding any audio captured during
+    /// the outage. Returns true if the recorder finished while waiting.
+    async fn pause_until(audio_rx: &mut mpsc::UnboundedReceiver<Vec<f32>>, wait_ms: u64) -> bool {
+        let deadline = tokio::time::sleep(Duration::from_millis(wait_ms));
+        tokio::pin!(deadline);
+        loop {
+            tokio::select! {
+                _ = &mut deadline => return false,
+                maybe = audio_rx.recv() => {
+                    match maybe {
+                        Some(_) => {} // discard audio captured while disconnected
+                        None => return true,
+                    }
+                }
+            }
+        }
+    }
 
-        Ok(())
+    fn handle_text(text: &str, transcript_tx: &mpsc::UnboundedSender<String>) {
+        let Ok(DeepgramResponse::Results { channel, is_final, .. }) =
+            serde_json::from_str::<DeepgramResponse>(text)
+        else {
+            return;
+        };
+        let Some(alt) = channel.alternatives.first() else {
+            return;
+        };
+        if alt.transcript.trim().is_empty() {
+            return;
+        }
+        let kind = if is_final { "FINAL" } else { "INTERIM" };
+        let (speaker_hint, transcript_text) = if is_final {
+            format_transcript_with_speakers(&alt.words, &alt.transcript)
+        } else {
+            (alt.words.first().and_then(|w| w.speaker), alt.transcript.trim().to_string())
+        };
+        let speaker_tag = speaker_hint
+            .map(|s| s.to_string())
+            .unwrap_or_else(|| "U".to_string());
+        let _ = transcript_tx.send(format!("[{}:{}] {}", kind, speaker_tag, transcript_text));
     }
 
     fn f32_to_i16_bytes(samples: &[f32]) -> Vec<u8> {
