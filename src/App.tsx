@@ -124,6 +124,7 @@ import {
   listenForTranscripts,
   RecordingMode,
 } from './services/nativeRecorderService';
+import { getDeepgramToken } from './services/aiProxyService';
 import { checkPermissions } from './services/permissionService';
 import {
   listenForDeviceChanges,
@@ -401,9 +402,11 @@ export default function App() {
   // (~4 chunks for a 30-min recording instead of ~14) = much faster batches.
   // MUST be identical at every splitAudio call site so resume / blob-eviction
   // re-split produce the same chunk boundaries.
-  // Capped at 12 MB: base64 inflates ~1.33×, so 12 MB → ~16 MB, safely under
-  // Gemini's ~20 MB inline-request limit (15 MB would land right at the edge).
-  const BATCH_CHUNK_SIZE_MB = 12;
+  // Capped at 6 MB. Batch audio is now sent through the authed Lambda proxy,
+  // which sits behind API Gateway's HARD 10 MB request limit. base64 inflates
+  // ~1.33×, so 6 MB WAV → ~8 MB body, safely under 10 MB. (12 MB → ~16 MB would
+  // 413 at the gateway and trigger the slow retry loop.)
+  const BATCH_CHUNK_SIZE_MB = 6;
   const [chatMessages, setChatMessages] = useState<Message[]>([]);
   const [allMeetingsChatMessages, setAllMeetingsChatMessages] = useState<Message[]>([]);
   const [chatThreads, setChatThreads] = useState<ChatThread[]>(() => {
@@ -1275,11 +1278,9 @@ export default function App() {
     } else if (desktopRecordingMode === 'realtime') {
       // ── Real-time mode: integrated Deepgram transcription via Tauri ──
       try {
-        const apiKey = (import.meta as any).env?.VITE_DEEPGRAM_API_KEY as string | undefined;
-        if (!apiKey) {
-          setError('VITE_DEEPGRAM_API_KEY not set in .env.local');
-          return;
-        }
+        // Mint a short-lived Deepgram token from the authed backend — the real
+        // key lives in Secrets Manager, never in the client bundle.
+        const apiKey = await getDeepgramToken();
 
         // Reset buffers before listener/stream starts to avoid dropping early words.
         isRealtimePausedRef.current = false;
@@ -1395,11 +1396,8 @@ export default function App() {
       if (nativeServerAvailable && desktopRecordingMode === 'batch') {
         await startSystemAudioRecording();
       } else if (desktopRecordingMode === 'realtime') {
-        const apiKey = (import.meta as any).env?.VITE_DEEPGRAM_API_KEY as string | undefined;
-        if (!apiKey) {
-          setError('VITE_DEEPGRAM_API_KEY not set in .env.local');
-          return;
-        }
+        // Short-lived token from the authed backend; real key never bundled.
+        const apiKey = await getDeepgramToken();
         if (!unlistenRef.current) {
           await attachRealtimeTranscriptListener();
         }

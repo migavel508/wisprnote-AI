@@ -246,10 +246,39 @@ export async function getSession(): Promise<AuthSession | null> {
   });
 }
 
+// In-memory ID-token cache. Every AI call goes through the authed proxy and
+// needs the ID token; re-deriving it via getSession() each time is wasteful
+// (token decode/validation on every embed batch, chat step, audio chunk). We
+// cache the JWT and reuse it until shortly before it expires, then refresh.
+// Security is unchanged — it's the same short-lived Cognito token.
+let _cachedIdToken: string | null = null;
+let _cachedIdTokenExp = 0; // epoch ms
+
+function jwtExpMs(jwt: string): number {
+  try {
+    const payload = JSON.parse(atob(jwt.split('.')[1])) as { exp?: number };
+    return payload.exp ? payload.exp * 1000 : 0;
+  } catch {
+    return 0;
+  }
+}
+
 export async function getIdToken(): Promise<string> {
+  // Reuse the cached token until 60s before expiry.
+  if (_cachedIdToken && Date.now() < _cachedIdTokenExp - 60_000) {
+    return _cachedIdToken;
+  }
   const session = await getSession();
   if (!session) throw new Error('User not authenticated');
+  _cachedIdToken = session.idToken;
+  _cachedIdTokenExp = jwtExpMs(session.idToken);
   return session.idToken;
+}
+
+/** Clear the cached ID token (call on sign-out / account switch). */
+export function clearIdTokenCache(): void {
+  _cachedIdToken = null;
+  _cachedIdTokenExp = 0;
 }
 
 export async function getUserId(): Promise<string> {
@@ -317,6 +346,7 @@ export async function signIn(email: string, password: string): Promise<AuthSessi
 }
 
 export async function signOut(): Promise<void> {
+  clearIdTokenCache();
   const cognitoUser = userPool.getCurrentUser();
   if (cognitoUser) {
     cognitoUser.signOut();

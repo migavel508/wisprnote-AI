@@ -222,7 +222,10 @@ impl DeepgramTranscriber {
             Ok(r) => r,
             Err(e) => return StreamOutcome::ConnectFailed(format!("request build: {}", e)),
         };
-        match format!("Token {}", api_key).parse() {
+        // `api_key` is now a short-lived access token minted by our backend
+        // (Deepgram /v1/auth/grant), so it uses the Bearer scheme. The real
+        // Deepgram API key never reaches the client.
+        match format!("Bearer {}", api_key).parse() {
             Ok(value) => {
                 request.headers_mut().insert("Authorization", value);
             }

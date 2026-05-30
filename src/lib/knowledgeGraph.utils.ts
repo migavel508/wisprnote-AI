@@ -1,4 +1,5 @@
 import { logger } from './logger';
+import { aiProxyFetch } from '../services/aiProxyService';
 import { loadEmbedCacheFromIDB, saveEmbedCacheToIDB, clearEmbedCacheIDB } from './kgEmbedCache';
 
 const log = logger.scope('KnowledgeGraph');
@@ -96,8 +97,9 @@ function getProvider(): AIProvider {
 }
 
 function getOpenRouterKey(): string {
-  return env.VITE_OPENROUTER_API_KEY ||
-    processEnv.VITE_OPENROUTER_API_KEY || '';
+  // Real key injected server-side by the authed proxy (aiProxyFetch); never
+  // bundled. Non-empty placeholder so "configured" guards pass.
+  return 'proxied-via-lambda';
 }
 
 function toOpenRouterModel(model: string): string {
@@ -123,14 +125,8 @@ function getLsEmbedKey(): string {
 }
 
 function getApiKey(): string {
-  const key =
-    env.VITE_GEMINI_API_KEY ||
-    env.GEMINI_API_KEY ||
-    processEnv.GEMINI_API_KEY;
-  if (!key && getProvider() === 'gemini') {
-    throw new Error('Missing GEMINI_API_KEY — set VITE_GEMINI_API_KEY or GEMINI_API_KEY in your .env');
-  }
-  return key || '';
+  // Real Gemini key injected server-side by the authed proxy; never bundled.
+  return 'proxied-via-lambda';
 }
 
 // ============================================================
@@ -271,7 +267,10 @@ async function fetchWithRetry(
 ): Promise<Response> {
   let lastResponse: Response | null = null;
   for (let attempt = 0; attempt <= maxRetries; attempt++) {
-    const response = await fetch(url, init);
+    // aiProxyFetch reroutes provider hosts (Gemini, OpenRouter) through the
+    // authed Lambda proxy, which injects the real key server-side — so this never
+    // hits the provider directly and no key is bundled.
+    const response = await aiProxyFetch(url, init);
     if (response.ok || (response.status !== 503 && response.status !== 429)) {
       return response;
     }
@@ -289,11 +288,9 @@ export async function batchEmbed(
   items: Array<{ id: string; text: string }>
 ): Promise<Map<string, EmbeddingVector>> {
   const useOpenRouter = getProvider() === 'openrouter';
+  // Keys are injected server-side by the authed proxy; no client-side key needed.
   const apiKey = useOpenRouter ? '' : getApiKey();
   const orKey = useOpenRouter ? getOpenRouterKey() : '';
-  if (useOpenRouter && !orKey) {
-    throw new Error('Missing VITE_OPENROUTER_API_KEY — required for embeddings when VITE_AI_PROVIDER=openrouter');
-  }
   const result = new Map<string, EmbeddingVector>();
 
   // Hydrate L1 from L2 (IndexedDB) on first call — one-time async load

@@ -5,21 +5,17 @@ import { ok, created, noContent, badRequest, notFound, unauthorized, serverError
 import { S3Client, PutObjectCommand } from '@aws-sdk/client-s3';
 import { getSignedUrl } from '@aws-sdk/s3-request-presigner';
 import { getSecrets } from './secrets';
+import { handleAI } from './ai';
 
 const S3_BUCKET = process.env.S3_BUCKET || '';
 const S3_REGION = process.env.AWS_REGION || 'us-east-1';
 const s3 = new S3Client({ region: S3_REGION });
 
-// Run idempotent migrations on cold start
-void (async () => {
-  try {
-    await query(`ALTER TABLE task_history ADD COLUMN IF NOT EXISTS attendees JSONB NOT NULL DEFAULT '[]'::jsonb`);
-    await query(`CREATE INDEX IF NOT EXISTS idx_task_history_attendees ON task_history USING GIN (attendees)`);
-    console.log('Migrations OK');
-  } catch (e) {
-    console.error('Migration error:', e);
-  }
-})();
+// NOTE: Schema migrations are intentionally NOT run here.
+// Running ALTER TABLE / CREATE INDEX on every cold start takes an
+// ACCESS EXCLUSIVE lock and, under concurrency, causes a lock storm that can
+// stall the whole table. Migrations live in aws/migration_perf.sql and are
+// applied once at deploy time.
 
 const FROM_EMAIL = process.env.SES_FROM_EMAIL || 'noreply@wisprnote.com';
 const SITE_URL = (process.env.WISPRNOTE_PUBLIC_URL || 'https://www.wisprnote.com').replace(/\/$/, '');
@@ -179,6 +175,14 @@ async function sendShareInviteEmails(options: {
 }
 
 export const handler = async (event: APIGatewayProxyEvent): Promise<APIGatewayProxyResult> => {
+  // Warmer ping (EventBridge scheduled): keep a container hot so real user
+  // requests don't pay the ~400ms VPC cold start. Eagerly load secrets so the
+  // warm container already has them cached. Returns immediately — no auth/DB.
+  if ((event as any).__warmer === true) {
+    try { await getSecrets(); } catch { /* best effort */ }
+    return { statusCode: 200, body: 'warm' } as APIGatewayProxyResult;
+  }
+
   if (event.httpMethod === 'OPTIONS') return corsPreflightResponse();
 
   const path = event.path.replace(/^\/+|\/+$/g, '');
@@ -209,6 +213,7 @@ export const handler = async (event: APIGatewayProxyEvent): Promise<APIGatewayPr
       case 'workspaces': return await handleWorkspaces(method, segments, userId, event);
       case 'folders':    return await handleFolders(method, segments, userId, event);
       case 'contacts':   return await handleContacts(method, userId);
+      case 'ai':         return await handleAI(method, segments, event);
       default:           return notFound();
     }
   } catch (err: any) {
@@ -236,8 +241,26 @@ async function handleTasks(method: string, segments: string[], userId: string, e
     return created(row);
   }
 
+  // Lazy visualization fetch: the base64 image is heavy and only needed when the
+  // user opens the Notes tab, so it's excluded from the main task GET and fetched
+  // on demand here.
+  if (method === 'GET' && taskId && segments[2] === 'visualization') {
+    const row = await queryOne<{ visualization_image: string | null }>(
+      'SELECT visualization_image FROM task_history WHERE id=$1 AND user_id=$2',
+      [taskId, userId]
+    );
+    return row ? ok({ visualization_image: row.visualization_image }) : notFound();
+  }
+
   if (method === 'GET' && taskId) {
-    const row = await queryOne('SELECT * FROM task_history WHERE id=$1 AND user_id=$2', [taskId, userId]);
+    // Exclude visualization_image (large base64) from the hot single-task fetch
+    // that runs on every note open — it's lazy-loaded via the route above.
+    const row = await queryOne(
+      `SELECT id, user_id, created_at, filename, transcription, summary, notes,
+              audio_url, status, duration, prompt, personal_note, attendees
+       FROM task_history WHERE id=$1 AND user_id=$2`,
+      [taskId, userId]
+    );
     return row ? ok(row) : notFound();
   }
 
@@ -259,7 +282,12 @@ async function handleTasks(method: string, segments: string[], userId: string, e
     // Include attendees in the lightweight payload so the People chip renders on
     // first paint instead of waiting for the per-task detail fetch. It's a small
     // JSONB column (GIN-indexed) so it adds negligible cost to the list query.
-    const fields = full ? '*' : 'id, created_at, filename, summary, status, duration, attendees';
+    // Even the "full" list never needs the heavy base64 visualization_image —
+    // exclude it so bulk fetches don't transfer hundreds of MB. The lightweight
+    // list stays minimal (+ attendees for the People chip).
+    const fields = full
+      ? 'id, user_id, created_at, filename, transcription, summary, notes, audio_url, status, duration, prompt, personal_note, attendees'
+      : 'id, created_at, filename, summary, status, duration, attendees';
     const rows = await query(
       `SELECT ${fields} FROM task_history WHERE ${whereClause} ORDER BY created_at DESC LIMIT $${params.length + 1} OFFSET $${params.length + 2}`,
       [...params, pageSize, page * pageSize]
