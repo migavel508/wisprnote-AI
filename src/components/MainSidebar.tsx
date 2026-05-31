@@ -48,6 +48,7 @@ interface MainSidebarProps {
   session: AuthSession | null;
   onSignOut: () => void;
   status: string;
+  isCompactMode?: boolean;
 }
 
 // ── Theme picker pill ─────────────────────────────────────────────────────────
@@ -339,6 +340,7 @@ export default function MainSidebar({
   session,
   onSignOut,
   status,
+  isCompactMode = false,
 }: MainSidebarProps) {
   const [pendingSyncCount, setPendingSyncCount] = useState(0);
   const [workspaces, setWorkspaces] = useState<Workspace[]>([]);
@@ -466,19 +468,16 @@ export default function MainSidebar({
   ];
 
   // ── Collapsed: icon rail ────────────────────────────────────────────────────
+  // Rail shows whenever the sidebar is closed (both in compact mode and when the
+  // user manually collapses a wide window). Opening it renders the full sidebar
+  // below — in compact mode that's an overlay (see the expanded branch), so the
+  // user can ALWAYS toggle between the 52px rail and the full sidebar.
   if (!isOpen) {
     return (
-      <div className="h-screen w-[52px] bg-app-canvas flex flex-col items-center flex-shrink-0 font-sans">
-        <div data-tauri-drag-region className="w-full h-12 flex-shrink-0 cursor-grab" />
-
-        <div className="pt-1 pb-4">
-          <button
-            onClick={onToggle}
-            className="w-8 h-8 flex items-center justify-center text-app-fg-subtle hover:text-app-fg hover:bg-app-nav-active-bg rounded-xl transition-all duration-200"
-          >
-            <PanelLeft size={16} strokeWidth={1.5} />
-          </button>
-        </div>
+      <div className="h-full w-[52px] bg-app-canvas flex flex-col items-center flex-shrink-0 font-sans">
+        {/* The shared global top bar holds the traffic lights + toggle, so the
+            rail just needs a small top gap before the nav icons. */}
+        <div className="pt-2 pb-1.5" />
 
         <nav className="flex flex-col items-center gap-0.5 px-1.5">
           {navItems.map(({ id, label, icon: Icon }) => {
@@ -535,19 +534,24 @@ export default function MainSidebar({
   // ── Expanded sidebar ────────────────────────────────────────────────────────
   return (
     <>
-      <div className="fixed inset-0 bg-black/20 dark:bg-black/50 z-[60] md:hidden" onClick={onToggle} />
+      {/* Transparent click-catcher behind the floating sidebar — lets a click on
+          the page close the sidebar, WITHOUT dimming/tinting the content (no
+          visual separation, per design). */}
+      {isCompactMode && (
+        <div className="fixed inset-0 z-[60]" onClick={onToggle} />
+      )}
 
-      <div className="fixed md:relative h-screen w-[200px] bg-app-canvas flex flex-col flex-shrink-0 font-sans z-[70]">
-        <div data-tauri-drag-region className="w-full h-12 flex-shrink-0 cursor-grab" />
+      <div className={`bg-app-canvas flex flex-col flex-shrink-0 font-sans ${
+        isCompactMode
+          ? 'fixed left-2 top-[34px] bottom-2 w-[260px] z-[70] rounded-2xl border border-app-border shadow-2xl'
+          : 'fixed md:relative h-full w-[200px] z-[70]'
+      }`}>
+        {/* Small top gap — the shared global top bar already clears the traffic
+            lights, so no tall drag strip is needed here. */}
+        <div className="w-full flex-shrink-0 h-2" />
 
-        {/* Brand header */}
-        <div className="flex items-center gap-2 px-4 pt-1 pb-5">
-          <button
-            onClick={onToggle}
-            className="w-7 h-7 flex items-center justify-center text-app-fg-subtle hover:text-app-fg hover:bg-app-nav-active-bg rounded-xl transition-all duration-200"
-          >
-            <PanelLeft size={15} strokeWidth={1.5} />
-          </button>
+        {/* Brand header — toggle lives in the shared global top bar. */}
+        <div className="flex items-center gap-2 px-4 pt-0.5 pb-4">
           <div className="flex items-center gap-1.5 ml-0.5">
             <img src="/logo.png" alt="Logo" className="w-5 h-5 rounded-full object-cover" />
             <span className="text-[15px] font-serif italic font-semibold text-app-fg tracking-[-0.01em]">

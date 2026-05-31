@@ -38,6 +38,7 @@ import {
   PlayCircle,
   AudioLines,
   PenLine,
+  PanelLeft,
 } from 'lucide-react';
 import { motion, AnimatePresence } from 'motion/react';
 import Markdown from 'react-markdown';
@@ -491,6 +492,46 @@ export default function App() {
 
   const [noteTab, setNoteTab] = useState<NoteTab>('transcription');
   const [isSidebarOpen, setIsSidebarOpen] = useState(true);
+  const [isCompactMode, setIsCompactMode] = useState(
+    typeof window !== 'undefined' && window.innerWidth < 900,
+  );
+  const prevWindowSizeRef = useRef<{ width: number; height: number } | null>(null);
+
+  // Auto-enter compact mode when the OS window is narrow enough to only fit the sidebar.
+  useEffect(() => {
+    const update = () => setIsCompactMode(window.innerWidth < 900);
+    update();
+    window.addEventListener('resize', update);
+    return () => window.removeEventListener('resize', update);
+  }, []);
+
+  // Compact (narrow) window → default to the icon rail (closed); the user can
+  // still tap the rail's toggle to float the full sidebar as an overlay.
+  // Wide window → default to the full sidebar open.
+  useEffect(() => {
+    setIsSidebarOpen(!isCompactMode);
+  }, [isCompactMode]);
+
+  const toggleCompactMode = useCallback(async () => {
+    try {
+      const { getCurrentWindow, LogicalSize } = await import('@tauri-apps/api/window');
+      const win = getCurrentWindow();
+      if (window.innerWidth >= 520) {
+        const size = await win.outerSize();
+        const factor = await win.scaleFactor();
+        prevWindowSizeRef.current = {
+          width: Math.round(size.width / factor),
+          height: Math.round(size.height / factor),
+        };
+        await win.setSize(new LogicalSize(560, 760));
+      } else {
+        const prev = prevWindowSizeRef.current ?? { width: 1400, height: 900 };
+        await win.setSize(new LogicalSize(prev.width, prev.height));
+      }
+    } catch (err) {
+      logger.error('toggleCompactMode failed', { error: err instanceof Error ? err : new Error(String(err)) });
+    }
+  }, []);
   const [chatInput, setChatInput] = useState('');
   const [isChatting, setIsChatting] = useState(false);
   const [isGeneratingImage, setIsGeneratingImage] = useState(false);
@@ -4132,7 +4173,7 @@ export default function App() {
   }
 
   return (
-    <div className="h-screen bg-app-canvas text-app-fg font-[system-ui] selection:bg-app-fg selection:text-app-panel flex flex-col md:flex-row overflow-hidden">
+    <div className="h-screen bg-app-canvas text-app-fg font-[system-ui] selection:bg-app-fg selection:text-app-panel flex flex-col overflow-hidden">
       {/* Network Status — floating pill toast (Apple-style) */}
       <AnimatePresence>
         {!isOnline && (
@@ -4237,8 +4278,33 @@ export default function App() {
         )}
       </AnimatePresence>
 
-      {/* Sidebar — hidden on mobile, icon-rail or expanded on desktop */}
-      <div className="hidden md:block">
+      {/* Top title bar — full-width strip holding the macOS traffic lights
+          (overlaid by the OS at the left) and the panel toggle right beside them.
+          Shown in BOTH wide and compact/minimized windows so the toggle always
+          sits next to the traffic lights (reference layout). */}
+      <div
+        data-tauri-drag-region
+        className="relative z-[80] flex flex-shrink-0 h-[30px] items-center bg-app-canvas"
+        style={{ WebkitUserSelect: 'none', userSelect: 'none' }}
+      >
+        {/* Reserve space for the traffic lights, then the sidebar toggle. */}
+        <div className="w-[78px] flex-shrink-0" />
+        <button
+          onClick={() => setIsSidebarOpen(!isSidebarOpen)}
+          data-tauri-drag-region="false"
+          className="w-7 h-7 flex items-center justify-center text-app-fg-subtle hover:text-app-fg hover:bg-app-nav-active-bg rounded-lg transition-all duration-200"
+          title="Toggle sidebar"
+        >
+          <PanelLeft size={15} strokeWidth={1.5} />
+        </button>
+      </div>
+
+      {/* Body — sidebar + content row, sitting below the shared top bar. */}
+      <div className="flex-1 flex flex-row min-h-0 overflow-hidden">
+
+      {/* Sidebar — hidden on mobile, icon-rail or expanded on desktop.
+          Force-shown in compact mode so the narrow desktop window shows the sidebar (Granola-style). */}
+      <div className={isCompactMode ? 'block flex-shrink-0 w-[52px] h-full' : 'hidden md:block md:h-full'}>
         <MainSidebar
           currentView={currentView}
           onViewChange={(view) => {
@@ -4255,15 +4321,20 @@ export default function App() {
           session={session}
           onSignOut={() => { clearUserState(); signOut(); }}
           status={status}
+          isCompactMode={isCompactMode}
         />
       </div>
 
-      {/* Main Content Area — white rounded container */}
+      {/* Main Content Area — white rounded container.
+          In compact mode the window is narrow (below the md breakpoint) but it is
+          still a desktop window, so we force the full desktop chrome (top drag
+          region, padding, rounded panel + border) instead of the bare mobile
+          fallback — the inner layout looks identical to the wide window. */}
       <div className="flex-1 flex flex-col overflow-hidden relative min-h-0">
-        {/* Top drag region — enables double-click to zoom (macOS native behavior), hidden on mobile */}
-        <div data-tauri-drag-region className="w-full h-0 md:h-10 flex-shrink-0 cursor-default" style={{ WebkitUserSelect: 'none', userSelect: 'none' }} />
-        <div className="flex-1 flex overflow-hidden p-0 md:pr-2.5 md:pl-1.5 md:pb-2.5 md:pt-0">
-        <main className="flex-1 bg-app-panel w-full relative overflow-y-auto rounded-none md:rounded-3xl shadow-sm md:border md:border-app-border text-app-fg">
+        {/* The shared global top bar already provides the drag region + top
+            spacing, so the content starts right beneath it (no extra top gap). */}
+        <div className={`flex-1 flex overflow-hidden ${isCompactMode ? 'pr-2.5 pl-1.5 pb-2.5 pt-1' : 'p-0 md:pr-2.5 md:pl-1.5 md:pb-2.5 md:pt-1'}`}>
+        <main className={`flex-1 bg-app-panel w-full relative overflow-y-auto shadow-sm text-app-fg ${isCompactMode ? 'rounded-3xl border border-app-border' : 'rounded-none md:rounded-3xl md:border md:border-app-border'}`}>
           <AnimatePresence mode="wait">
             {currentView === 'process' && (
               <motion.div 
@@ -4530,21 +4601,24 @@ export default function App() {
         </main>
         </div>
       </div>
+      </div>{/* /Body */}
 
-      {/* Mobile Bottom Navigation — visible only on mobile */}
-      <MobileBottomNav
-        currentView={currentView}
-        onViewChange={(view) => {
-          if (view === 'notes' && selectedTask) {
-            setCurrentView('notes', selectedTask.id);
-          } else if (view === 'chat') {
-            setCurrentView('chat', selectedTask?.id);
-          } else {
-            setCurrentView(view);
-          }
-        }}
-        status={status}
-      />
+      {/* Mobile Bottom Navigation — visible only on mobile, hidden in compact desktop window */}
+      {!isCompactMode && (
+        <MobileBottomNav
+          currentView={currentView}
+          onViewChange={(view) => {
+            if (view === 'notes' && selectedTask) {
+              setCurrentView('notes', selectedTask.id);
+            } else if (view === 'chat') {
+              setCurrentView('chat', selectedTask?.id);
+            } else {
+              setCurrentView(view);
+            }
+          }}
+          status={status}
+        />
+      )}
     </div>
   );
 }

@@ -87,8 +87,17 @@
 }
 
 @layer base {
+  /* Paint html/body/#root with the opaque canvas color. The Tauri window is
+     transparent, so during a resize (minimize/restore) the OS outpaces the
+     WebView repaint and any unpainted region would show through as a blank/black
+     gap. Backing every root layer with the canvas color fills that gap, so the
+     transition stays smooth and on-brand instead of flashing blank. */
+  html, body, #root {
+    @apply bg-app-canvas;
+    min-height: 100vh;
+  }
   html {
-    @apply bg-app-canvas text-app-fg antialiased;
+    @apply text-app-fg antialiased;
   }
 
   .markdown-body {
@@ -138,4 +147,3 @@
     padding-bottom: env(safe-area-inset-bottom);
   }
 }
-
