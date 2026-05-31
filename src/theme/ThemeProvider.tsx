@@ -41,9 +41,33 @@ function resolveTheme(preference: ThemePreference, osDark: boolean): ResolvedThe
   return osDark ? 'dark' : 'light';
 }
 
+// Canvas RGB — MUST match --color-app-canvas in index.css per theme.
+// Light #e5ddd4 → [229,221,212]; Dark #141414 → [20,20,20].
+const CANVAS_LIGHT_RGB: [number, number, number] = [229, 221, 212];
+const CANVAS_DARK_RGB: [number, number, number] = [20, 20, 20];
+
+// Keep the NATIVE (Tauri) window background in sync with the theme. The native
+// window paints this color in the brief gap between an OS resize (minimize/
+// maximize) and the WebView repaint. Without a matching opaque color that gap
+// shows the default black — the blank/black flash. Matching it to the canvas
+// makes the transition seamless in both themes.
+function syncNativeWindowBackground(resolved: ResolvedTheme) {
+  if (typeof window === 'undefined' || !(window as any).__TAURI_INTERNALS__) return;
+  const rgb = resolved === 'dark' ? CANVAS_DARK_RGB : CANVAS_LIGHT_RGB;
+  void import('@tauri-apps/api/window')
+    .then(({ getCurrentWindow }) => {
+      const win = getCurrentWindow() as unknown as {
+        setBackgroundColor?: (c: [number, number, number]) => Promise<void>;
+      };
+      return win.setBackgroundColor?.(rgb);
+    })
+    .catch(() => { /* web build or API unavailable — CSS canvas bg still applies */ });
+}
+
 function applyDomTheme(resolved: ResolvedTheme) {
   document.documentElement.classList.toggle('dark', resolved === 'dark');
   document.documentElement.style.colorScheme = resolved === 'dark' ? 'dark' : 'light';
+  syncNativeWindowBackground(resolved);
 }
 
 export function ThemeProvider({ children }: { children: ReactNode }) {

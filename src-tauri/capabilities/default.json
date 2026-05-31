@@ -6,6 +6,7 @@
     "core:default",
     "core:event:default",
     "core:window:allow-start-dragging",
+    "core:window:allow-set-background-color",
     "deep-link:default",
     "deep-link:allow-get-current",
     "shell:allow-open",

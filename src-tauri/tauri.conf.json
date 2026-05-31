@@ -16,13 +16,14 @@
         "title": "Wisprnote AI",
         "width": 1400,
         "height": 900,
-        "minWidth": 1000,
-        "minHeight": 700,
+        "minWidth": 560,
+        "minHeight": 640,
         "center": true,
         "resizable": true,
         "fullscreen": false,
         "decorations": true,
-        "transparent": true,
+        "transparent": false,
+        "backgroundColor": "#141414",
         "hiddenTitle": true,
         "titleBarStyle": "Overlay"
       }
