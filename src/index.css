@@ -87,14 +87,13 @@
 }
 
 @layer base {
-  /* Paint html/body/#root with the opaque canvas color. The Tauri window is
-     transparent, so during a resize (minimize/restore) the OS outpaces the
-     WebView repaint and any unpainted region would show through as a blank/black
-     gap. Backing every root layer with the canvas color fills that gap, so the
-     transition stays smooth and on-brand instead of flashing blank. */
+  /* Root layers are TRANSPARENT (see the !important block in index.html). The
+     opaque app background is painted by the inner full-size shell in App.tsx
+     (h-screen w-screen bg-app-canvas), NOT by the roots — this is what lets the
+     window resize smoothly without a black flash (matches the reference app:
+     transparent webview roots + macOSPrivateApi + opaque inner container). */
   html, body, #root {
-    @apply bg-app-canvas;
-    min-height: 100vh;
+    height: 100%;
   }
   html {
     @apply text-app-fg antialiased;

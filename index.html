@@ -2,6 +2,18 @@
 <html lang="en">
   <head>
     <meta charset="UTF-8" />
+    <style>
+      /* Keep the webview's root layers TRANSPARENT (same technique the smooth
+         reference app uses). With macOSPrivateApi + a transparent window, the
+         transparent root composites directly against the native window during a
+         resize — there is no opaque web layer to lag a frame behind the OS, which
+         is what caused the black flash. The app's opaque background is painted by
+         an inner full-size container (#app-shell), NOT the roots. */
+      html, body, #root {
+        background: transparent !important;
+        background-color: transparent !important;
+      }
+    </style>
     <script>
       (function () {
         try {
@@ -12,6 +24,22 @@
           var el = document.documentElement;
           el.classList.toggle('dark', dark);
           el.style.colorScheme = dark ? 'dark' : 'light';
+
+          // Sync the NATIVE Tauri window background to the resolved theme as early
+          // as possible (before React mounts). The native window paints this color
+          // in the gap between an OS resize and the WebView repaint — matching it
+          // to the theme's canvas avoids a black/mismatched flash on minimize or
+          // maximize. Uses the global Tauri API (withGlobalTauri=true) so no module
+          // import is needed in this inline script. Light #e5ddd4 → [229,221,212];
+          // dark #141414 → [20,20,20].
+          var tauri = window.__TAURI__;
+          if (tauri && tauri.window && typeof tauri.window.getCurrentWindow === 'function') {
+            var rgb = dark ? [20, 20, 20] : [229, 221, 212];
+            var w = tauri.window.getCurrentWindow();
+            if (w && typeof w.setBackgroundColor === 'function') {
+              Promise.resolve(w.setBackgroundColor(rgb)).catch(function () {});
+            }
+          }
         } catch (e) {}
       })();
     </script>
