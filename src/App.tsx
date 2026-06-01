@@ -661,6 +661,17 @@ export default function App() {
   const clearUserState = useCallback(() => {
     const uid = prevUserIdRef.current;
     if (uid) void cacheClearUser(uid);
+    // Purge the known-people directory caches on sign-out so one account's
+    // attendees can never surface under another account on the same machine.
+    // Removes the legacy GLOBAL key (the source of the cross-account leak) plus
+    // every per-user `lumina:knownPeople:<email>` key.
+    try {
+      localStorage.removeItem('lumina:knownPeople');
+      for (let i = localStorage.length - 1; i >= 0; i--) {
+        const k = localStorage.key(i);
+        if (k && k.startsWith('lumina:knownPeople:')) localStorage.removeItem(k);
+      }
+    } catch { /* non-fatal */ }
     lastChatFetchTaskIdRef.current = null;
     lastAssetsFetchTaskIdRef.current = null;
     setHistory([]);
@@ -4171,7 +4182,7 @@ export default function App() {
   }
 
   return (
-    <div className="h-screen bg-app-canvas text-app-fg font-[system-ui] selection:bg-app-fg selection:text-app-panel flex flex-col overflow-hidden">
+    <div className="h-screen w-screen bg-app-canvas text-app-fg font-[system-ui] selection:bg-app-fg selection:text-app-panel flex flex-col overflow-hidden">
       {/* Network Status — floating pill toast (Apple-style) */}
       <AnimatePresence>
         {!isOnline && (

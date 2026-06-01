@@ -170,6 +170,17 @@ pub fn run() {
             recorder: Mutex::new(SystemAudioRecorder::new()),
             realtime_recorder: Mutex::new(RealtimeRecorder::new()),
         })
+        // Show the window only AFTER the webview finishes loading its content.
+        // The window starts hidden (visible:false in tauri.conf.json); revealing
+        // it post-paint means the user never sees a blank/black unpainted frame
+        // on launch — the same technique the reference app uses for smooth
+        // window transitions. The native background color (set in setup) covers
+        // any sub-frame gap during later resizes.
+        .on_page_load(|webview, payload| {
+            if payload.event() == tauri::webview::PageLoadEvent::Finished {
+                let _ = webview.window().show();
+            }
+        })
         .setup(|app| {
             // Get the main window and set it up
             let window = app.get_webview_window("main").unwrap();

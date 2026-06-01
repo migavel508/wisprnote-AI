@@ -11,6 +11,7 @@
   },
   "app": {
     "withGlobalTauri": true,
+    "macOSPrivateApi": true,
     "windows": [
       {
         "title": "Wisprnote AI",
@@ -22,8 +23,8 @@
         "resizable": true,
         "fullscreen": false,
         "decorations": true,
-        "transparent": false,
-        "backgroundColor": "#141414",
+        "transparent": true,
+        "visible": false,
         "hiddenTitle": true,
         "titleBarStyle": "Overlay"
       }
