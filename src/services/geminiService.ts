@@ -434,10 +434,19 @@ function getApiKey(): string {
 async function generateWithFallback(
   requestOptions: any,
   fallbackModels: string[] = ["gemini-3.1-flash-lite"],
-  // When true, Gemini calls go through the Tauri HTTP plugin instead of the SDK
-  // (for large inline-audio uploads that the WebView fetch can't handle).
+  // When true, the request carries a large inline-audio payload (batch
+  // transcription). Such payloads MUST go through the Gemini REST endpoint via
+  // the Tauri HTTP plugin — NOT through OpenRouter's chat endpoint, which
+  // rejects them with 413 "Request Too Long". So this flag overrides the
+  // provider choice: audio always uses Gemini regardless of VITE_AI_PROVIDER.
   useRestTransport = false,
 ): Promise<GenerateContentResponse> {
+  // Respect the configured provider for ALL requests, including audio. This app
+  // has no direct Google AI Studio key — every provider key (incl. Gemini via
+  // OpenRouter) lives in Secrets Manager and is reached through OpenRouter. The
+  // useRestTransport flag still selects the Tauri-HTTP transport for large
+  // payloads, but it must NOT switch the provider to direct Gemini (that path
+  // needs a Google key we don't have → "API key not valid").
   const provider = getProvider();
   let lastError: Error | null = null;
   const modelsToTry = [requestOptions.model, ...fallbackModels];

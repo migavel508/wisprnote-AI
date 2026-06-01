@@ -1,4 +1,5 @@
 use tauri::{Manager, Emitter};
+use tauri::utils::config::Color;
 use tauri::tray::TrayIconEvent;
 use tauri::menu::{MenuBuilder, MenuItemBuilder};
 use std::sync::Mutex;
@@ -173,6 +174,16 @@ pub fn run() {
             // Get the main window and set it up
             let window = app.get_webview_window("main").unwrap();
             window.set_title("Wisprnote AI").ok();
+
+            // Color the NATIVE window background from frame one. This is the real
+            // fix for the macOS black flash on minimize/maximize (tauri#14288):
+            // during an OS resize the WKWebView lags a frame behind the native
+            // window, and whatever the native window is backed by shows through.
+            // CSS / the JS setBackgroundColor API can't fill that native gap in
+            // time — only the native window color does. Dark canvas (#141414) is
+            // the safe initial value; the frontend keeps it synced to the active
+            // theme via window.setBackgroundColor() on mount + theme change.
+            window.set_background_color(Some(Color(20, 20, 20, 255))).ok();
 
             // Spawn audio device monitor — emits events when mic/speaker changes.
             // Only forward actual default-device changes to the frontend.

@@ -397,17 +397,15 @@ export default function App() {
   const [totalHistoryCount, setTotalHistoryCount] = useState(0);
   const historyPageRef = useRef(0);
   const HISTORY_PAGE_SIZE = 24;
-  // Max WAV size per batch chunk. Large uploads now go through the Tauri HTTP
-  // plugin (Rust networking, see geminiService), which handles big payloads
-  // reliably — so we use large chunks again: far fewer Gemini calls per file
-  // (~4 chunks for a 30-min recording instead of ~14) = much faster batches.
+  // Max WAV size per batch chunk. Batch audio is sent through the authed Lambda
+  // proxy (for key security). The binding limit there is AWS LAMBDA's 6 MB
+  // synchronous invocation payload — NOT API Gateway's 10 MB. The proxy receives
+  // the audio base64-encoded inside a JSON body, and base64 inflates ~1.33×, so
+  // the WAV must stay well under ~4.5 MB. We use 3 MB → ~4 MB base64 body,
+  // comfortably under Lambda's 6 MB limit. (6 MB WAV → ~8 MB body → 413.)
   // MUST be identical at every splitAudio call site so resume / blob-eviction
   // re-split produce the same chunk boundaries.
-  // Capped at 6 MB. Batch audio is now sent through the authed Lambda proxy,
-  // which sits behind API Gateway's HARD 10 MB request limit. base64 inflates
-  // ~1.33×, so 6 MB WAV → ~8 MB body, safely under 10 MB. (12 MB → ~16 MB would
-  // 413 at the gateway and trigger the slow retry loop.)
-  const BATCH_CHUNK_SIZE_MB = 6;
+  const BATCH_CHUNK_SIZE_MB = 3;
   const [chatMessages, setChatMessages] = useState<Message[]>([]);
   const [allMeetingsChatMessages, setAllMeetingsChatMessages] = useState<Message[]>([]);
   const [chatThreads, setChatThreads] = useState<ChatThread[]>(() => {
