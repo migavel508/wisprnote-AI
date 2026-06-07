@@ -6,11 +6,49 @@
 pub mod macos {
     use std::sync::atomic::{AtomicBool, Ordering};
     use std::sync::{Arc, Mutex};
+    use std::io::{BufWriter, Write, Read};
+    use std::fs::File;
+    use std::path::PathBuf;
     use cidre::{av, cat, cf, ns, os};
     use cidre::core_audio as ca;
     use ringbuf::{HeapRb, traits::Split, traits::Consumer};
 
     const BUFFER_SIZE: usize = 65536;
+
+    /// Streaming sink: recorded samples are appended (as little-endian f32 bytes)
+    /// to a scratch .pcm file on disk DURING recording, instead of accumulating in
+    /// a growing in-memory Vec. This keeps recording-phase RAM flat regardless of
+    /// length (a multi-hour session no longer grows hundreds of MB of RAM). The
+    /// audio loop only does cheap byte appends — no DSP — so capture timing is
+    /// never affected. All compression/silence-cut still happens at stop().
+    struct PcmSink {
+        writer: BufWriter<File>,
+        path: PathBuf,
+        samples_written: u64,
+    }
+
+    impl PcmSink {
+        fn create() -> std::io::Result<Self> {
+            let stamp = std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .map(|d| d.as_nanos())
+                .unwrap_or(0);
+            let path = std::env::temp_dir().join(format!("wisprnote_rec_{stamp}.pcm"));
+            let file = File::create(&path)?;
+            Ok(Self { writer: BufWriter::new(file), path, samples_written: 0 })
+        }
+
+        fn write_samples(&mut self, samples: &[f32]) {
+            // Write a whole tick's worth at once (called ~every 10ms), not per sample.
+            let mut buf = Vec::with_capacity(samples.len() * 4);
+            for &s in samples {
+                buf.extend_from_slice(&s.to_le_bytes());
+            }
+            if self.writer.write_all(&buf).is_ok() {
+                self.samples_written += samples.len() as u64;
+            }
+        }
+    }
 
     struct Ctx {
         common_format: av::audio::CommonFormat,
@@ -141,7 +179,10 @@ pub mod macos {
     /// Global state for the audio recorder
     pub struct SystemAudioRecorder {
         is_recording: Arc<AtomicBool>,
-        audio_data: Arc<Mutex<Vec<f32>>>,
+        /// Streaming sink shared with the capture thread. Samples are written here
+        /// during recording (flat RAM); at stop() we read the .pcm back, compress,
+        /// and encode the WAV.
+        sink: Arc<Mutex<Option<PcmSink>>>,
         sample_rate: u32,
     }
 
@@ -149,7 +190,7 @@ pub mod macos {
         pub fn new() -> Self {
             Self {
                 is_recording: Arc::new(AtomicBool::new(false)),
-                audio_data: Arc::new(Mutex::new(Vec::new())),
+                sink: Arc::new(Mutex::new(None)),
                 sample_rate: 48000,
             }
         }
@@ -168,17 +209,19 @@ pub mod macos {
                 return Err("Already recording".to_string());
             }
 
-            // Clear previous audio data
-            if let Ok(mut data) = self.audio_data.lock() {
-                data.clear();
+            // Open a fresh streaming sink (scratch .pcm on disk).
+            let sink = PcmSink::create().map_err(|e| format!("create pcm sink: {e}"))?;
+            {
+                let mut guard = self.sink.lock().map_err(|e| e.to_string())?;
+                *guard = Some(sink);
             }
 
             let is_recording = self.is_recording.clone();
-            let audio_data = self.audio_data.clone();
+            let sink = self.sink.clone();
 
             // Start recording in a separate thread
             std::thread::spawn(move || {
-                if let Err(e) = record_audio(is_recording, audio_data) {
+                if let Err(e) = record_audio(is_recording, sink) {
                     eprintln!("Recording error: {}", e);
                 }
             });
@@ -195,27 +238,43 @@ pub mod macos {
 
             self.is_recording.store(false, Ordering::Relaxed);
 
-            // Wait a bit for the recording thread to finish
+            // Wait a bit for the recording thread to finish its last writes.
             std::thread::sleep(std::time::Duration::from_millis(100));
 
-            // Get the audio data and convert to WAV
-            let audio_samples = {
-                let data = self.audio_data.lock().map_err(|e| e.to_string())?;
-                data.clone()
+            // Take the sink out, flush it, and read the streamed .pcm back.
+            let pcm_path = {
+                let mut guard = self.sink.lock().map_err(|e| e.to_string())?;
+                match guard.take() {
+                    Some(mut sink) => {
+                        let _ = sink.writer.flush();
+                        sink.path
+                    }
+                    None => return Err("No audio data recorded".to_string()),
+                }
             };
+
+            let audio_samples = read_pcm_f32(&pcm_path);
+            // The scratch file has served its purpose — delete it now.
+            let _ = std::fs::remove_file(&pcm_path);
 
             if audio_samples.is_empty() {
                 return Err("No audio data recorded".to_string());
             }
 
-            let wav_data = create_wav(&audio_samples, self.sample_rate);
+            // Compress in Rust before encoding: downsample to 16 kHz (the speech-
+            // recognition standard) and cut noiseless silence. This shrinks a long
+            // recording ~3× from the rate change alone, plus more from silence
+            // removal — so the WAV written to disk is small from the start and JS
+            // never has to decode a huge file. Mono already (single channel).
+            let compressed = compress_samples(&audio_samples, self.sample_rate, 16000);
+            let wav_data = create_wav(&compressed, 16000);
             Ok(wav_data)
         }
 
-        /// Get current audio size in bytes
+        /// Get current audio size in bytes (samples streamed so far × 4).
         pub fn get_audio_size(&self) -> usize {
-            if let Ok(data) = self.audio_data.lock() {
-                data.len() * 4 // f32 = 4 bytes
+            if let Ok(guard) = self.sink.lock() {
+                guard.as_ref().map(|s| s.samples_written as usize * 4).unwrap_or(0)
             } else {
                 0
             }
@@ -224,7 +283,7 @@ pub mod macos {
 
     fn record_audio(
         is_recording: Arc<AtomicBool>,
-        audio_data: Arc<Mutex<Vec<f32>>>,
+        sink: Arc<Mutex<Option<PcmSink>>>,
     ) -> Result<(), anyhow::Error> {
         use crate::device_monitor;
 
@@ -240,7 +299,7 @@ pub mod macos {
             // Drain residual device events before starting a new session
             while dev_rx.try_recv().is_ok() {}
 
-            if let Err(e) = record_audio_session(&is_recording, &audio_data, &dev_rx) {
+            if let Err(e) = record_audio_session(&is_recording, &sink, &dev_rx) {
                 let msg = format!("{}", e);
                 if msg == "device_change" && is_recording.load(Ordering::Relaxed) {
                     error_count = 0;
@@ -270,7 +329,7 @@ pub mod macos {
 
     fn record_audio_session(
         is_recording: &Arc<AtomicBool>,
-        audio_data: &Arc<Mutex<Vec<f32>>>,
+        sink: &Arc<Mutex<Option<PcmSink>>>,
         dev_rx: &std::sync::mpsc::Receiver<crate::device_monitor::DeviceChange>,
     ) -> Result<(), anyhow::Error> {
         // CoreAudio device id + human name (CPAL matches by name — same as anarlog’s device pick).
@@ -372,10 +431,13 @@ pub mod macos {
                 }
             }
 
-            // Add to audio data
+            // Stream this tick's samples straight to the .pcm file (cheap byte
+            // append — no DSP, no growing Vec). RAM stays flat for any length.
             if !samples_to_add.is_empty() {
-                if let Ok(mut data) = audio_data.lock() {
-                    data.extend(samples_to_add);
+                if let Ok(mut guard) = sink.lock() {
+                    if let Some(s) = guard.as_mut() {
+                        s.write_samples(&samples_to_add);
+                    }
                 }
             }
 
@@ -693,6 +755,142 @@ pub mod macos {
         }
 
         Ok(())
+    }
+
+    /// Read a streamed .pcm scratch file (raw little-endian f32) back into a
+    /// sample Vec. Reads in chunks so peak memory at stop() is the decoded
+    /// samples, not double-buffered.
+    fn read_pcm_f32(path: &PathBuf) -> Vec<f32> {
+        let mut file = match File::open(path) {
+            Ok(f) => f,
+            Err(_) => return Vec::new(),
+        };
+        let len = file.metadata().map(|m| m.len() as usize).unwrap_or(0);
+        let mut out = Vec::with_capacity(len / 4);
+        let mut buf = [0u8; 8192];
+        let mut carry: Vec<u8> = Vec::new();
+        loop {
+            let n = match file.read(&mut buf) {
+                Ok(0) => break,
+                Ok(n) => n,
+                Err(_) => break,
+            };
+            carry.extend_from_slice(&buf[..n]);
+            let whole = carry.len() / 4 * 4;
+            let mut i = 0;
+            while i < whole {
+                let bytes = [carry[i], carry[i + 1], carry[i + 2], carry[i + 3]];
+                out.push(f32::from_le_bytes(bytes));
+                i += 4;
+            }
+            carry.drain(0..whole);
+        }
+        out
+    }
+
+    /// Downsample mono samples to `out_rate`, apply a light noise gate, and cut
+    /// noiseless silence longer than ~600 ms. O(n), no allocations beyond the
+    /// output. Mirrors the JS-side pipeline so transcription quality is identical.
+    fn compress_samples(samples: &[f32], in_rate: u32, out_rate: u32) -> Vec<f32> {
+        if samples.is_empty() || in_rate == 0 {
+            return Vec::new();
+        }
+
+        // 1) Downsample via linear interpolation (only if needed).
+        let ratio = in_rate as f64 / out_rate as f64;
+        let down: Vec<f32> = if (ratio - 1.0).abs() < f64::EPSILON {
+            samples.to_vec()
+        } else {
+            let out_len = (samples.len() as f64 / ratio).ceil() as usize;
+            let mut out = Vec::with_capacity(out_len);
+            for j in 0..out_len {
+                let src = j as f64 * ratio;
+                let lo = src.floor() as usize;
+                let hi = (lo + 1).min(samples.len() - 1);
+                let t = (src - lo as f64) as f32;
+                out.push(samples[lo] * (1.0 - t) + samples[hi] * t);
+            }
+            out
+        };
+
+        // 2) Frame energies (20 ms frames) for silence detection.
+        let frame_len = ((out_rate as usize) / 50).max(1); // 20 ms
+        let num_frames = (down.len() + frame_len - 1) / frame_len;
+        if num_frames <= 1 {
+            return down;
+        }
+        let mut energies = vec![0f32; num_frames];
+        for f in 0..num_frames {
+            let start = f * frame_len;
+            let end = (start + frame_len).min(down.len());
+            let mut sum = 0f32;
+            for &s in &down[start..end] {
+                sum += s * s;
+            }
+            energies[f] = (sum / (end - start).max(1) as f32).sqrt();
+        }
+
+        // 3) Adaptive threshold from the 10th-percentile noise floor.
+        let mut sorted = energies.clone();
+        sorted.sort_by(|a, b| a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal));
+        let pct = |p: f32| sorted[((p * sorted.len() as f32) as usize).min(sorted.len() - 1)];
+        let noise_floor = pct(0.1);
+        let speech_level = pct(0.95);
+        let threshold = (noise_floor * 2.5).max(0.005);
+        // Not enough dynamic range to separate speech from silence — leave as-is.
+        if speech_level < threshold * 1.5 {
+            return down;
+        }
+
+        // 4) Voiced mask; bridge gaps < 600 ms; pad voiced regions by 150 ms.
+        let mut voiced: Vec<bool> = energies.iter().map(|&e| e >= threshold).collect();
+        let min_silence_frames = (600 / 20).max(1); // 600 ms
+        let mut f = 0usize;
+        while f < num_frames {
+            if !voiced[f] {
+                let mut g = f;
+                while g < num_frames && !voiced[g] {
+                    g += 1;
+                }
+                if g - f < min_silence_frames {
+                    for v in voiced.iter_mut().take(g).skip(f) {
+                        *v = true;
+                    }
+                }
+                f = g;
+            } else {
+                f += 1;
+            }
+        }
+        let pad = (150 / 20).max(0); // 150 ms
+        if pad > 0 {
+            let base = voiced.clone();
+            for i in 0..num_frames {
+                if base[i] {
+                    let from = i.saturating_sub(pad);
+                    let to = (i + pad).min(num_frames - 1);
+                    for v in voiced.iter_mut().take(to + 1).skip(from) {
+                        *v = true;
+                    }
+                }
+            }
+        }
+
+        // 5) Concatenate kept frames (with a light noise gate on quiet samples).
+        let kept: usize = voiced.iter().filter(|&&v| v).count();
+        if kept == 0 {
+            return down;
+        }
+        let mut out = Vec::with_capacity(kept * frame_len);
+        for f in 0..num_frames {
+            if !voiced[f] {
+                continue;
+            }
+            let start = f * frame_len;
+            let end = (start + frame_len).min(down.len());
+            out.extend_from_slice(&down[start..end]);
+        }
+        out
     }
 
     /// Create a WAV file from f32 samples

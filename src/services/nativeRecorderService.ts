@@ -24,18 +24,56 @@ export async function startSystemAudioRecording(): Promise<void> {
   await tauriInvoke<void>('start_system_audio');
 }
 
+/**
+ * Stop the native batch recording. Rust now writes the WAV to a temp file on
+ * disk and returns its PATH (instead of base64-ing the whole file across the
+ * IPC bridge). We read the bytes from that path and wrap them in a File so the
+ * downstream merge/compress/split pipeline is unchanged.
+ *
+ * Returns a File with a friendly display name; the on-disk path is attached as
+ * `.diskPath` so cleanup (`deleteRecordingFile`) can remove the temp file once
+ * the batch completes — WITHOUT exposing the raw path in the UI title.
+ */
 export async function stopSystemAudioRecording(): Promise<File> {
-  const base64Wav = await tauriInvoke<string>('stop_system_audio');
+  const path = await tauriInvoke<string>('stop_system_audio');
 
-  // Decode base64 to WAV File
-  const binaryStr = atob(base64Wav);
-  const bytes = new Uint8Array(binaryStr.length);
-  for (let i = 0; i < binaryStr.length; i++) {
-    bytes[i] = binaryStr.charCodeAt(i);
-  }
+  // Read the file from disk via the fs plugin (streamed by Rust, no base64).
+  const { readFile } = await import('@tauri-apps/plugin-fs');
+  const bytes = await readFile(path);
+
   const blob = new Blob([bytes], { type: 'audio/wav' });
-  const filename = `Recording_${new Date().toISOString().replace(/[:.]/g, '-')}.wav`;
-  return new File([blob], filename, { type: 'audio/wav' });
+  // Friendly display name (used as the default meeting title); the actual disk
+  // path is kept on `.diskPath` for cleanup only.
+  const friendlyName = `Recording_${new Date().toISOString().replace(/[:.]/g, '-')}.wav`;
+  const file = new File([blob], friendlyName, { type: 'audio/wav' });
+  (file as any).diskPath = path;
+  return file;
+}
+
+/**
+ * Delete a recording temp file written by stopSystemAudioRecording. Best-effort
+ * — safe to call with a missing path. Pass the File's `diskPath`/`.name`.
+ */
+export async function deleteRecordingFile(path: string): Promise<void> {
+  if (!isTauri() || !path) return;
+  try {
+    await tauriInvoke<void>('delete_recording_file', { path });
+  } catch {
+    /* non-fatal — startup sweep / OS temp cleanup will catch it */
+  }
+}
+
+/**
+ * Startup safety-net: purge recording temp files left orphaned by a crash.
+ * Returns the count removed. No-op outside Tauri.
+ */
+export async function sweepOldRecordings(maxAgeSecs = 24 * 60 * 60): Promise<number> {
+  if (!isTauri()) return 0;
+  try {
+    return await tauriInvoke<number>('sweep_old_recordings', { maxAgeSecs });
+  } catch {
+    return 0;
+  }
 }
 
 export async function isSystemAudioRecording(): Promise<boolean> {

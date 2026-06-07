@@ -11,6 +11,11 @@
     "deep-link:allow-get-current",
     "shell:allow-open",
     "shell:default",
+    "fs:allow-read-file",
+    {
+      "identifier": "fs:scope",
+      "allow": [{ "path": "$APPCACHE/recordings/*" }]
+    },
     {
       "identifier": "http:default",
       "allow": [

@@ -75,7 +75,12 @@ export interface CanonicalTopicEntry {
 // Piece 2 — Constants
 // ============================================================
 
-const EMBED_BATCH_SIZE = 80;
+// Embedding requests are proxied through the authed Lambda, which has a ~6 MB
+// payload limit (on BOTH request and response). Each embedding vector is large
+// (~3072 dims → tens of KB of JSON), so 80 chunks/batch produced multi-MB
+// responses that tripped "413 Request Too Long" during Turbopuffer backfill.
+// 16 chunks keeps each request+response comfortably under the limit.
+const EMBED_BATCH_SIZE = 16;
 const TOPIC_MERGE_THRESHOLD = 0.82;
 const EDGE_MIN_SCORE = 0.5;
 const TOP_K_EDGES = 5;

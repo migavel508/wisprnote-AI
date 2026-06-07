@@ -218,8 +218,17 @@ export const handler = async (event: APIGatewayProxyEvent): Promise<APIGatewayPr
     }
   } catch (err: any) {
     if (err.message === 'UNAUTHORIZED') return unauthorized();
-    console.error('Handler error:', err);
-    return serverError(err.message || 'Internal server error');
+    // TEMP DIAGNOSTIC: log full error detail (pg errors expose code/detail, not
+    // always .message) so the 500 root cause is visible in CloudWatch.
+    console.error('Handler error:', JSON.stringify({
+      message: err?.message,
+      code: err?.code,
+      detail: err?.detail,
+      where: err?.where,
+      routine: err?.routine,
+      stack: err?.stack,
+    }));
+    return serverError(err?.message || err?.detail || `err code ${err?.code ?? 'unknown'}`);
   } finally {
     cachedClaims = null;
   }
@@ -607,9 +616,27 @@ async function handleShareVerify(token: string, viewerEmail: string | null): Pro
     await query('UPDATE shared_meeting_access SET accessed_at=NOW() WHERE id=$1 AND accessed_at IS NULL', [access.id]);
   }
 
+  // Normalize permissions defensively: the column is TEXT[] (pg returns an
+  // array), but guard against null / a JSON-encoded string so a malformed row
+  // can't throw a 500 ("Something went wrong") on the public share page.
+  let perms: string[];
+  if (Array.isArray(share.permissions)) {
+    perms = share.permissions;
+  } else if (typeof share.permissions === 'string') {
+    try {
+      const parsed = JSON.parse(share.permissions);
+      perms = Array.isArray(parsed) ? parsed : ['notes', 'summary', 'chat'];
+    } catch {
+      // Postgres array literal like {notes,summary,chat}
+      perms = share.permissions.replace(/^\{|\}$/g, '').split(',').map((s: string) => s.trim()).filter(Boolean);
+    }
+  } else {
+    perms = ['notes', 'summary', 'chat'];
+  }
+
   const fields = ['filename', 'created_at', 'duration'];
-  if (share.permissions.includes('summary')) fields.push('summary');
-  if (share.permissions.includes('notes')) fields.push('notes');
+  if (perms.includes('summary')) fields.push('summary');
+  if (perms.includes('notes')) fields.push('notes');
 
   const task = await queryOne(`SELECT ${fields.join(',')} FROM task_history WHERE id=$1`, [share.task_id]);
   if (!task) return ok({ denied: true, reason: 'The shared meeting could not be found.' });
@@ -621,9 +648,9 @@ async function handleShareVerify(token: string, viewerEmail: string | null): Pro
       notes: task.notes ?? null,
       created_at: task.created_at ?? null,
       duration: task.duration ?? 0,
-      permissions: share.permissions,
+      permissions: perms,
     },
-    share,
+    share: { ...share, permissions: perms },
   });
 }
 

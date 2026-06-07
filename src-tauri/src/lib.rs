@@ -34,15 +34,86 @@ fn start_system_audio(state: tauri::State<AppState>) -> Result<(), String> {
     recorder.start()
 }
 
-/// Stop recording and return WAV data as base64
+/// Stop recording, write the WAV to a temp file on disk, and return its PATH.
+///
+/// Previously this base64-encoded the entire (up to ~600 MB) WAV and shipped it
+/// across the Tauri IPC bridge as one giant string — a ~+33% size blow-up plus
+/// several full in-memory copies (Rust Vec → base64 String → JS string → bytes →
+/// Blob). For long recordings that meant multi-GB RAM spikes and slow handoff.
+///
+/// Now the bytes stay in Rust and are written straight to a file in the app
+/// cache dir; JS receives only the short path and reads the file on demand. The
+/// file is deleted via `delete_recording_file` once the batch completes.
 #[tauri::command]
-fn stop_system_audio(state: tauri::State<AppState>) -> Result<String, String> {
-    let mut recorder = state.recorder.lock().map_err(|e| e.to_string())?;
-    let wav_data = recorder.stop()?;
+fn stop_system_audio(
+    app: tauri::AppHandle,
+    state: tauri::State<AppState>,
+) -> Result<String, String> {
+    let wav_data = {
+        let mut recorder = state.recorder.lock().map_err(|e| e.to_string())?;
+        recorder.stop()?
+    };
 
-    // Encode as base64 for easy transfer to frontend
-    use base64::{Engine as _, engine::general_purpose::STANDARD};
-    Ok(STANDARD.encode(&wav_data))
+    let dir = app
+        .path()
+        .app_cache_dir()
+        .map_err(|e| format!("cache dir: {e}"))?
+        .join("recordings");
+    std::fs::create_dir_all(&dir).map_err(|e| format!("mkdir: {e}"))?;
+
+    // Unique filename (nanos since epoch) — no extra uuid dependency needed.
+    let stamp = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_nanos())
+        .unwrap_or(0);
+    let path = dir.join(format!("rec_{stamp}.wav"));
+    std::fs::write(&path, &wav_data).map_err(|e| format!("write: {e}"))?;
+
+    Ok(path.to_string_lossy().to_string())
+}
+
+/// Delete a recording temp file written by `stop_system_audio`. Best-effort; a
+/// missing file is not an error (it may have already been cleaned up).
+#[tauri::command]
+fn delete_recording_file(path: String) -> Result<(), String> {
+    match std::fs::remove_file(&path) {
+        Ok(_) => Ok(()),
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(()),
+        Err(e) => Err(e.to_string()),
+    }
+}
+
+/// Startup safety-net: delete recording temp files older than `max_age_secs`
+/// (default 24h) from the recordings cache dir. Catches files orphaned by a hard
+/// crash between recording and processing. Returns the number removed.
+#[tauri::command]
+fn sweep_old_recordings(app: tauri::AppHandle, max_age_secs: Option<u64>) -> Result<u32, String> {
+    let max_age = std::time::Duration::from_secs(max_age_secs.unwrap_or(24 * 60 * 60));
+    let dir = match app.path().app_cache_dir() {
+        Ok(d) => d.join("recordings"),
+        Err(_) => return Ok(0),
+    };
+    let entries = match std::fs::read_dir(&dir) {
+        Ok(e) => e,
+        Err(_) => return Ok(0), // dir doesn't exist yet → nothing to sweep
+    };
+    let now = std::time::SystemTime::now();
+    let mut removed = 0u32;
+    for entry in entries.flatten() {
+        let path = entry.path();
+        if path.extension().and_then(|e| e.to_str()) != Some("wav") {
+            continue;
+        }
+        let too_old = entry
+            .metadata()
+            .and_then(|m| m.modified())
+            .map(|mtime| now.duration_since(mtime).map(|age| age > max_age).unwrap_or(false))
+            .unwrap_or(false);
+        if too_old && std::fs::remove_file(&path).is_ok() {
+            removed += 1;
+        }
+    }
+    Ok(removed)
 }
 
 /// Check if currently recording
@@ -166,6 +237,7 @@ pub fn run() {
         .plugin(tauri_plugin_shell::init())
         .plugin(tauri_plugin_deep_link::init())
         .plugin(tauri_plugin_http::init())
+        .plugin(tauri_plugin_fs::init())
         .manage(AppState {
             recorder: Mutex::new(SystemAudioRecorder::new()),
             realtime_recorder: Mutex::new(RealtimeRecorder::new()),
@@ -278,6 +350,8 @@ pub fn run() {
             is_system_audio_available,
             start_system_audio,
             stop_system_audio,
+            delete_recording_file,
+            sweep_old_recordings,
             is_system_audio_recording,
             get_system_audio_size,
             start_realtime_audio,

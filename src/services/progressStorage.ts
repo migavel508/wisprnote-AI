@@ -193,6 +193,36 @@ class ProgressStorage {
       .map(p => this.deleteProgress(p.id));
     await Promise.all(deletePromises);
   }
+
+  /**
+   * Safety-net sweep: delete any `__audioblob` records whose parent progress
+   * metadata no longer exists. Such orphans can be left behind if the app
+   * crashes between writing the blob and its metadata, or mid-delete. They'd
+   * otherwise leak large audio on disk forever, since getAllProgress() hides
+   * them. Call on startup.
+   */
+  async sweepOrphanedBlobs(): Promise<number> {
+    if (!this.db) await this.init();
+    return new Promise((resolve, reject) => {
+      const tx = this.db!.transaction([STORE_NAME], 'readwrite');
+      const store = tx.objectStore(STORE_NAME);
+      const req = store.getAllKeys();
+      req.onsuccess = () => {
+        const keys = (req.result || []).map(String);
+        const liveIds = new Set(keys.filter(k => !k.endsWith('__audioblob')));
+        let removed = 0;
+        for (const k of keys) {
+          if (k.endsWith('__audioblob')) {
+            const parentId = k.slice(0, -'__audioblob'.length);
+            if (!liveIds.has(parentId)) { store.delete(k); removed++; }
+          }
+        }
+        tx.oncomplete = () => resolve(removed);
+        tx.onerror = () => reject(tx.error);
+      };
+      req.onerror = () => reject(req.error);
+    });
+  }
 }
 
 export const progressStorage = new ProgressStorage();
