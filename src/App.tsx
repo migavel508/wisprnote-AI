@@ -118,6 +118,8 @@ import {
   checkSystemAudioAvailable,
   startSystemAudioRecording,
   stopSystemAudioRecording,
+  deleteRecordingFile,
+  sweepOldRecordings,
   isSystemAudioRecording,
   startRealtimeRecording,
   stopRealtimeRecording,
@@ -136,6 +138,7 @@ import {
 } from './services/audioDeviceService';
 
 import Auth from './components/Auth';
+import WelcomeProfile from './components/WelcomeProfile';
 import ChatPage from './pages/ChatPage';
 import NotesPage from './pages/NotesPage';
 import HistoryPage from './pages/HistoryPage';
@@ -332,6 +335,9 @@ export default function App() {
   }
 
   const [session, setSession] = useState<AuthSession | null>(null);
+  // Show the post-login welcome/profile screen after an ACTIVE sign-in (not a
+  // session restored on startup). Set true on the SIGNED_IN auth event.
+  const [showWelcome, setShowWelcome] = useState(false);
   /** False until the first `getSession()` finishes — avoids flashing the login screen on cold start when Cognito already has tokens. */
   const [isAuthSessionResolved, setIsAuthSessionResolved] = useState(false);
   const [file, setFile] = useState<File | null>(null);
@@ -762,7 +768,7 @@ export default function App() {
         if (!cancelled) setIsAuthSessionResolved(true);
       });
 
-    const { unsubscribe } = onAuthStateChange((_event, authSession) => {
+    const { unsubscribe } = onAuthStateChange((event, authSession) => {
       const newUserId = authSession?.user?.id ?? null;
       const prevUserId = prevUserIdRef.current;
 
@@ -772,6 +778,14 @@ export default function App() {
 
       prevUserIdRef.current = newUserId;
       setSession(authSession);
+      // An active SIGNED_IN event (password or Google login) → show the welcome
+      // profile screen before the app. A restored session (handled by getSession
+      // above) does NOT fire this, so returning users aren't interrupted.
+      if (event === 'SIGNED_IN' && authSession) {
+        setShowWelcome(true);
+      } else if (event === 'SIGNED_OUT') {
+        setShowWelcome(false);
+      }
       // Sign-in/out via Cognito callbacks can land before/without overlapping getSession; always unblock UI.
       setIsAuthSessionResolved(true);
     });
@@ -847,6 +861,12 @@ export default function App() {
       try {
         await progressStorage.init();
         await progressStorage.clearOldProgress(24 * 60 * 60 * 1000);
+        // Safety net: purge any orphaned recorded-audio blobs left by a crash so
+        // they don't leak large files on disk.
+        const orphans = await progressStorage.sweepOrphanedBlobs();
+        if (orphans > 0) log.info('orphan_audio_swept', { count: orphans });
+        // Also sweep orphaned native recording temp files (the on-disk WAVs).
+        void sweepOldRecordings().then(n => { if (n > 0) log.info('orphan_recordings_swept', { count: n }); });
         const incomplete = await getMostRecentIncompleteProgress();
         if (incomplete && status === 'idle') {
           setRecoverableProgress(incomplete);
@@ -1487,7 +1507,20 @@ export default function App() {
           finalSegment = await stopSystemAudioRecording();
         }
         const allSegments = [...pausedBatchSegmentsRef.current, ...(finalSegment ? [finalSegment] : [])];
+        // Each native segment is ALREADY compressed in Rust at finalize (16 kHz
+        // mono + silence cut), so we just merge them — no second JS compression
+        // pass needed (that would re-decode the file for no benefit).
         const audioFile = allSegments.length > 0 ? await mergeAudioFilesToWav(allSegments) : null;
+        if (audioFile) {
+          log.info('recording_ready', { sizeMB: +(audioFile.size / 1048576).toFixed(1) });
+        }
+        // The compressed copy is now in memory (and gets persisted for the
+        // batch); the raw on-disk temp recordings are no longer needed → delete
+        // them immediately so they don't linger on the machine.
+        for (const seg of allSegments) {
+          const p = (seg as any).diskPath as string | undefined;
+          if (p) void deleteRecordingFile(p);
+        }
         setIsRecording(false);
         setIsPaused(false);
         pausedBatchSegmentsRef.current = [];
@@ -4179,6 +4212,11 @@ export default function App() {
 
   if (!session) {
     return <Auth />;
+  }
+
+  // After an active sign-in, show the welcome/profile confirmation before the app.
+  if (showWelcome) {
+    return <WelcomeProfile session={session} onContinue={() => setShowWelcome(false)} />;
   }
 
   return (

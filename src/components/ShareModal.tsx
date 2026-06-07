@@ -86,9 +86,17 @@ export default function ShareModal({ taskId, taskName, isOpen, onClose }: ShareM
     try {
       const newType = share.access_type === 'public' ? 'restricted' : 'public';
       const updated = await updateShareAccess(share.id, newType);
-      setShare(updated);
-    } catch {
-      setError('Failed to update access type.');
+      // The backend returns the updated row. If owner_id didn't match it returns
+      // 404 (thrown above); if it returns an empty/falsy body, treat optimistically
+      // by applying the new type locally so the UI still reflects the change.
+      setShare(updated ?? { ...share, access_type: newType });
+    } catch (e: any) {
+      const status = e?.status;
+      setError(
+        status === 404
+          ? 'Could not update — this share may belong to a different account. Try re-creating the link.'
+          : `Failed to update access type${e?.message ? `: ${e.message}` : ''}.`
+      );
     } finally {
       setSaving(false);
     }
@@ -182,20 +190,26 @@ export default function ShareModal({ taskId, taskName, isOpen, onClose }: ShareM
               <Loader2 className="w-5 h-5 animate-spin text-[#1a1a1a]/20" />
             </div>
           ) : !share ? (
-            /* No share exists — creation UI */
+            /* No share exists — creation UI. "Anyone with the link" is the
+               primary (recommended) action: a public share needs no sign-in, so
+               recipients can open it directly. "Specific people" is the secondary
+               opt-in for private shares. */
             <div className="space-y-3 pt-2">
               <p className="text-[13px] text-[#1a1a1a]/60">Choose who can access this meeting:</p>
               <button
                 onClick={() => handleCreateShare('public')}
                 disabled={saving}
-                className="w-full flex items-center gap-3 p-3.5 rounded-xl border border-[#e8e2da] hover:border-[#c4bab0] hover:bg-[#faf8f6] transition-all text-left"
+                className="w-full flex items-center gap-3 p-3.5 rounded-xl border-2 border-emerald-500/40 bg-emerald-50/40 hover:border-emerald-500/70 hover:bg-emerald-50/70 transition-all text-left relative"
               >
-                <div className="w-9 h-9 rounded-lg bg-emerald-50 flex items-center justify-center flex-shrink-0">
+                <div className="w-9 h-9 rounded-lg bg-emerald-100 flex items-center justify-center flex-shrink-0">
                   <Globe className="w-4 h-4 text-emerald-600" />
                 </div>
-                <div>
-                  <div className="text-[13px] font-semibold text-[#1a1a1a]">Anyone with the link</div>
-                  <div className="text-[11px] text-[#1a1a1a]/40 mt-0.5">No sign-in required to view</div>
+                <div className="flex-1">
+                  <div className="flex items-center gap-2">
+                    <span className="text-[13px] font-semibold text-[#1a1a1a]">Anyone with the link</span>
+                    <span className="text-[9px] font-bold uppercase tracking-wider px-1.5 py-0.5 rounded-full bg-emerald-500 text-white">Recommended</span>
+                  </div>
+                  <div className="text-[11px] text-[#1a1a1a]/45 mt-0.5">No sign-in required — recipients open it directly</div>
                 </div>
               </button>
               <button
@@ -208,7 +222,7 @@ export default function ShareModal({ taskId, taskName, isOpen, onClose }: ShareM
                 </div>
                 <div>
                   <div className="text-[13px] font-semibold text-[#1a1a1a]">Specific people</div>
-                  <div className="text-[11px] text-[#1a1a1a]/40 mt-0.5">Only invited emails can view</div>
+                  <div className="text-[11px] text-[#1a1a1a]/40 mt-0.5">Requires sign-in — only invited emails can view</div>
                 </div>
               </button>
             </div>

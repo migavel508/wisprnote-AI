@@ -29,22 +29,27 @@ import { createConsoleTransport } from './transports/console';
 import { createTauriTransport } from './transports/tauri';
 import type { LogLevel } from './types';
 
-const isDev = (() => {
-  try {
-    // Vite injects import.meta.env at build time
-    return (import.meta as unknown as Record<string, Record<string, string>>).env?.MODE === 'development';
-  } catch {
-    return false;
-  }
+const env = (() => {
+  try { return (import.meta as unknown as Record<string, Record<string, string>>).env ?? {}; }
+  catch { return {}; }
 })();
 
-const globalMinLevel: LogLevel = isDev ? 'debug' : 'info';
+const isDev = env.MODE === 'development';
+
+// Force-enable full debug logging in release/build mode when VITE_DEBUG_LOGS is
+// set. Release normally suppresses info/debug on the console, which makes it look
+// like nothing (e.g. Turbopuffer indexing) is happening even when it is. Set
+// VITE_DEBUG_LOGS=true before `tauri build` to see all logs in the packaged app.
+const forceDebug = String(env.VITE_DEBUG_LOGS ?? '').toLowerCase() === 'true';
+const verbose = isDev || forceDebug;
+
+const globalMinLevel: LogLevel = verbose ? 'debug' : 'info';
 
 export const logger = createLogger({
   minLevel: globalMinLevel,
   rootModule: 'App',
   transports: [
-    createConsoleTransport(isDev ? 'debug' : 'warn'),
+    createConsoleTransport(verbose ? 'debug' : 'warn'),
     createTauriTransport({ minLevel: 'info' }),
   ],
   bufferSize: 500,

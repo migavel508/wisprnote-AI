@@ -28,6 +28,10 @@ export default defineConfig(({mode}) => {
       'import.meta.env.VITE_COGNITO_DOMAIN': JSON.stringify(getEnv('VITE_COGNITO_DOMAIN')),
       'import.meta.env.VITE_COGNITO_AUTH_ORIGIN': JSON.stringify(getEnv('VITE_COGNITO_AUTH_ORIGIN')),
       'import.meta.env.VITE_WEB_OAUTH_REDIRECT_URI': JSON.stringify(getEnv('VITE_WEB_OAUTH_REDIRECT_URI')),
+      // Set VITE_DEBUG_LOGS=true to force full debug logging to the console even
+      // in release/build mode (release normally suppresses info/debug). Lets you
+      // see Turbopuffer / KG / network logs in the packaged app while diagnosing.
+      'import.meta.env.VITE_DEBUG_LOGS': JSON.stringify(getEnv('VITE_DEBUG_LOGS')),
       'import.meta.env.VITE_API_GATEWAY_URL': JSON.stringify(getEnv('VITE_API_GATEWAY_URL')),
       'import.meta.env.VITE_S3_BUCKET': JSON.stringify(getEnv('VITE_S3_BUCKET')),
       'import.meta.env.VITE_CLOUDFRONT_URL': JSON.stringify(getEnv('VITE_CLOUDFRONT_URL')),

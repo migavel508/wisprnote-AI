@@ -113,6 +113,7 @@ export default function SettingsPage({ session, onClose, onSignOut }: SettingsPa
   const email = session?.user?.email ?? '';
   const name = formatDisplayName(email, session?.user?.name);
   const initials = formatDisplayInitials(email, session?.user?.name);
+  const picture = session?.user?.picture;
 
   return (
     <div className="flex h-full bg-app-bg font-sans">
@@ -122,8 +123,18 @@ export default function SettingsPage({ session, onClose, onSignOut }: SettingsPa
 
         {/* Profile header */}
         <div className="px-4 pt-2 pb-4 flex flex-col items-center text-center">
-          <div className="w-12 h-12 rounded-full bg-zinc-900 text-white dark:bg-zinc-100 dark:text-zinc-900 flex items-center justify-center mb-2">
-            <span className="text-[14px] font-mono font-medium tracking-wider">{initials}</span>
+          <div className="w-12 h-12 rounded-full overflow-hidden bg-zinc-900 text-white dark:bg-zinc-100 dark:text-zinc-900 flex items-center justify-center mb-2">
+            {picture ? (
+              <img
+                src={picture}
+                alt={name}
+                referrerPolicy="no-referrer"
+                className="w-full h-full object-cover"
+                onError={(e) => { (e.currentTarget as HTMLImageElement).style.display = 'none'; }}
+              />
+            ) : (
+              <span className="text-[14px] font-mono font-medium tracking-wider">{initials}</span>
+            )}
           </div>
           <div className="text-[14px] font-semibold text-app-fg tracking-[-0.01em] truncate w-full">{name}</div>
           <div className="text-[11px] text-app-fg-subtle truncate w-full mt-0.5">{email}</div>

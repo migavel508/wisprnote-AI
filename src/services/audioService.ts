@@ -317,8 +317,71 @@ export function shouldUseFileAPI(file: File): boolean {
 }
 
 /**
+ * Compresses a freshly-recorded audio file BEFORE it is stored, so a long
+ * recording doesn't sit on disk/in memory as a huge raw WAV.
+ *
+ * Pipeline (all O(n), no extra dependencies):
+ *   decode → mix to mono → downsample to 16 kHz (the speech-recognition
+ *   standard) → cut silence + noise gate → re-encode as 16-bit mono WAV.
+ *
+ * Result: a stereo/high-rate ~600 MB recording becomes a ~10–40 MB WAV with the
+ * silent/dead air removed — same transcription quality (16 kHz mono is what the
+ * model uses anyway), dramatically smaller. If decoding fails (e.g. an opaque
+ * MediaRecorder .webm), the original file is returned unchanged so nothing breaks.
+ */
+export async function compressRecording(file: File): Promise<File> {
+  const audioCtx = new (window.AudioContext || (window as any).webkitAudioContext)();
+  try {
+    let audioBuffer: AudioBuffer;
+    try {
+      audioBuffer = await audioCtx.decodeAudioData(await file.arrayBuffer());
+    } catch {
+      return file; // undecodable → keep original (splitAudio handles it later)
+    }
+    if (!audioBuffer || audioBuffer.duration === 0 || audioBuffer.length === 0) {
+      return file;
+    }
+
+    const numChannels = audioBuffer.numberOfChannels;
+    const srcRate = audioBuffer.sampleRate;
+    const outRate = Math.min(srcRate, 16000);
+    const ratio = srcRate / outRate;
+
+    // Mix to mono + downsample (linear interpolation).
+    const totalOutFrames = Math.ceil(audioBuffer.length / ratio);
+    let mono = new Float32Array(totalOutFrames);
+    const channels: Float32Array[] = [];
+    for (let c = 0; c < numChannels; c++) channels.push(audioBuffer.getChannelData(c));
+    for (let j = 0; j < totalOutFrames; j++) {
+      const srcIdx = j * ratio;
+      const lo = Math.floor(srcIdx);
+      const hi = Math.min(lo + 1, audioBuffer.length - 1);
+      const t = srcIdx - lo;
+      let sample = 0;
+      for (let c = 0; c < numChannels; c++) sample += channels[c][lo] * (1 - t) + channels[c][hi] * t;
+      mono[j] = sample / numChannels;
+    }
+
+    // Light noise gate + cut noiseless silence (reuses the same helpers as split).
+    mono = applyNoiseGate(mono, 0.008);
+    const trimmed = removeSilence(mono, outRate);
+    if (trimmed !== mono) mono = new Float32Array(trimmed);
+
+    const blob = encodeWAV(mono, outRate);
+    // If compression somehow produced a LARGER file (e.g. already-compressed
+    // input), keep the smaller original.
+    if (blob.size >= file.size) return file;
+
+    const base = (file.name || 'recording').replace(/\.[^.]+$/, '');
+    return new File([blob], `${base}.wav`, { type: 'audio/wav' });
+  } finally {
+    await audioCtx.close();
+  }
+}
+
+/**
  * Splits an audio file into overlapping batches with silence-aware boundaries.
- * 
+ *
  * Key improvements over simple fixed-duration splitting:
  * 1. Overlapping chunks (10 seconds) to capture content at boundaries
  * 2. Silence-aware split points to avoid cutting mid-sentence

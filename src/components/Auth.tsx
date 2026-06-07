@@ -28,7 +28,12 @@ export default function Auth() {
   const [error, setError] = useState<string | null>(null);
   const [message, setMessage] = useState<string | null>(null);
   const [focusedField, setFocusedField] = useState<'email' | 'password' | 'code' | null>(null);
-  const desktopOAuthRedirect = 'wisprnote://auth-callback/';
+  // Desktop OAuth now redirects to an HTTPS page on the website (not straight to
+  // the wisprnote:// deep link). That page forwards the code to the app via the
+  // deep link AND redirects the browser to wisprnote.com — so the browser tab is
+  // no longer left stranded on Google after sign-in. This URL is used for BOTH
+  // the authorize request and the token exchange (they must match).
+  const desktopOAuthRedirect = 'https://www.wisprnote.com/auth/callback';
 
   // Web: Cognito redirects here with ?code= — exchange while PKCE verifier is still in sessionStorage
   useEffect(() => {

@@ -63,7 +63,11 @@ export async function upsertMeetingChunks(
     // namespace may not exist yet
   }
 
-  const BATCH_SIZE = 100;
+  // Each upserted row carries its full embedding vector (~3072 dims → tens of KB
+  // of JSON). Turbopuffer writes are proxied through the authed Lambda, which has
+  // a ~6 MB payload limit — 100 rows/batch produced multi-MB writes that hit
+  // "413 Request Too Long". 16 rows/batch keeps each write well under the limit.
+  const BATCH_SIZE = 16;
   for (let i = 0; i < chunks.length; i += BATCH_SIZE) {
     const batch = chunks.slice(i, i + BATCH_SIZE);
     await ns.write({

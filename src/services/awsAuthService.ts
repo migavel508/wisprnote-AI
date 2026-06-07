@@ -191,6 +191,8 @@ export interface AuthSession {
     id: string;
     email: string;
     name?: string;
+    /** Profile photo URL from the federated provider (e.g. Google). */
+    picture?: string;
   };
   accessToken: string;
   idToken: string;
@@ -207,6 +209,7 @@ function buildSession(cognitoSession: CognitoUserSession, cognitoUser: CognitoUs
       id: idPayload.sub,
       email: idPayload.email || '',
       name: idPayload.name || idPayload.email || '',
+      picture: idPayload.picture || undefined,
     },
     accessToken: cognitoSession.getAccessToken().getJwtToken(),
     idToken: cognitoSession.getIdToken().getJwtToken(),
@@ -443,6 +446,7 @@ export async function exchangeCodeForSession(code: string, redirectUri: string):
       id: idPayload.sub,
       email: idPayload.email || '',
       name: idPayload.name || idPayload.email || '',
+      picture: idPayload.picture || undefined,
     },
     accessToken: tokens.access_token,
     idToken: tokens.id_token,
