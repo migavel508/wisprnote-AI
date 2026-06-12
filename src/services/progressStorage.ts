@@ -13,6 +13,9 @@ const STORE_NAME = 'processingProgress';
 
 export interface ProcessingProgress {
   id: string;
+  /** Owner of this in-progress recording/upload. Used to keep one account's
+      audio/transcript recovery prompt from ever surfacing under another. */
+  userId?: string;
   filename: string;
   prompt: string;
   mode?: 'batch' | 'realtime';
@@ -87,6 +90,9 @@ class ProgressStorage {
 
   async saveProgress(progress: ProcessingProgress): Promise<void> {
     if (!this.db) await this.init();
+
+    // Stamp the current owner so recovery can be scoped per user.
+    if (!progress.userId && _activeProgressUser) progress.userId = _activeProgressUser;
 
     // Handle the blob separately to avoid re-serializing it on every save.
     if (progress.audioBlob) {
@@ -233,16 +239,24 @@ export function generateProgressId(filename: string): string {
 }
 
 // Helper to check if there's any incomplete progress
+// The signed-in user, so saved records are stamped and recovery is per-user.
+let _activeProgressUser: string | null = null;
+export function setProgressUser(userId: string | null): void {
+  _activeProgressUser = userId;
+}
+
 export async function hasIncompleteProgress(): Promise<boolean> {
   const allProgress = await progressStorage.getAllProgress();
   return allProgress.some(p => p.completedBatches < p.totalBatches);
 }
 
-// Helper to get the most recent incomplete progress
+// Most recent incomplete progress FOR THE CURRENT USER. Records owned by another
+// user (or legacy records with no userId) are never returned — so one account's
+// in-progress audio/transcript can't be offered to the next account.
 export async function getMostRecentIncompleteProgress(): Promise<ProcessingProgress | null> {
   const allProgress = await progressStorage.getAllProgress();
   const incomplete = allProgress
-    .filter(p => p.completedBatches < p.totalBatches)
+    .filter(p => p.completedBatches < p.totalBatches && p.userId === _activeProgressUser && !!_activeProgressUser)
     .sort((a, b) => b.updatedAt - a.updatedAt);
   return incomplete[0] || null;
 }

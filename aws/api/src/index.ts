@@ -1,11 +1,14 @@
 import type { APIGatewayProxyEvent, APIGatewayProxyResult } from 'aws-lambda';
 import { CognitoJwtVerifier } from 'aws-jwt-verify';
 import { query, queryOne, queryCount } from './db';
-import { ok, created, noContent, badRequest, notFound, unauthorized, serverError, corsPreflightResponse } from './response';
+import { ok, created, noContent, badRequest, notFound, unauthorized, serverError, corsPreflightResponse, paymentRequired } from './response';
 import { S3Client, PutObjectCommand } from '@aws-sdk/client-s3';
 import { getSignedUrl } from '@aws-sdk/s3-request-presigner';
 import { getSecrets } from './secrets';
 import { handleAI } from './ai';
+import { handlePaddleWebhook, handleBilling, getUserPlan } from './billing';
+import { planLimits, planLabel } from './plans';
+import { ensureUsageSchema, getMeetingUsage, getBatchHoursUsage } from './usage';
 
 const S3_BUCKET = process.env.S3_BUCKET || '';
 const S3_REGION = process.env.AWS_REGION || 'us-east-1';
@@ -197,6 +200,11 @@ export const handler = async (event: APIGatewayProxyEvent): Promise<APIGatewayPr
       return await handleShareVerify(segments[2], qs.email || null);
     }
 
+    // Public route: Paddle billing webhook (verified by signature, not JWT).
+    if (resource === 'billing' && segments[1] === 'webhook' && method === 'POST') {
+      return await handlePaddleWebhook(event);
+    }
+
     // Verify JWT and extract claims
     cachedClaims = await verifyToken(event);
     const userId = getUserId();
@@ -213,7 +221,9 @@ export const handler = async (event: APIGatewayProxyEvent): Promise<APIGatewayPr
       case 'workspaces': return await handleWorkspaces(method, segments, userId, event);
       case 'folders':    return await handleFolders(method, segments, userId, event);
       case 'contacts':   return await handleContacts(method, userId);
-      case 'ai':         return await handleAI(method, segments, event);
+      case 'bootstrap':  return await handleBootstrap(userId);
+      case 'billing':    return await handleBilling(method, segments, userId);
+      case 'ai':         return await handleAI(method, segments, userId, event);
       default:           return notFound();
     }
   } catch (err: any) {
@@ -242,10 +252,50 @@ async function handleTasks(method: string, segments: string[], userId: string, e
 
   if (method === 'POST' && !taskId) {
     const body = parseBody(event);
+    await ensureUsageSchema(); // ensures the task_history.source column exists
+    const source = body.source === 'batch' ? 'batch' : 'realtime';
+
+    // ── Plan limits (server-side, authoritative — mirrors website pricing) ────
+    // Free: 5 meetings total · Pro: 20/month + 5 batch hrs · Pro Plus: ∞ meetings
+    // + 15 batch hrs · Enterprise: unlimited. Enforced here so it can't be
+    // bypassed by the client.
+    const plan = await getUserPlan(userId);
+    const lim = planLimits(plan);
+
+    if (lim.meetings !== null) {
+      const { used } = await getMeetingUsage(userId, plan);
+      if (used >= lim.meetings) {
+        return paymentRequired({
+          error: 'meeting_limit_reached',
+          scope: 'meetings',
+          message: `Your ${planLabel(plan)} plan allows ${lim.meetings} meeting${lim.meetings === 1 ? '' : 's'}${lim.meetingsPeriod === 'month' ? ' per month' : ''}. Upgrade for more.`,
+          plan,
+          limit: lim.meetings,
+          period: lim.meetingsPeriod,
+          used,
+        });
+      }
+    }
+
+    if (source === 'batch' && lim.batchHours !== null) {
+      const { usedHours } = await getBatchHoursUsage(userId, plan);
+      const incomingHours = (Number(body.duration) || 0) / 3600;
+      if (usedHours + incomingHours > lim.batchHours + 0.01) {
+        return paymentRequired({
+          error: 'batch_hours_exceeded',
+          scope: 'batchHours',
+          message: `Your ${planLabel(plan)} plan includes ${lim.batchHours} batch-processing hours per month. Upgrade for more.`,
+          plan,
+          limitHours: lim.batchHours,
+          usedHours: Math.round(usedHours * 100) / 100,
+        });
+      }
+    }
+
     const row = await queryOne(
-      `INSERT INTO task_history (user_id, filename, transcription, summary, notes, audio_url, status, duration, prompt, personal_note, visualization_image, attendees)
-       VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12) RETURNING *`,
-      [userId, body.filename, body.transcription, body.summary, body.notes, body.audio_url, body.status, body.duration || 0, body.prompt, body.personal_note, body.visualization_image, JSON.stringify(body.attendees ?? [])]
+      `INSERT INTO task_history (user_id, filename, transcription, summary, notes, audio_url, status, duration, prompt, personal_note, visualization_image, attendees, source)
+       VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13) RETURNING *`,
+      [userId, body.filename, body.transcription, body.summary, body.notes, body.audio_url, body.status, body.duration || 0, body.prompt, body.personal_note, body.visualization_image, JSON.stringify(body.attendees ?? []), source]
     );
     return created(row);
   }
@@ -334,6 +384,11 @@ async function handleAssets(method: string, userId: string, event: APIGatewayPro
 
   if (method === 'POST') {
     const body = parseBody(event);
+    // SECURITY: only attach assets to a task the caller owns.
+    if (body.task_id) {
+      const owns = await queryOne('SELECT 1 FROM task_history WHERE id=$1 AND user_id=$2', [body.task_id, userId]);
+      if (!owns) return notFound();
+    }
     const row = await queryOne(
       'INSERT INTO generated_assets (user_id, task_id, type, filename, content) VALUES ($1,$2,$3,$4,$5) RETURNING *',
       [userId, body.task_id, body.type, body.filename, JSON.stringify(body.content)]
@@ -458,6 +513,27 @@ async function handleChat(method: string, userId: string, event: APIGatewayProxy
   }
 
   if (method === 'GET') {
+    // Durable thread list derived from chat_history — so the chat history is
+    // reliable even if the client's localStorage thread index is lost.
+    if (qs.threads) {
+      const rows = await query(
+        `SELECT ch.thread_id,
+                ch.task_id,
+                MIN(ch.created_at) AS created_at,
+                MAX(ch.created_at) AS updated_at,
+                (ARRAY_AGG(ch.text ORDER BY ch.created_at) FILTER (WHERE ch.role = 'user'))[1] AS title,
+                (ARRAY_AGG(ch.text ORDER BY ch.created_at DESC))[1] AS preview,
+                th.filename AS task_title
+         FROM chat_history ch
+         LEFT JOIN task_history th ON th.id = ch.task_id
+         WHERE ch.user_id = $1 AND ch.thread_id IS NOT NULL AND ch.thread_id <> ''
+         GROUP BY ch.thread_id, ch.task_id, th.filename
+         ORDER BY MAX(ch.created_at) DESC
+         LIMIT 300`,
+        [userId],
+      );
+      return ok(rows);
+    }
     if (qs.taskId) {
       const rows = await query('SELECT * FROM chat_history WHERE task_id=$1 AND user_id=$2 ORDER BY created_at ASC', [qs.taskId, userId]);
       return ok(rows);
@@ -489,6 +565,11 @@ async function handleShares(method: string, segments: string[], userId: string, 
 
   if (method === 'POST' && !shareId) {
     const body = parseBody(event);
+    // SECURITY: only the OWNER of a meeting may create a share for it. Without
+    // this, any user could mint a public share for another user's task_id and
+    // then read it through the (intentionally public) share-verify route.
+    const owns = await queryOne('SELECT 1 FROM task_history WHERE id=$1 AND user_id=$2', [body.task_id, userId]);
+    if (!owns) return notFound();
     const token = generateToken();
     const row = await queryOne(
       `INSERT INTO shared_meetings (task_id, owner_id, share_token, access_type) VALUES ($1,$2,$3,$4) RETURNING *`,
@@ -554,6 +635,10 @@ async function handleShares(method: string, segments: string[], userId: string, 
 
   // Email sub-resource: /shares/{id}/emails
   if (subResource === 'emails') {
+    // SECURITY: only the share's owner may view, add, or remove its invited
+    // emails. Gate all verbs on ownership before touching shared_meeting_access.
+    const ownsShare = await queryOne('SELECT 1 FROM shared_meetings WHERE id=$1 AND owner_id=$2', [shareId, userId]);
+    if (!ownsShare) return notFound();
     if (method === 'POST') {
       const body = parseBody(event);
       const emails: string[] = [];
@@ -714,12 +799,93 @@ async function handleStorage(method: string, segments: string[], userId: string,
   return notFound();
 }
 
+// ─── BOOTSTRAP ───────────────────────────────────────────────────────────────
+// One request that returns everything the app needs on launch: the first page
+// of history, the workspace membership index, the chat-thread list, and the
+// ledger. Collapses ~6 cold-start round-trips into a single Lambda invoke —
+// dramatically faster first paint on slow networks, and cheaper (fewer invokes).
+async function handleBootstrap(userId: string): Promise<APIGatewayProxyResult> {
+  const pageSize = 24;
+  const [taskRows, taskTotal, workspaces, folders, taskWorkspaces, taskFolders, threads, ledger, userPlan] = await Promise.all([
+    query('SELECT id, created_at, filename, summary, status, duration, attendees FROM task_history WHERE user_id=$1 ORDER BY created_at DESC LIMIT $2', [userId, pageSize]),
+    queryCount('SELECT COUNT(*) FROM task_history WHERE user_id=$1', [userId]),
+    query('SELECT * FROM workspaces WHERE user_id=$1 ORDER BY created_at ASC', [userId]),
+    query('SELECT f.* FROM folders f JOIN workspaces w ON w.id=f.workspace_id WHERE w.user_id=$1 ORDER BY f.created_at ASC', [userId]),
+    query('SELECT tw.task_id, tw.workspace_id FROM task_workspaces tw JOIN workspaces w ON w.id=tw.workspace_id WHERE w.user_id=$1', [userId]),
+    query('SELECT tf.task_id, tf.folder_id FROM task_folders tf JOIN folders f ON f.id=tf.folder_id JOIN workspaces w ON w.id=f.workspace_id WHERE w.user_id=$1', [userId]),
+    query(
+      `SELECT ch.thread_id, ch.task_id,
+              MIN(ch.created_at) AS created_at, MAX(ch.created_at) AS updated_at,
+              (ARRAY_AGG(ch.text ORDER BY ch.created_at) FILTER (WHERE ch.role='user'))[1] AS title,
+              (ARRAY_AGG(ch.text ORDER BY ch.created_at DESC))[1] AS preview,
+              th.filename AS task_title
+       FROM chat_history ch
+       LEFT JOIN task_history th ON th.id = ch.task_id
+       WHERE ch.user_id=$1 AND ch.thread_id IS NOT NULL
+       GROUP BY ch.thread_id, ch.task_id, th.filename
+       ORDER BY MAX(ch.created_at) DESC
+       LIMIT 200`,
+      [userId],
+    ),
+    queryOne('SELECT * FROM user_ledger_state WHERE user_id=$1', [userId]),
+    getUserPlan(userId),
+  ]);
+  const [meeting, batch] = await Promise.all([
+    getMeetingUsage(userId, userPlan),
+    getBatchHoursUsage(userId, userPlan),
+  ]);
+  return ok({
+    history: { data: taskRows, hasMore: taskTotal > pageSize, total: taskTotal },
+    workspaceIndex: { workspaces, folders, taskWorkspaces, taskFolders },
+    chatThreads: threads,
+    ledger: ledger || null,
+    entitlements: buildEntitlements(userPlan, meeting, batch),
+  });
+}
+
+/** Entitlements the client uses to show usage + gate plan limits. Keeps the
+    flat meeting fields for the existing gate, plus the batch-hour detail. */
+export function buildEntitlements(
+  plan: string,
+  meeting: { used: number; limit: number | null; period: 'total' | 'month' },
+  batch: { usedHours: number; limitHours: number | null },
+) {
+  return {
+    plan,
+    planLabel: planLabel(plan),
+    unlimited: meeting.limit === null,
+    // Flat meeting fields (consumed by the free-tier gate).
+    meetingCount: meeting.used,
+    meetingLimit: meeting.limit,
+    meetingsPeriod: meeting.period,
+    meetingsRemaining: meeting.limit === null ? null : Math.max(0, meeting.limit - meeting.used),
+    batchHours: {
+      usedHours: Math.round(batch.usedHours * 100) / 100,
+      limitHours: batch.limitHours,
+      remainingHours: batch.limitHours === null ? null : Math.max(0, Math.round((batch.limitHours - batch.usedHours) * 100) / 100),
+    },
+  };
+}
+
 // ─── WORKSPACES ──────────────────────────────────────────────────────────────
 
 async function handleWorkspaces(method: string, segments: string[], userId: string, event: APIGatewayProxyEvent): Promise<APIGatewayProxyResult> {
   const workspaceId = segments[1];
   const sub = segments[2]; // 'folders' | 'meetings' | 'members'
   const subId = segments[3];
+
+  // Membership index — workspaces + folders + task↔workspace + task↔folder in a
+  // SINGLE request. Replaces the per-workspace/per-folder fan-out (N+1 calls)
+  // that made the workspace chips slow to populate, especially on low networks.
+  if (method === 'GET' && workspaceId === 'index') {
+    const [workspaces, folders, taskWorkspaces, taskFolders] = await Promise.all([
+      query('SELECT * FROM workspaces WHERE user_id=$1 ORDER BY created_at ASC', [userId]),
+      query('SELECT f.* FROM folders f JOIN workspaces w ON w.id=f.workspace_id WHERE w.user_id=$1 ORDER BY f.created_at ASC', [userId]),
+      query('SELECT tw.task_id, tw.workspace_id FROM task_workspaces tw JOIN workspaces w ON w.id=tw.workspace_id WHERE w.user_id=$1', [userId]),
+      query('SELECT tf.task_id, tf.folder_id FROM task_folders tf JOIN folders f ON f.id=tf.folder_id JOIN workspaces w ON w.id=f.workspace_id WHERE w.user_id=$1', [userId]),
+    ]);
+    return ok({ workspaces, folders, taskWorkspaces, taskFolders });
+  }
 
   if (method === 'GET' && !workspaceId) {
     const taskId = event.queryStringParameters?.task_id;
@@ -812,11 +978,30 @@ async function handleWorkspaces(method: string, segments: string[], userId: stri
   }
 
   if (method === 'GET' && sub === 'meetings') {
+    // SECURITY: only surface meetings the caller owns (defense-in-depth — the
+    // JOIN to task_history must be user-scoped so a foreign task_id attached to
+    // this workspace can never be read back).
     const rows = await query(
       `SELECT th.id, th.filename, th.created_at, th.duration, th.status, th.summary
        FROM task_workspaces tw JOIN task_history th ON th.id=tw.task_id
-       WHERE tw.workspace_id=$1 ORDER BY tw.added_at DESC`,
-      [workspaceId]
+       WHERE tw.workspace_id=$1 AND th.user_id=$2 ORDER BY tw.added_at DESC`,
+      [workspaceId, userId]
+    );
+    return ok(rows);
+  }
+
+  // Workspace-scoped knowledge graph: the same per-meeting KG rows, filtered to
+  // the meetings that belong to this workspace (via task_workspaces). Mirrors the
+  // /meetings route above so the KG can be scoped exactly like meeting notes.
+  if (method === 'GET' && sub === 'knowledge-graph') {
+    const rows = await query(
+      `SELECT kg.task_id, kg.meeting_title, kg.created_at, kg.topics, kg.decisions,
+              kg.people, kg.action_items, kg.refs
+       FROM knowledge_graph kg
+       JOIN task_workspaces tw ON tw.task_id = kg.task_id
+       WHERE kg.user_id=$1 AND tw.workspace_id=$2
+       ORDER BY kg.created_at DESC`,
+      [userId, workspaceId]
     );
     return ok(rows);
   }
@@ -824,7 +1009,14 @@ async function handleWorkspaces(method: string, segments: string[], userId: stri
   if (method === 'POST' && sub === 'meetings') {
     const body = parseBody(event);
     if (!body.task_id) return badRequest('task_id is required');
-    await query('INSERT INTO task_workspaces (task_id, workspace_id) VALUES ($1,$2) ON CONFLICT DO NOTHING', [body.task_id, workspaceId]);
+    // SECURITY: only insert if the caller OWNS the task being added — prevents
+    // attaching another user's meeting to your workspace.
+    await query(
+      `INSERT INTO task_workspaces (task_id, workspace_id)
+       SELECT $1,$2 WHERE EXISTS (SELECT 1 FROM task_history WHERE id=$1 AND user_id=$3)
+       ON CONFLICT DO NOTHING`,
+      [body.task_id, workspaceId, userId]
+    );
     return noContent();
   }
 
@@ -903,11 +1095,13 @@ async function handleFolders(method: string, segments: string[], userId: string,
   }
 
   if (method === 'GET' && sub === 'meetings') {
+    // SECURITY: user-scope the JOIN so a foreign task_id placed in this folder
+    // can never be read back.
     const rows = await query(
       `SELECT th.id, th.filename, th.created_at, th.duration, th.status, th.summary
        FROM task_folders tf JOIN task_history th ON th.id=tf.task_id
-       WHERE tf.folder_id=$1 ORDER BY tf.added_at DESC`,
-      [folderId]
+       WHERE tf.folder_id=$1 AND th.user_id=$2 ORDER BY tf.added_at DESC`,
+      [folderId, userId]
     );
     return ok(rows);
   }
@@ -915,7 +1109,13 @@ async function handleFolders(method: string, segments: string[], userId: string,
   if (method === 'POST' && sub === 'meetings') {
     const body = parseBody(event);
     if (!body.task_id) return badRequest('task_id is required');
-    await query('INSERT INTO task_folders (task_id, folder_id) VALUES ($1,$2) ON CONFLICT DO NOTHING', [body.task_id, folderId]);
+    // SECURITY: only insert if the caller OWNS the task being added.
+    await query(
+      `INSERT INTO task_folders (task_id, folder_id)
+       SELECT $1,$2 WHERE EXISTS (SELECT 1 FROM task_history WHERE id=$1 AND user_id=$3)
+       ON CONFLICT DO NOTHING`,
+      [body.task_id, folderId, userId]
+    );
     return noContent();
   }
 

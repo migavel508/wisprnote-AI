@@ -1,0 +1,14 @@
+{
+  "$schema": "../gen/schemas/desktop-schema.json",
+  "identifier": "meeting-prompt",
+  "description": "Capability for the floating meeting-detection prompt overlay window",
+  "windows": ["meeting-prompt"],
+  "permissions": [
+    "core:default",
+    "core:event:default",
+    "core:window:allow-start-dragging",
+    "core:window:allow-hide",
+    "core:window:allow-set-focus",
+    "core:window:allow-close"
+  ]
+}

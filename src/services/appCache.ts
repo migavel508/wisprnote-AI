@@ -125,7 +125,10 @@ export async function cacheClearUser(userId: string): Promise<void> {
     `kg:${userId}`,
     `meta:${userId}`,
     `contacts:${userId}`,
+    // Global (non-user-scoped) caches — MUST be purged on account switch so one
+    // account's data can't surface under another on the same machine.
     'chat:all-meetings',
+    'ws-index',
   ]);
   for (const id of taskIds) {
     keysToDelete.add(`task:${id}`);

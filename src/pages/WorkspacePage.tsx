@@ -100,7 +100,7 @@ function WorkspaceGlyph({ ws, size = 32 }: { ws: Workspace; size?: number }) {
 
 // ── Folder picker dropdown for a note row ─────────────────────────────────────
 
-function FolderPicker({
+export function FolderPicker({
   workspaces, foldersByWs, currentWsId, currentFolderId,
   onSelectWorkspace, onSelectFolder, onCreateFolder,
 }: {
@@ -538,7 +538,7 @@ export default function WorkspacePage({ allTasks, onSelectTask }: WorkspacePageP
 
   if (loading) {
     return (
-      <div className="h-full flex items-center justify-center bg-app-canvas">
+      <div className="h-full flex items-center justify-center bg-app-panel">
         <Loader2 className="animate-spin text-app-fg-subtle" size={20} />
       </div>
     );
@@ -546,7 +546,7 @@ export default function WorkspacePage({ allTasks, onSelectTask }: WorkspacePageP
 
   if (!activeWs) {
     return (
-      <div className="h-full flex items-center justify-center bg-app-canvas">
+      <div className="h-full flex items-center justify-center bg-app-panel">
         <div className="text-center">
           <p className="text-[14px] font-medium text-app-fg mb-1">No workspace selected</p>
           <p className="text-[12px] text-app-fg-subtle">Pick one from the sidebar</p>
@@ -566,7 +566,7 @@ export default function WorkspacePage({ allTasks, onSelectTask }: WorkspacePageP
       : 'Notes visible to your entire workspace.';
 
   return (
-    <div className="h-full flex flex-col overflow-hidden bg-app-canvas font-sans">
+    <div className="h-full flex flex-col overflow-hidden bg-app-panel font-sans">
 
       {/* Top bar: back button (if folder) + integrations + favorite + share */}
       <div className="flex items-center justify-between px-5 py-3 border-b border-transparent flex-shrink-0">

@@ -31,3 +31,11 @@ chrono = "0.4"
 cidre = { git = "https://github.com/yury/cidre", features = ["ca", "av", "cf", "ns", "blocks", "async"] }
 ringbuf = "0.4"
 cpal = "0.17"
+# Native NSProcessInfo activity API — disables macOS App Nap while recording so
+# the (backgrounded) main window's WebView stays responsive during a meeting.
+objc2 = "0.6"
+objc2-foundation = { version = "0.3", features = ["NSProcessInfo", "NSString"] }
+# Convert the floating overlay windows into non-activating NSPanels — so their
+# buttons act on the first click and they never steal focus from the app the
+# user is in (the behavior anarlog/Hyprnote gets from native NSPanels).
+tauri-nspanel = { git = "https://github.com/ahkohd/tauri-nspanel", branch = "v2" }

@@ -82,8 +82,10 @@ import {
   queuePendingTask,
   flushPendingTasks,
   getPendingTaskCount,
+  setPendingTaskUser,
   getTasks,
   getTasksLightweight,
+  getBootstrap,
   getTaskById,
   getAllTaskIds,
   TaskHistory, 
@@ -97,6 +99,7 @@ import {
   saveChatMessage,
   getChatHistory,
   getChatHistoryByThread,
+  getChatThreads,
   ChatMessage,
   ManualNote,
   getManualNotes,
@@ -110,9 +113,10 @@ import { getSession, onAuthStateChange, signOut, getUserId, type AuthSession } f
 import { splitAudio, AudioBatch, shouldUseFileAPI, FILE_API_THRESHOLD_MB, BlobReadError } from './services/audioService';
 import { 
   progressStorage, 
-  generateProgressId, 
+  generateProgressId,
   getMostRecentIncompleteProgress,
-  ProcessingProgress 
+  setProgressUser,
+  ProcessingProgress
 } from './services/progressStorage';
 import {
   checkSystemAudioAvailable,
@@ -139,9 +143,21 @@ import {
 
 import Auth from './components/Auth';
 import WelcomeProfile from './components/WelcomeProfile';
+import FreeLimitModal from './components/FreeLimitModal';
+import {
+  setDetectionPaused,
+  setDetectionEnabled,
+  setRecordingActive,
+  setRecordingIndicator,
+  emitRecordingIndicatorState,
+  setMeetingPrompt,
+  listenForMeetingPromptStart,
+} from './services/micDetectionService';
+import type { Entitlements } from './services/awsService';
 import ChatPage from './pages/ChatPage';
 import NotesPage from './pages/NotesPage';
 import HistoryPage from './pages/HistoryPage';
+import { setWorkspaceSelection } from './services/workspaceSelection';
 import SharedMeetingPage from './pages/SharedMeetingPage';
 import KnowledgePage from './pages/KnowledgePage';
 import ProcessPage from './pages/ProcessPage';
@@ -213,6 +229,49 @@ interface BatchStatus extends AudioBatch {
   error?: string;
 }
 
+// Shared parser: DB chat rows → Message[] (restores citations, retrieval meta,
+// agent status AND the agent thought-steps). Module-level so every load path
+// (initial fetch + thread switch) restores identical data — no field drops.
+function parseChatMessagesShared(data: any[]): Message[] {
+  return (data || []).map((msg: any) => ({
+    role: msg.role,
+    text: msg.text,
+    image: msg.image,
+    citations: msg.citations?.map((c: any) => ({
+      meetingId: c.meeting_id,
+      meetingTitle: c.meeting_title,
+      chunkId: c.chunk_id,
+      score: c.score,
+    })),
+    retrievalMeta: msg.retrieval_meta
+      ? {
+          scope: msg.retrieval_meta.scope,
+          confidence: msg.retrieval_meta.confidence,
+          selectedMeetingIds: msg.retrieval_meta.selected_meeting_ids,
+          tokenUsageTotal: msg.retrieval_meta.token_usage_total,
+          coveredMeetingsCount: msg.retrieval_meta.covered_meetings_count,
+          totalMeetingsCount: msg.retrieval_meta.total_meetings_count,
+        }
+      : undefined,
+    agentStatus: msg.agent_status,
+    agentPlan: Array.isArray(msg.agent_plan)
+      ? msg.agent_plan.map((s: any) => ({
+          id: s.id,
+          label: s.label,
+          status: s.status,
+          detail: s.detail,
+          type: s.type,
+          searchKind: s.search_kind,
+          searchQuery: s.search_query,
+          searchResults: Array.isArray(s.search_results)
+            ? s.search_results.map((r: any) => ({ meetingId: r.meeting_id, meetingTitle: r.meeting_title, score: r.score }))
+            : undefined,
+          planSteps: Array.isArray(s.plan_steps) ? s.plan_steps : undefined,
+        }))
+      : undefined,
+  }));
+}
+
 log.info('app_loaded', { timestamp: new Date().toISOString() });
 
 type MobileView = 'process' | 'history' | 'notes' | 'chat' | 'knowledge' | 'notebooks' | 'audio-devices';
@@ -276,7 +335,6 @@ export default function App() {
     if (path.startsWith('/notes')) return 'notes';
     if (path.startsWith('/chat')) return 'chat';
     if (path === '/knowledge') return 'knowledge';
-    if (path === '/notebooks') return 'notebooks';
     if (path === '/audio-devices') return 'audio-devices';
     if (path === '/workspace') return 'workspace';
     if (path === '/people') return 'people';
@@ -303,9 +361,6 @@ export default function App() {
         break;
       case 'knowledge':
         navigate('/knowledge');
-        break;
-      case 'notebooks':
-        navigate('/notebooks');
         break;
       case 'audio-devices':
         navigate('/audio-devices');
@@ -335,6 +390,10 @@ export default function App() {
   }
 
   const [session, setSession] = useState<AuthSession | null>(null);
+  // Plan entitlements (plan + meeting/batch quotas), primed from /bootstrap.
+  const [entitlements, setEntitlements] = useState<Entitlements | null>(null);
+  const [showLimitModal, setShowLimitModal] = useState(false);
+  const [limitModalMsg, setLimitModalMsg] = useState<string | null>(null);
   // Show the post-login welcome/profile screen after an ACTIVE sign-in (not a
   // session restored on startup). Set true on the SIGNED_IN auth event.
   const [showWelcome, setShowWelcome] = useState(false);
@@ -414,19 +473,29 @@ export default function App() {
   const BATCH_CHUNK_SIZE_MB = 3;
   const [chatMessages, setChatMessages] = useState<Message[]>([]);
   const [allMeetingsChatMessages, setAllMeetingsChatMessages] = useState<Message[]>([]);
-  const [chatThreads, setChatThreads] = useState<ChatThread[]>(() => {
-    try { return JSON.parse(localStorage.getItem('lumina:chatThreads') ?? '[]'); }
-    catch { return []; }
-  });
-  const [activeChatThreadId, setActiveChatThreadId] = useState<string | null>(() => {
-    try { return localStorage.getItem('lumina:activeChatThreadId'); } catch { return null; }
-  });
+  // Chat threads are scoped PER USER (keyed by user id) so one account's chat
+  // history can never surface under another account on the same machine. They
+  // start empty and are loaded for the signed-in user once auth resolves (see
+  // the per-user load effect below). The old GLOBAL keys are purged on sign-out.
+  const activeUserIdRef = useRef<string | null>(null);
+  const [chatThreads, setChatThreads] = useState<ChatThread[]>([]);
+  const [activeChatThreadId, setActiveChatThreadId] = useState<string | null>(null);
   useEffect(() => {
+    const uid = activeUserIdRef.current;
+    if (!uid) return;
     try {
-      if (activeChatThreadId) localStorage.setItem('lumina:activeChatThreadId', activeChatThreadId);
-      else localStorage.removeItem('lumina:activeChatThreadId');
+      if (activeChatThreadId) localStorage.setItem(`lumina:activeChatThreadId:${uid}`, activeChatThreadId);
+      else localStorage.removeItem(`lumina:activeChatThreadId:${uid}`);
     } catch {}
   }, [activeChatThreadId]);
+  // Synchronous mirror of the active thread id. handleSendMessage reads/writes
+  // this (not the async state) so consecutive messages reliably stay in the SAME
+  // thread instead of each one racing setState and spawning a new chat.
+  const activeThreadIdRef = useRef<string | null>(null);
+  const setActiveThread = useCallback((id: string | null) => {
+    activeThreadIdRef.current = id;
+    setActiveChatThreadId(id);
+  }, []);
   const [selectedTask, setSelectedTask] = useState<TaskHistory | null>(null);
   const [isLoadingTaskDetails, setIsLoadingTaskDetails] = useState(false);
   const [isLoadingHistory, setIsLoadingHistory] = useState(true);
@@ -507,6 +576,30 @@ export default function App() {
     update();
     window.addEventListener('resize', update);
     return () => window.removeEventListener('resize', update);
+  }, []);
+
+  // Track macOS fullscreen. In fullscreen the traffic lights are hidden, so the
+  // space we reserve for them next to the sidebar toggle must collapse (otherwise
+  // the toggle is left floating where the lights used to be instead of moving to
+  // the top-left corner). macOS fullscreen enter/exit fires a window resize.
+  const [isFullscreen, setIsFullscreen] = useState(false);
+  useEffect(() => {
+    const isTauri = typeof window !== 'undefined' && !!(window as any).__TAURI_INTERNALS__;
+    if (!isTauri) return;
+    let cancelled = false;
+    let unlisten: (() => void) | undefined;
+    (async () => {
+      try {
+        const { getCurrentWindow } = await import('@tauri-apps/api/window');
+        const win = getCurrentWindow();
+        const sync = async () => {
+          try { const fs = await win.isFullscreen(); if (!cancelled) setIsFullscreen(fs); } catch { /* ignore */ }
+        };
+        await sync();
+        unlisten = await win.onResized(() => { void sync(); });
+      } catch { /* not in Tauri / API unavailable */ }
+    })();
+    return () => { cancelled = true; if (unlisten) unlisten(); };
   }, []);
 
   // Compact (narrow) window → default to the icon rail (closed); the user can
@@ -646,10 +739,36 @@ export default function App() {
     );
   };
 
+  // True if the user may create another meeting. Free users are capped; when
+  // blocked it opens the upgrade modal and returns false. Checked BEFORE
+  // recording/uploading so the user isn't surprised after the work is done.
+  const requireMeetingQuota = useCallback((): boolean => {
+    const e = entitlements;
+    if (!e || e.unlimited) return true;
+    if ((e.meetingsRemaining ?? 1) > 0) return true;
+    setLimitModalMsg(null); // use the default meetings copy
+    setShowLimitModal(true);
+    return false;
+  }, [entitlements]);
+
   const persistTaskWithOfflineQueue = async (task: TaskHistory): Promise<TaskHistory> => {
     try {
-      return await saveTask(task);
+      const saved = await saveTask(task);
+      // Keep the local quota in sync so the indicator + gate stay accurate.
+      setEntitlements(prev =>
+        prev && !prev.unlimited
+          ? { ...prev, meetingCount: prev.meetingCount + 1, meetingsRemaining: Math.max(0, (prev.meetingsRemaining ?? 1) - 1) }
+          : prev
+      );
+      return saved;
     } catch (err: any) {
+      // 402 = free meeting limit hit (server-authoritative). Surface the upgrade
+      // modal and stop — do NOT queue offline (it would just fail again).
+      if (err?.status === 402) {
+        setLimitModalMsg(typeof err?.message === 'string' ? err.message : null);
+        setShowLimitModal(true);
+        throw err;
+      }
       if (!isNetworkRelatedError(err)) {
         throw err;
       }
@@ -677,6 +796,10 @@ export default function App() {
         const k = localStorage.key(i);
         if (k && k.startsWith('lumina:knownPeople:')) localStorage.removeItem(k);
       }
+      // Remove the legacy GLOBAL chat keys — the source of cross-account chat
+      // leakage. Per-user `lumina:chatThreads:<uid>` keys are namespaced and safe.
+      localStorage.removeItem('lumina:chatThreads');
+      localStorage.removeItem('lumina:activeChatThreadId');
     } catch { /* non-fatal */ }
     lastChatFetchTaskIdRef.current = null;
     lastAssetsFetchTaskIdRef.current = null;
@@ -688,8 +811,9 @@ export default function App() {
     setIsExtractingNewKG(false);
     setChatMessages([]);
     setAllMeetingsChatMessages([]);
+    setChatThreads([]); // critical: never carry one account's threads into another
     setChatInput('');
-    setActiveChatThreadId(null);
+    setActiveThread(null);
     setAgentAssetHistory([]);
     setSelectedAgentAsset(null);
     setFile(null);
@@ -701,6 +825,23 @@ export default function App() {
     autoSyncRanRef.current = false;
     setManualNotesList([]);
     setIsLoadingManualNotes(true);
+    setActiveNote(null);              // open manual note (prior user's content)
+    setEntitlements(null);            // plan/usage — also closes a stale-plan race
+    setSelectedNode(null);            // open KG node detail
+    setKgProgress({ current: 0, total: 0 });
+    setRecoverableProgress(null);     // "resume processing?" prompt held prior audio/transcript
+    setHasRecoverableProgress(false);
+    setShowRecoveryPrompt(false);
+    currentProgressIdRef.current = null;
+    setPrompt('');                    // upload prompt box
+    setBatches([]);                   // prior job's per-chunk state
+    setRealtimeTranscript([]);
+    setInterimTranscript('');
+    realtimeTranscriptRef.current = [];
+    // Knowledge-graph caches are GLOBAL (keyed by content/fingerprint, not user)
+    // and hold meeting-derived text/embeddings/graphs — purge on account switch.
+    void clearAllEmbedCaches();
+    void clearArtifactCache();
     resetUserLedgers();
   }, []);
 
@@ -710,46 +851,95 @@ export default function App() {
       const next = idx >= 0
         ? prev.map((t, i) => i === idx ? { ...t, ...thread } : t)
         : [thread, ...prev];
-      try { localStorage.setItem('lumina:chatThreads', JSON.stringify(next)); } catch {}
+      const uid = activeUserIdRef.current;
+      if (uid) { try { localStorage.setItem(`lumina:chatThreads:${uid}`, JSON.stringify(next)); } catch {} }
       return next;
     });
   }, []);
 
+  // "New chat" → the chat home page (no active thread). The next message the user
+  // sends starts ONE fresh thread and stays in it.
   const handleNewThread = useCallback(() => {
-    setActiveChatThreadId(null);
+    setActiveThread(null);
     setChatMessages([]);
     setChatInput('');
-  }, []);
+  }, [setActiveThread]);
 
   const handleSwitchThread = useCallback(async (thread: ChatThread) => {
-    setActiveChatThreadId(thread.id);
-    setChatMessages([]);
+    setActiveThread(thread.id);
+    const cacheKey = `chat:thread:${thread.id}`;
+    // Cache-first: paint the conversation instantly, then refresh from backend.
+    let painted = false;
+    try {
+      const cached = await cacheGet<ChatMessage[]>(cacheKey);
+      if (cached?.length) { setChatMessages(parseChatMessagesShared(cached as any[])); painted = true; }
+      else setChatMessages([]);
+    } catch { setChatMessages([]); }
     try {
       const messages = await getChatHistoryByThread(thread.id);
-      const parsed = (messages as any[]).map((msg: any) => ({
-        role: msg.role,
-        text: msg.text,
-        image: msg.image,
-        citations: msg.citations?.map((c: any) => ({
-          meetingId: c.meeting_id,
-          meetingTitle: c.meeting_title,
-          chunkId: c.chunk_id,
-          score: c.score,
-        })),
-        retrievalMeta: msg.retrieval_meta
-          ? {
-              scope: msg.retrieval_meta.scope,
-              confidence: msg.retrieval_meta.confidence,
-              selectedMeetingIds: msg.retrieval_meta.selected_meeting_ids,
-              tokenUsageTotal: msg.retrieval_meta.token_usage_total,
-              coveredMeetingsCount: msg.retrieval_meta.covered_meetings_count,
-              totalMeetingsCount: msg.retrieval_meta.total_meetings_count,
-            }
-          : undefined,
+      // SHARED parser → restores agent thought-steps + citations (the old inline map dropped them).
+      setChatMessages(parseChatMessagesShared(messages as any[]));
+      await cacheSet(cacheKey, messages);
+    } catch { if (!painted) setChatMessages([]); }
+  }, [setActiveThread]);
+
+  // One-shot launch primer: a SINGLE /bootstrap request fills the caches the app
+  // reads (history, workspace index, chat threads) so every surface paints
+  // instantly on first navigation — instead of a cold fan-out of ~6 requests.
+  const primeFromBootstrap = useCallback(async (uid: string) => {
+    try {
+      const bp = await getBootstrap();
+      if (bp.entitlements) setEntitlements(bp.entitlements);
+      await cacheSet(`tasks:${uid}`, {
+        list: bp.history.data,
+        hasMore: bp.history.hasMore,
+        total: bp.history.total,
+        pageLoaded: 0,
+      });
+      await cacheSet('ws-index', bp.workspaceIndex);
+      const backendThreads: ChatThread[] = (bp.chatThreads || []).map((r) => ({
+        id: r.thread_id,
+        title: r.title || 'New chat',
+        taskId: r.task_id ?? null,
+        taskTitle: r.task_title || undefined,
+        createdAt: r.created_at,
+        updatedAt: r.updated_at,
+        preview: r.preview || '',
       }));
-      setChatMessages(parsed);
-    } catch { /* non-fatal */ }
+      setChatThreads(prev => {
+        const byId = new Map<string, ChatThread>();
+        for (const t of backendThreads) byId.set(t.id, t);
+        // Only keep prior local-only threads if they belong to THIS user (prev is
+        // already per-user; the load effect resets it on account switch).
+        for (const t of prev) if (!byId.has(t.id)) byId.set(t.id, t);
+        const merged = Array.from(byId.values()).sort((a, b) => (b.updatedAt ?? '').localeCompare(a.updatedAt ?? ''));
+        try { localStorage.setItem(`lumina:chatThreads:${uid}`, JSON.stringify(merged)); } catch { /* ignore */ }
+        return merged;
+      });
+    } catch { /* non-fatal — per-feature loaders still work */ }
   }, []);
+
+  // Point chat-thread persistence at the current user and load THEIR cached
+  // threads. Runs before priming so writes are always keyed to the right user
+  // and a previous account's threads are never shown. (Must run before prime.)
+  useEffect(() => {
+    const uid = session?.user?.id ?? null;
+    activeUserIdRef.current = uid;
+    // Scope per-user IndexedDB stores (offline queue, processing recovery) so
+    // their records are only ever read/flushed under the account that made them.
+    setPendingTaskUser(uid);
+    setProgressUser(uid);
+    if (!uid) { setChatThreads([]); setActiveChatThreadId(null); return; }
+    try {
+      const raw = localStorage.getItem(`lumina:chatThreads:${uid}`);
+      setChatThreads(raw ? JSON.parse(raw) : []);
+    } catch { setChatThreads([]); }
+  }, [session?.user?.id]);
+
+  useEffect(() => {
+    const uid = session?.user?.id;
+    if (uid) void primeFromBootstrap(uid);
+  }, [session?.user?.id, primeFromBootstrap]);
 
   useEffect(() => {
     let cancelled = false;
@@ -898,100 +1088,14 @@ export default function App() {
     }
   };
 
-  const parseChatMessages = (data: any[]): Message[] =>
-    data.map(msg => ({
-      role: msg.role,
-      text: msg.text,
-      image: msg.image,
-      citations: (msg as any).citations?.map((c: any) => ({
-        meetingId: c.meeting_id,
-        meetingTitle: c.meeting_title,
-        chunkId: c.chunk_id,
-        score: c.score,
-      })),
-      retrievalMeta: (msg as any).retrieval_meta
-        ? {
-            scope: (msg as any).retrieval_meta.scope,
-            confidence: (msg as any).retrieval_meta.confidence,
-            selectedMeetingIds: (msg as any).retrieval_meta.selected_meeting_ids,
-            tokenUsageTotal: (msg as any).retrieval_meta.token_usage_total,
-            coveredMeetingsCount: (msg as any).retrieval_meta.covered_meetings_count,
-            totalMeetingsCount: (msg as any).retrieval_meta.total_meetings_count,
-          }
-        : undefined,
-      agentStatus: (msg as any).agent_status,
-      agentPlan: Array.isArray((msg as any).agent_plan)
-        ? (msg as any).agent_plan.map((s: any) => ({
-            id: s.id,
-            label: s.label,
-            status: s.status,
-            detail: s.detail,
-            type: s.type,
-            searchKind: s.search_kind,
-            searchQuery: s.search_query,
-            searchResults: Array.isArray(s.search_results)
-              ? s.search_results.map((r: any) => ({
-                  meetingId: r.meeting_id,
-                  meetingTitle: r.meeting_title,
-                  score: r.score,
-                }))
-              : undefined,
-            planSteps: Array.isArray(s.plan_steps) ? s.plan_steps : undefined,
-          }))
-        : undefined,
-    }));
+  const parseChatMessages = (data: any[]): Message[] => parseChatMessagesShared(data);
 
-  // Resolve which thread to load when in All-Meetings mode. Picks (in order):
-  //   1. the currently active thread (restored from localStorage)
-  //   2. the most recently updated all-meetings thread in the chatThreads list
-  //   3. the legacy ALL_MEETINGS_THREAD_ID constant
-  // and writes the result back to activeChatThreadId so subsequent saves target it.
-  const resolveAllMeetingsThreadId = (): string => {
-    if (activeChatThreadId) return activeChatThreadId;
-    const recent = chatThreads
-      .filter(t => !t.taskId)
-      .slice()
-      .sort((a, b) => (b.updatedAt ?? '').localeCompare(a.updatedAt ?? ''))[0];
-    if (recent) {
-      setActiveChatThreadId(recent.id);
-      return recent.id;
-    }
-    return ALL_MEETINGS_THREAD_ID;
-  };
-
-  const fetchChatHistory = async (taskId: string | null) => {
-    const threadId = taskId ? null : resolveAllMeetingsThreadId();
-    const cacheKey = taskId ? `chat:${taskId}` : `chat:all-meetings:${threadId}`;
+  const persistChatThreadToCache = async (_taskId: string | null) => {
     try {
-      const cachedRaw = await cacheGet<ChatMessage[]>(cacheKey);
-      if (cachedRaw?.length) {
-        const fromCache = parseChatMessages(cachedRaw as any[]);
-        setChatMessages(fromCache);
-        if (!taskId) setAllMeetingsChatMessages(fromCache);
-      }
-      const data = taskId
-        ? await getChatHistory(taskId)
-        : await getChatHistoryByThread(threadId!);
-      await cacheSet(cacheKey, data);
-      const messages = parseChatMessages(data);
-      setChatMessages(messages);
-      if (!taskId) {
-        setAllMeetingsChatMessages(messages);
-      }
-    } catch (err) {
-      log.error('fetch_chat_history_failed', { error: err instanceof Error ? err : undefined });
-      setChatMessages([]);
-    }
-  };
-
-  const persistChatThreadToCache = async (taskId: string | null) => {
-    try {
-      const threadId = taskId ? null : resolveAllMeetingsThreadId();
-      const cacheKey = taskId ? `chat:${taskId}` : `chat:all-meetings:${threadId}`;
-      const data = taskId
-        ? await getChatHistory(taskId)
-        : await getChatHistoryByThread(threadId!);
-      await cacheSet(cacheKey, data);
+      const threadId = activeThreadIdRef.current;
+      if (!threadId) return;
+      const data = await getChatHistoryByThread(threadId);
+      await cacheSet(`chat:thread:${threadId}`, data);
     } catch {
       /* non-fatal */
     }
@@ -1006,20 +1110,62 @@ export default function App() {
     const tid = selectedTask.id;
     if (lastChatFetchTaskIdRef.current !== tid) {
       lastChatFetchTaskIdRef.current = tid;
-      setActiveChatThreadId(null); // reset so new messages create a new thread
-      void fetchChatHistory(tid);
+      // Entering a meeting → the chat starts at its HOME page (no auto-loaded
+      // thread). Past chats for this meeting are reachable from the recents list;
+      // typing starts ONE new thread. (No more auto-opening the last thread.)
+      setActiveThread(null);
+      setChatMessages([]);
     }
     if (lastAssetsFetchTaskIdRef.current !== tid) {
       lastAssetsFetchTaskIdRef.current = tid;
       void fetchAgentAssets(tid);
     }
-  }, [selectedTask?.id]);
+  }, [selectedTask?.id, setActiveThread]);
 
   useEffect(() => {
     if (currentView === 'chat' && !selectedTask) {
-      void fetchChatHistory(null);
+      // Opening the standalone Chat → HOME page (recents + recipes), not the most
+      // recent thread. Typing starts a fresh thread; tapping a recent opens it.
+      setActiveThread(null);
+      setChatMessages([]);
     }
-  }, [currentView, selectedTask?.id]);
+  }, [currentView, selectedTask?.id, setActiveThread]);
+
+  // Hydrate the thread index from the backend on login so chat history is
+  // durable even if the client's localStorage thread list is missing/cleared
+  // (the messages already live in the DB keyed by thread_id). Server threads are
+  // authoritative; any local-only (not-yet-synced) threads are kept.
+  useEffect(() => {
+    const uid = session?.user?.id;
+    if (!uid) return;
+    let cancelled = false;
+    getChatThreads()
+      .then((rows) => {
+        if (cancelled || !rows?.length) return;
+        // Guard against a late response landing after an account switch.
+        if (activeUserIdRef.current !== uid) return;
+        const fromServer: ChatThread[] = rows.map((r) => ({
+          id: r.thread_id,
+          title: (r.title || 'New chat').slice(0, 80),
+          taskId: r.task_id,
+          taskTitle: r.task_title || undefined,
+          createdAt: r.created_at,
+          updatedAt: r.updated_at,
+          preview: (r.preview || '').slice(0, 120),
+        }));
+        setChatThreads((prev) => {
+          const byId = new Map<string, ChatThread>();
+          for (const t of fromServer) byId.set(t.id, t);
+          for (const t of prev) if (!byId.has(t.id)) byId.set(t.id, t);
+          const merged = Array.from(byId.values())
+            .sort((a, b) => (b.updatedAt ?? '').localeCompare(a.updatedAt ?? ''));
+          try { localStorage.setItem(`lumina:chatThreads:${uid}`, JSON.stringify(merged)); } catch { /* ignore */ }
+          return merged;
+        });
+      })
+      .catch(() => { /* non-fatal — localStorage threads still work */ });
+    return () => { cancelled = true; };
+  }, [session?.user?.id]);
 
   // Check if native system audio (Tauri) is available + permissions
   useEffect(() => {
@@ -1055,6 +1201,39 @@ export default function App() {
   // Refs to keep latest recording callbacks accessible from tray listener
   const startRecordingRef = useRef<() => Promise<void>>(undefined);
   const stopRecordingRef = useRef<() => Promise<void>>(undefined);
+  const pauseRecordingRef = useRef<() => Promise<void>>(undefined);
+  const resumeRecordingRef = useRef<() => Promise<void>>(undefined);
+
+  // A user-provided meeting title from the "Are you in a meeting?" prompt. When
+  // set, it seeds the saved meeting's title instead of the auto-generated one.
+  // Consumed (and cleared) when processing computes the title.
+  const pendingMeetingLabelRef = useRef<string | null>(null);
+  // Forces the recording mode for a detection-triggered start, so startRecording
+  // doesn't have to wait for setState to propagate (see its use site).
+  const forcedRecordingModeRef = useRef<RecordingMode | null>(null);
+  // The ACTUAL mode of the in-flight recording. pause/resume/stop read THIS (not
+  // the `desktopRecordingMode` state, which can be stale/throttled for a
+  // detection-triggered start) so they always take the correct branch.
+  const activeRecordingModeRef = useRef<RecordingMode>('batch');
+
+  // Triggered when the user accepts the meeting-detection prompt. Meetings need
+  // both sides of the conversation, so prefer native system-audio (batch)
+  // capture; fall back to realtime transcription when native isn't available.
+  const startMeetingFromDetection = (label: string | null) => {
+    pendingMeetingLabelRef.current = label;
+    const mode: RecordingMode = nativeServerAvailable ? 'batch' : 'realtime';
+    forcedRecordingModeRef.current = mode;
+    setInputMode('record');
+    setDesktopRecordingMode(mode);
+    // Start immediately — the forced-mode ref means we don't need to wait a tick
+    // for state to settle (which the backgrounded main window would throttle).
+    void startRecordingRef.current?.();
+  };
+
+  // Latest gating values + handler for the once-registered detection listeners
+  // below (avoids stale closures without re-subscribing on every render).
+  const meetingDriverRef = useRef({ session, isRecording, start: startMeetingFromDetection });
+  meetingDriverRef.current = { session, isRecording, start: startMeetingFromDetection };
 
   // Listen for tray menu actions (Record Standard / Multi-lingual / Stop)
   useEffect(() => {
@@ -1077,6 +1256,10 @@ export default function App() {
           setTimeout(() => startRecordingRef.current?.(), 100);
         } else if (payload === 'stop') {
           stopRecordingRef.current?.();
+        } else if (payload === 'pause') {
+          pauseRecordingRef.current?.();
+        } else if (payload === 'resume') {
+          resumeRecordingRef.current?.();
         }
       });
     })();
@@ -1133,6 +1316,72 @@ export default function App() {
       unlistenError?.();
     };
   }, []);
+
+  // Drive the floating recording indicator overlay window and pause mic
+  // detection while we record (so our own capture never self-triggers a
+  // prompt). Pushes live state to the indicator on every tick/pause change.
+  // Heavy, main-thread-touching window/engine setup — ONLY on the recording
+  // start/stop edge. Previously this whole block re-ran every second (because
+  // `recordingTime` was a dep), re-issuing `show()` + `set_always_on_top` +
+  // `set_visible_on_all_workspaces` on the indicator each tick — a flood of
+  // main-thread NSWindow ops that fought the WebView IPC and made the main
+  // window's pause/stop clicks lag. Keyed on `isRecording` only, it runs twice.
+  useEffect(() => {
+    const isTauri = !!(window as any).__TAURI_INTERNALS__;
+    if (!isTauri) return;
+    if (isRecording) {
+      void setRecordingActive(true); // disable App Nap → main window stays responsive
+      void setDetectionPaused(true);
+      void setMeetingPrompt(false);
+      void setRecordingIndicator(true);
+    } else {
+      void setRecordingActive(false); // re-enable normal App Nap when idle
+      void setRecordingIndicator(false);
+      void setDetectionPaused(false);
+    }
+  }, [isRecording]);
+
+  // Lightweight live state push to the indicator overlay — on tick / pause
+  // change. This is just a Tauri event emit (no main-thread NSWindow work), so
+  // it's cheap to run every second.
+  useEffect(() => {
+    const isTauri = !!(window as any).__TAURI_INTERNALS__;
+    if (!isTauri || !isRecording) return;
+    void emitRecordingIndicatorState({
+      recording: true,
+      paused: isPaused,
+      seconds: recordingTime,
+      label: pendingMeetingLabelRef.current,
+    });
+  }, [isRecording, isPaused, recordingTime]);
+
+  // The meeting-detection prompt overlay is shown directly from Rust the moment
+  // a meeting is detected (not throttled like a backgrounded WebView). Here we
+  // only (1) toggle detection on/off with auth, and (2) handle the prompt's
+  // "Yes" action by starting a recording.
+  useEffect(() => {
+    const isTauri = !!(window as any).__TAURI_INTERNALS__;
+    if (!isTauri) return;
+    let unlistenStart: (() => void) | undefined;
+    let cancelled = false;
+    (async () => {
+      const us = await listenForMeetingPromptStart((label) => {
+        meetingDriverRef.current.start(label);
+      });
+      if (cancelled) us();
+      else unlistenStart = us;
+    })();
+    return () => {
+      cancelled = true;
+      unlistenStart?.();
+    };
+  }, []);
+
+  // Enable detection only while signed in (off on the auth screen).
+  useEffect(() => {
+    void setDetectionEnabled(!!session);
+    return () => void setDetectionEnabled(false);
+  }, [session]);
 
   const formatTime = (seconds: number) => {
     const m = Math.floor(seconds / 60);
@@ -1323,62 +1572,79 @@ export default function App() {
   };
 
   const startRecording = async () => {
-    if (nativeServerAvailable && desktopRecordingMode === 'batch') {
+    // Free-tier gate: block before recording if the meeting quota is exhausted.
+    if (!requireMeetingQuota()) return;
+    // When started from the meeting-detection prompt the mode is forced via a
+    // ref, so we don't depend on setDesktopRecordingMode having propagated yet
+    // (the main window may be backgrounded and its state updates throttled).
+    const activeMode: RecordingMode = forcedRecordingModeRef.current ?? desktopRecordingMode;
+    forcedRecordingModeRef.current = null;
+    activeRecordingModeRef.current = activeMode; // single source of truth for pause/resume/stop
+    if (nativeServerAvailable && activeMode === 'batch') {
       // ── Native Batch Recording (mic + system audio via Tauri) ──
+      // Optimistic UI: flip to "recording" instantly; start the native capture
+      // in the background and roll back if it fails.
+      isRealtimePausedRef.current = false;
+      pausedBatchSegmentsRef.current = [];
+      pausedRealtimeTranscriptRef.current = [];
+      setIsRecording(true);
+      setIsPaused(false);
+      setRecordingTime(0);
+      setFile(null);
+      setRealtimeTranscript([]);
+      realtimeTranscriptRef.current = [];
+      setInterimTranscript('');
+      if (timerRef.current) clearInterval(timerRef.current);
+      timerRef.current = setInterval(() => {
+        setRecordingTime(prev => prev + 1);
+      }, 1000);
+
       try {
         await startSystemAudioRecording();
-        isRealtimePausedRef.current = false;
-        pausedBatchSegmentsRef.current = [];
-        pausedRealtimeTranscriptRef.current = [];
-        setIsRecording(true);
-        setIsPaused(false);
-        setRecordingTime(0);
-        setFile(null);
-        setRealtimeTranscript([]);
-        realtimeTranscriptRef.current = [];
-        setInterimTranscript('');
-
-        timerRef.current = setInterval(() => {
-          setRecordingTime(prev => prev + 1);
-        }, 1000);
       } catch (err: any) {
         log.error('native_recording_error', { error: err instanceof Error ? err : undefined });
+        if (timerRef.current) clearInterval(timerRef.current);
+        setIsRecording(false);
+        setIsPaused(false);
         setError(err.message || 'Failed to start system audio recording.');
       }
-    } else if (desktopRecordingMode === 'realtime') {
+    } else if (activeMode === 'realtime') {
       // ── Real-time mode: integrated Deepgram transcription via Tauri ──
+      // Optimistic UI: flip to "recording" INSTANTLY so the button feels
+      // immediate; the Deepgram engine spins up in the background and we roll
+      // back if it fails. (Previously the UI only updated after ~1–2s of engine
+      // startup, which is what made Record feel slow / unresponsive.)
+      isRealtimePausedRef.current = false;
+      setRealtimeNetworkInterrupted(false);
+      pausedBatchSegmentsRef.current = [];
+      pausedRealtimeTranscriptRef.current = [];
+      setRealtimeTranscript([]);
+      realtimeTranscriptRef.current = [];
+      setInterimTranscript('');
+      setIsRecording(true);
+      setIsPaused(false);
+      setRecordingTime(0);
+      setFile(null);
+      if (timerRef.current) clearInterval(timerRef.current);
+      timerRef.current = setInterval(() => {
+        setRecordingTime(prev => prev + 1);
+      }, 1000);
+
       try {
-        // Mint a short-lived Deepgram token from the authed backend — the real
-        // key lives in Secrets Manager, never in the client bundle.
+        // Mint a short-lived Deepgram token (cached) — the real key lives in
+        // Secrets Manager, never in the client bundle.
         const apiKey = await getDeepgramToken();
-
-        // Reset buffers before listener/stream starts to avoid dropping early words.
-        isRealtimePausedRef.current = false;
-        setRealtimeNetworkInterrupted(false);
-        pausedBatchSegmentsRef.current = [];
-        pausedRealtimeTranscriptRef.current = [];
-        setRealtimeTranscript([]);
-        realtimeTranscriptRef.current = [];
-        setInterimTranscript('');
-
-        // Start listening for transcript events BEFORE starting recording
         await attachRealtimeTranscriptListener();
-
         await startRealtimeRecording(apiKey, extractDeepgramKeyterms(prompt));
         realtimeEngineActiveRef.current = true;
-
-        setIsRecording(true);
-        setIsPaused(false);
-        setRecordingTime(0);
-        setFile(null);
-
-        timerRef.current = setInterval(() => {
-          setRecordingTime(prev => prev + 1);
-        }, 1000);
       } catch (err: any) {
         log.error('realtime_recording_error', { error: err instanceof Error ? err : undefined });
         if (unlistenRef.current) { unlistenRef.current(); unlistenRef.current = null; }
         realtimeEngineActiveRef.current = false;
+        // Roll back the optimistic UI.
+        if (timerRef.current) clearInterval(timerRef.current);
+        setIsRecording(false);
+        setIsPaused(false);
         setError(err.message || 'Failed to start integrated real-time recording.');
       }
     } else {
@@ -1426,12 +1692,13 @@ export default function App() {
     setInterimTranscript('');
     if (timerRef.current) clearInterval(timerRef.current);
 
+    const mode = activeRecordingModeRef.current;
     try {
-      if (nativeServerAvailable && desktopRecordingMode === 'batch') {
+      if (nativeServerAvailable && mode === 'batch') {
         // Emulate pause by checkpointing a finished native segment.
         const segment = await stopSystemAudioRecording();
         if (segment) pausedBatchSegmentsRef.current.push(segment);
-      } else if (desktopRecordingMode === 'realtime') {
+      } else if (mode === 'realtime') {
         isRealtimePausedRef.current = true;
         // Emulate pause by stopping realtime stream and retaining transcript so far.
         const partialTranscript = await safeStopRealtimeRecording();
@@ -1462,10 +1729,11 @@ export default function App() {
     pauseResumeInFlightRef.current = true;
     setIsPaused(false);
 
+    const mode = activeRecordingModeRef.current;
     try {
-      if (nativeServerAvailable && desktopRecordingMode === 'batch') {
+      if (nativeServerAvailable && mode === 'batch') {
         await startSystemAudioRecording();
-      } else if (desktopRecordingMode === 'realtime') {
+      } else if (mode === 'realtime') {
         // Short-lived token from the authed backend; real key never bundled.
         const apiKey = await getDeepgramToken();
         if (!unlistenRef.current) {
@@ -1498,8 +1766,9 @@ export default function App() {
 
   const stopRecording = async () => {
     if (timerRef.current) clearInterval(timerRef.current);
+    const mode = activeRecordingModeRef.current;
 
-    if (nativeServerAvailable && desktopRecordingMode === 'batch' && isRecording) {
+    if (nativeServerAvailable && mode === 'batch' && isRecording) {
       // ── Stop Native Batch Recording (Tauri) ──
       try {
         let finalSegment: File | null = null;
@@ -1536,7 +1805,7 @@ export default function App() {
         setIsPaused(false);
         pausedBatchSegmentsRef.current = [];
       }
-    } else if (desktopRecordingMode === 'realtime' && isRecording) {
+    } else if (mode === 'realtime' && isRecording) {
       // ── Stop Real-time mode: stop integrated Tauri recording ──
       const backupAudioFile = await stopRealtimeBackupCapture();
       try {
@@ -1593,6 +1862,8 @@ export default function App() {
   // Keep refs in sync so the tray listener always calls the latest functions
   startRecordingRef.current = startRecording;
   stopRecordingRef.current = stopRecording;
+  pauseRecordingRef.current = pauseRecording;
+  resumeRecordingRef.current = resumeRecording;
 
   // Process real-time transcript with step checkpointing for network-safe resume.
   const processRealtimeTranscript = async (
@@ -1621,6 +1892,12 @@ export default function App() {
       let summary = resumeFromProgress?.batches?.find(b => b.index === 0)?.result || '';
       let notes = resumeFromProgress?.batches?.find(b => b.index === 1)?.result || '';
       let meetingTitle = resumeFromProgress?.batches?.find(b => b.index === 2)?.result || '';
+      // If the user named the meeting in the detection prompt, use that title
+      // instead of auto-generating one (consume it once).
+      if (!meetingTitle && pendingMeetingLabelRef.current) {
+        meetingTitle = pendingMeetingLabelRef.current;
+        pendingMeetingLabelRef.current = null;
+      }
 
       const updateRealtimeCheckpoint = async (
         updatedBatches: ProcessingProgress['batches'],
@@ -1693,6 +1970,7 @@ export default function App() {
         prompt,
         status: 'completed',
         duration: resumeFromProgress?.duration ?? recordingTime,
+        source: 'realtime', // live recording — not counted against batch hours
       };
 
       const savedTask = await persistTaskWithOfflineQueue(newTask);
@@ -2623,19 +2901,21 @@ export default function App() {
       }));
     };
 
-    let currentThreadId = activeChatThreadId;
+    // Read the ACTIVE thread from the ref (synchronous) — not the async state —
+    // so every message in a conversation appends to the SAME thread. A new thread
+    // is created only when there's no active one (home page / after "New chat").
+    let currentThreadId = activeThreadIdRef.current;
 
     try {
-      // Determine or create thread ID for this conversation
-      const isFirstMsg = chatMessages.filter(m => m.role === 'user').length === 0;
-      if (!currentThreadId) {
+      const isNewConversation = !currentThreadId;
+      if (isNewConversation) {
         currentThreadId = selectedTask
           ? `tm_${selectedTask.id}_${Date.now()}`
           : `allm_${Date.now()}`;
-        setActiveChatThreadId(currentThreadId);
+        setActiveThread(currentThreadId); // sets the ref synchronously → next msg continues here
       }
       // Save thread metadata
-      if (isFirstMsg || !chatThreads.find(t => t.id === currentThreadId)) {
+      if (isNewConversation || !chatThreads.find(t => t.id === currentThreadId)) {
         upsertChatThread({
           id: currentThreadId,
           title: userInput.slice(0, 60),
@@ -3436,7 +3716,7 @@ export default function App() {
           role: 'model',
           text: visualMessage.text,
           image: imageUrl,
-          thread_id: activeChatThreadId ?? `task:${selectedTask.id}`,
+          thread_id: activeThreadIdRef.current ?? `task:${selectedTask.id}`,
         });
         void persistChatThreadToCache(selectedTask.id ?? null);
       } else {
@@ -3656,6 +3936,8 @@ export default function App() {
   const handleFileChange = (e: React.ChangeEvent<HTMLInputElement>) => {
     const selectedFile = e.target.files?.[0];
     if (selectedFile) {
+      // Free-tier gate: block uploading a new meeting once the quota is used up.
+      if (!requireMeetingQuota()) { e.target.value = ''; return; }
       setFile(selectedFile);
       setError(null);
       setStatus('idle');
@@ -4082,7 +4364,14 @@ export default function App() {
 
       setProcessingHeadline('Naming this masterpiece 🎨');
       setProcessingSubtext('One tiny sec more ⏳');
-      const meetingTitle = await generateMeetingTitle(fullTranscription);
+      // Prefer a user-provided title from the meeting-detection prompt.
+      let meetingTitle: string;
+      if (pendingMeetingLabelRef.current) {
+        meetingTitle = pendingMeetingLabelRef.current;
+        pendingMeetingLabelRef.current = null;
+      } else {
+        meetingTitle = await generateMeetingTitle(fullTranscription);
+      }
 
       const duration = await getDuration();
 
@@ -4094,6 +4383,7 @@ export default function App() {
         prompt,
         status: 'completed',
         duration,
+        source: 'batch', // uploaded file — counts toward the plan's batch hours
       };
 
       const savedTask = await persistTaskWithOfflineQueue(newTask);
@@ -4221,6 +4511,19 @@ export default function App() {
 
   return (
     <div className="h-screen w-screen bg-app-canvas text-app-fg font-[system-ui] selection:bg-app-fg selection:text-app-panel flex flex-col overflow-hidden">
+      {/* Free-tier meeting limit → upgrade prompt (portal) */}
+      <FreeLimitModal
+        open={showLimitModal}
+        onClose={() => setShowLimitModal(false)}
+        limit={entitlements?.meetingLimit ?? 5}
+        used={entitlements?.meetingCount ?? 0}
+        planLabel={entitlements?.planLabel ?? 'Free'}
+        message={limitModalMsg}
+        session={session}
+      />
+      {/* Meeting detection — the "Are you in a meeting?" prompt is shown as an
+          OS-level always-on-top overlay window (see the effect below), not an
+          in-app card, so it floats over Zoom/Meet/Teams like anarlog's notification. */}
       {/* Network Status — floating pill toast (Apple-style) */}
       <AnimatePresence>
         {!isOnline && (
@@ -4331,20 +4634,45 @@ export default function App() {
           sits next to the traffic lights (reference layout). */}
       <div
         data-tauri-drag-region
-        className="relative z-[80] flex flex-shrink-0 h-[30px] items-center bg-app-canvas"
+        className="relative z-[80] flex flex-shrink-0 h-[38px] items-center bg-app-canvas"
         style={{ WebkitUserSelect: 'none', userSelect: 'none' }}
       >
-        {/* Reserve space for the traffic lights, then the sidebar toggle. */}
-        <div className="w-[78px] flex-shrink-0" />
+        {/* Reserve space for the traffic lights, then the sidebar toggle. In
+            fullscreen the lights are hidden, so collapse the gap and let the
+            toggle sit at the top-left corner. */}
+        <div className={`flex-shrink-0 ${isFullscreen ? 'w-2' : 'w-[78px]'}`} />
         <button
           onClick={() => setIsSidebarOpen(!isSidebarOpen)}
           data-tauri-drag-region="false"
-          className="w-7 h-7 flex items-center justify-center text-app-fg-subtle hover:text-app-fg hover:bg-app-nav-active-bg rounded-lg transition-all duration-200"
+          className="w-8 h-8 flex items-center justify-center text-app-fg-subtle hover:text-app-fg hover:bg-app-nav-active-bg rounded-lg transition-all duration-200"
           title="Toggle sidebar"
         >
-          <PanelLeft size={15} strokeWidth={1.5} />
+          <PanelLeft size={19} strokeWidth={1.6} />
         </button>
       </div>
+
+      {/* Full-window Settings — renders as a top-level overlay (its own nav +
+          content), NOT inside the content panel, so it never sits next to the
+          main sidebar ("sidebar inside a sidebar"). Its empty top drag-strip
+          clears the macOS traffic lights. */}
+      <AnimatePresence>
+        {currentView === 'settings' && (
+          <motion.div
+            key="settings-overlay"
+            initial={{ opacity: 0 }}
+            animate={{ opacity: 1 }}
+            exit={{ opacity: 0 }}
+            transition={{ duration: 0.18 }}
+            className="fixed inset-0 z-[90] bg-app-panel"
+          >
+            <SettingsPage
+              session={session}
+              onClose={() => setCurrentView('process')}
+              onSignOut={() => { clearUserState(); signOut(); }}
+            />
+          </motion.div>
+        )}
+      </AnimatePresence>
 
       {/* Body — sidebar + content row, sitting below the shared top bar. */}
       <div className="flex-1 flex flex-row min-h-0 overflow-hidden">
@@ -4358,7 +4686,11 @@ export default function App() {
             if (view === 'notes' && selectedTask) {
               setCurrentView('notes', selectedTask.id);
             } else if (view === 'chat') {
-              setCurrentView('chat', selectedTask?.id);
+              // The standalone Chat is a single, static "all meetings" chat —
+              // never scoped to a specific meeting (per-meeting chat lives in the
+              // note's "Ask AI" tab).
+              setSelectedTask(null);
+              setCurrentView('chat');
             } else {
               setCurrentView(view);
             }
@@ -4435,6 +4767,7 @@ export default function App() {
                 onLoadMore={loadMoreHistory}
                 hasMoreFromServer={hasMoreHistory}
                 totalCount={totalHistoryCount}
+                onOpenWorkspace={(wsId) => { setWorkspaceSelection(wsId, null); setCurrentView('workspace'); }}
               />
             )}
 
@@ -4446,6 +4779,34 @@ export default function App() {
                   isLoadingDetails={isLoadingTaskDetails}
                   session={session}
                   allTasks={history}
+                  chatPanel={
+                    /* Inline "Ask AI" chat for THIS meeting — no meeting dropdown
+                       (onSelectTask/history omitted), history preserved via threads. */
+                    <ChatPage
+                      selectedTask={selectedTask}
+                      chatMessages={chatMessages}
+                      chatInput={chatInput}
+                      setChatInput={setChatInput}
+                      isChatting={isChatting}
+                      isGeneratingImage={isGeneratingImage}
+                      handleSendMessage={handleSendMessage}
+                      handleVisualize={handleVisualize}
+                      isGeneratingAsset={isGeneratingAsset}
+                      handleAgentAction={handleAgentAction}
+                      wikiStyle={wikiStyle}
+                      setWikiStyle={setWikiStyle}
+                      agentAssetHistory={agentAssetHistory}
+                      selectedAgentAsset={selectedAgentAsset}
+                      setSelectedAgentAsset={setSelectedAgentAsset as (a: any) => void}
+                      downloadExistingAsset={downloadExistingAsset}
+                      chatThreads={chatThreads}
+                      activeChatThreadId={activeChatThreadId}
+                      onNewThread={handleNewThread}
+                      onSwitchThread={handleSwitchThread}
+                      session={session}
+                      embedded
+                    />
+                  }
                 />
               ) : (
                 <HistoryPage
@@ -4458,22 +4819,15 @@ export default function App() {
                   onLoadMore={loadMoreHistory}
                   hasMoreFromServer={hasMoreHistory}
                   totalCount={totalHistoryCount}
+                  onOpenWorkspace={(wsId) => { setWorkspaceSelection(wsId, null); setCurrentView('workspace'); }}
                 />
               )
             )}
 
             {currentView === 'chat' && (
               <ChatPage
-                selectedTask={selectedTask}
-                history={history}
-                onSelectTask={(task) => {
-                  if (task) {
-                    const resolvedTask = history.find(h => h.id === task.id) ?? (task as TaskHistory);
-                    setSelectedTask(resolvedTask);
-                  } else {
-                    setSelectedTask(null);
-                  }
-                }}
+                /* Static all-meetings chat — no meeting selector. */
+                selectedTask={null}
                 chatMessages={chatMessages}
                 chatInput={chatInput}
                 setChatInput={setChatInput}
@@ -4498,45 +4852,6 @@ export default function App() {
             )}
 
 
-
-            {currentView === 'notebooks' && (
-              <motion.div
-                key="notebooks"
-                initial={{ opacity: 0 }}
-                animate={{ opacity: 1 }}
-                exit={{ opacity: 0 }}
-                className="h-full"
-              >
-                {activeNote !== undefined && activeNote !== null ? (
-                  <ManualNoteEditor
-                    note={activeNote}
-                    onSave={(saved) => {
-                      setActiveNote(saved);
-                      setManualNotesList(prev => {
-                        const idx = prev.findIndex(n => n.id === saved.id);
-                        const next =
-                          idx >= 0
-                            ? prev.map((n, i) => (i === idx ? saved : n))
-                            : [...prev, saved];
-                        void getUserId().then(uid => {
-                          if (uid) void cacheSet(`notes:${uid}`, next);
-                        });
-                        return next;
-                      });
-                    }}
-                    onBack={() => setActiveNote(null)}
-                  />
-                ) : (
-                  <ManualNotesList
-                    notes={manualNotesList}
-                    isLoading={isLoadingManualNotes}
-                    onSelectNote={(note) => setActiveNote(note)}
-                    onCreateNote={() => setActiveNote({ title: 'Untitled', content: '' })}
-                    onDeleteNote={handleDeleteManualNote}
-                  />
-                )}
-              </motion.div>
-            )}
 
             {currentView === 'knowledge' && (
               <KnowledgePage
@@ -4629,21 +4944,7 @@ export default function App() {
                 />
               </motion.div>
             )}
-            {currentView === 'settings' && (
-              <motion.div
-                key="settings"
-                initial={{ opacity: 0 }}
-                animate={{ opacity: 1 }}
-                exit={{ opacity: 0 }}
-                className="h-full"
-              >
-                <SettingsPage
-                  session={session}
-                  onClose={() => setCurrentView('process')}
-                  onSignOut={() => { clearUserState(); signOut(); }}
-                />
-              </motion.div>
-            )}
+            {/* Settings now renders as a full-window overlay (see above), not here. */}
           </AnimatePresence>
         </main>
         </div>
@@ -4658,7 +4959,11 @@ export default function App() {
             if (view === 'notes' && selectedTask) {
               setCurrentView('notes', selectedTask.id);
             } else if (view === 'chat') {
-              setCurrentView('chat', selectedTask?.id);
+              // The standalone Chat is a single, static "all meetings" chat —
+              // never scoped to a specific meeting (per-meeting chat lives in the
+              // note's "Ask AI" tab).
+              setSelectedTask(null);
+              setCurrentView('chat');
             } else {
               setCurrentView(view);
             }

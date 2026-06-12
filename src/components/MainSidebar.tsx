@@ -7,7 +7,6 @@ import {
   PanelLeft,
   AudioLines,
   LogOut,
-  BookOpen,
   Headphones,
   Users,
   Sun,
@@ -461,7 +460,6 @@ export default function MainSidebar({
     { id: 'process' as View, label: 'Record', icon: AudioLines },
     { id: 'notes' as View, label: 'Notes', icon: PenLine },
     { id: 'chat' as View, label: 'Chat', icon: MessageSquareText },
-    { id: 'notebooks' as View, label: 'Notebooks', icon: BookOpen },
     { id: 'knowledge' as View, label: 'Knowledge', icon: Network },
     { id: 'people' as View, label: 'People', icon: Users },
     { id: 'audio-devices' as View, label: 'Devices', icon: Headphones },
@@ -564,7 +562,7 @@ export default function MainSidebar({
         </div>
 
         {/* Main nav */}
-        <nav className="px-2.5 space-y-px">
+        <nav className="px-2.5 space-y-px flex-shrink-0">
           {navItems.map(({ id, label, icon: Icon }) => {
             const isActive = currentView === id;
             return (
@@ -582,8 +580,8 @@ export default function MainSidebar({
           })}
         </nav>
 
-        {/* Recent */}
-        <div className="mt-5 px-2.5">
+        {/* Recent — FIXED (does not scroll with Spaces). */}
+        <div className="mt-5 px-2.5 flex-shrink-0">
           <div className="text-[9px] font-mono font-medium text-app-fg-label uppercase tracking-[0.12em] px-2.5 mb-1.5">
             Recent
           </div>
@@ -603,6 +601,9 @@ export default function MainSidebar({
           </button>
         </div>
 
+        {/* Scrollable region — ONLY the Spaces list scrolls; the nav and the
+            All Meetings row above stay fixed (Granola-style). */}
+        <div className="flex-1 min-h-0 overflow-y-auto no-scrollbar">
         {/* Spaces */}
         <div className="mt-4 px-2.5">
           <div className="flex items-center px-2.5 mb-1.5">
@@ -650,6 +651,9 @@ export default function MainSidebar({
             )}
           </div>
         </div>
+        {/* pad the bottom of the scroll region a touch */}
+        <div className="h-2" />
+        </div>{/* end scrollable middle */}
 
         {/* Create folder modal */}
         {folderModalForWs && (
@@ -683,8 +687,8 @@ export default function MainSidebar({
           </div>
         )}
 
-        {/* Status pill */}
-        <div className="mt-4 mx-4">
+        {/* Status pill — part of the pinned footer */}
+        <div className="mt-3 mx-4 flex-shrink-0">
           <div className="flex items-center gap-2 px-2.5 py-2 bg-app-status-bg rounded-xl border border-app-status-border">
             <div className={`w-[5px] h-[5px] rounded-full ${status === 'idle' ? 'bg-emerald-500' : 'bg-amber-500 animate-pulse'}`} />
             <span className="text-[10px] font-mono font-medium text-app-status-fg uppercase tracking-wider">
@@ -693,10 +697,8 @@ export default function MainSidebar({
           </div>
         </div>
 
-        <div className="flex-1 min-h-0" />
-
-        {/* Bottom section */}
-        <div className="px-2.5 pb-3 space-y-1">
+        {/* Bottom section — pinned footer (appearance + account) */}
+        <div className="px-2.5 pb-3 pt-2 space-y-1 flex-shrink-0">
           <ThemeAppearancePicker />
 
           <div className="h-px bg-app-divider w-full my-1" />

@@ -1,4 +1,4 @@
-@import url('https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&family=JetBrains+Mono:wght@400;500&family=Cormorant+Garamond:ital,wght@1,400;1,500;1,600&display=swap');
+@import url('https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&family=JetBrains+Mono:wght@400;500&family=Newsreader:ital,wght@0,400;0,500;0,600;1,400;1,500;1,600&display=swap');
 @import "tailwindcss";
 
 @custom-variant dark (&:where(.dark, .dark *));
@@ -6,7 +6,7 @@
 @theme {
   --font-sans: "Inter", ui-sans-serif, system-ui, sans-serif;
   --font-mono: "JetBrains Mono", ui-monospace, SFMono-Regular, monospace;
-  --font-serif: "Cormorant Garamond", serif;
+  --font-serif: "Newsreader", "Cormorant Garamond", ui-serif, Georgia, serif;
 
   /* Softer, Flow-style corner hierarchy (see theme radius scale in Tailwind v4) */
   --radius-xs: 0.25rem; /* 4px — micro */
@@ -19,32 +19,38 @@
   --radius-4xl: 2rem; /* 32px — largest frames */
   --radius: 0.625rem; /* default `rounded` → 10px */
 
-  /* App shell — light defaults; `.dark` overrides in @layer theme */
-  --color-app-canvas: #e5ddd4;
+  /* App shell — light defaults; `.dark` overrides in @layer theme.
+     Refined warm "paper" palette (Flow-style): a light, low-saturation cream
+     instead of a heavy tan, near-black warm ink, and an amber accent. */
+  --color-app-canvas: #f4f2ec;
   --color-app-panel: #ffffff;
-  --color-app-border: rgb(216 206 195 / 0.65);
-  --color-app-border-strong: #d5cbc0;
-  --color-app-card-border: rgb(26 26 26 / 0.06);
-  --color-app-fg: #1a1a1a;
-  --color-app-fg-muted: #7a726a;
-  --color-app-fg-subtle: #9a918a;
-  --color-app-fg-label: #a09890;
-  --color-app-nav-active-bg: #d5cbc0;
-  --color-app-nav-active-fg: #1a1a1a;
-  --color-app-nav-hover-bg: #ddd4c9;
-  --color-app-nav-fg: #7a726a;
-  --color-app-nav-fg-hover: #3a3530;
-  --color-app-badge-bg: #d5cbc0;
-  --color-app-badge-fg: #7a726a;
-  --color-app-divider: rgb(206 196 184 / 0.55);
-  --color-app-status-bg: rgb(255 255 255 / 0.35);
-  --color-app-status-border: rgb(206 196 184 / 0.6);
-  --color-app-status-fg: #8a8078;
+  --color-app-border: rgb(38 32 24 / 0.08);
+  --color-app-border-strong: #e6e0d5;
+  --color-app-card-border: rgb(38 32 24 / 0.07);
+  --color-app-fg: #1c1a17;
+  --color-app-fg-muted: #6c655c;
+  --color-app-fg-subtle: #968d81;
+  --color-app-fg-label: #a59c8f;
+  --color-app-nav-active-bg: #e9e4d9;
+  --color-app-nav-active-fg: #1c1a17;
+  --color-app-nav-hover-bg: #efebe2;
+  --color-app-nav-fg: #6c655c;
+  --color-app-nav-fg-hover: #2e2a24;
+  --color-app-badge-bg: #e9e4d9;
+  --color-app-badge-fg: #6c655c;
+  --color-app-divider: rgb(38 32 24 / 0.07);
+  --color-app-status-bg: rgb(255 255 255 / 0.5);
+  --color-app-status-border: rgb(38 32 24 / 0.08);
+  --color-app-status-fg: #837b71;
   --color-app-theme-track: rgb(0 0 0 / 0.04);
   --color-app-theme-active: #ffffff;
   /* Nested surfaces (cards, composers) — light */
-  --color-app-raised: #fafaf9;
+  --color-app-raised: #faf9f6;
   --color-app-chip: #ffffff;
+  /* Amber accent for primary actions / highlights (Flow-style). */
+  --color-app-accent: #f3a738;
+  --color-app-accent-hover: #e8991f;
+  --color-app-accent-fg: #1c1a17;
 }
 
 @layer theme {
@@ -83,6 +89,11 @@
 
     --color-app-theme-track: rgb(0 0 0 / 0.35);
     --color-app-theme-active: #2c2c2c;
+
+    /* Amber accent — same hue reads well on charcoal. */
+    --color-app-accent: #f3a738;
+    --color-app-accent-hover: #ffb74d;
+    --color-app-accent-fg: #1c1a17;
   }
 }
 

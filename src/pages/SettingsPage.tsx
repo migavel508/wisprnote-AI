@@ -16,6 +16,7 @@ import {
 } from 'lucide-react';
 import type { AuthSession } from '../services/awsAuthService';
 import PreferencesTab from './settings/PreferencesTab';
+import BillingTab from './settings/BillingTab';
 import { formatDisplayName, formatDisplayInitials } from '../lib/displayName';
 
 export type SettingsTab =
@@ -202,7 +203,13 @@ export default function SettingsPage({ session, onClose, onSignOut }: SettingsPa
         </div>
 
         <div className="flex-1 overflow-y-auto">
-          {tab === 'preferences' ? <PreferencesTab /> : <ComingSoon title={TAB_TITLES[tab]} />}
+          {tab === 'preferences' ? (
+            <PreferencesTab />
+          ) : tab === 'billing' ? (
+            <BillingTab session={session} />
+          ) : (
+            <ComingSoon title={TAB_TITLES[tab]} />
+          )}
         </div>
       </main>
     </div>

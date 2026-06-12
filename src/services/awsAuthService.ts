@@ -218,6 +218,13 @@ function buildSession(cognitoSession: CognitoUserSession, cognitoUser: CognitoUs
 }
 
 function notifyListeners(event: string, session: AuthSession | null) {
+  // Drop the cached ID token on EVERY auth transition (sign-in, account switch,
+  // sign-out) so a previous user's token can never authenticate the next user's
+  // requests. This is the single chokepoint all sign-in paths flow through
+  // (password, Google/OAuth, refresh) — clearing here covers them all.
+  if (event === 'SIGNED_IN' || event === 'SIGNED_OUT') {
+    clearIdTokenCache();
+  }
   for (const cb of authStateListeners) {
     try { cb(event, session); } catch (e) { log.error('auth_listener_error', { error: e as Error }); }
   }
@@ -256,6 +263,7 @@ export async function getSession(): Promise<AuthSession | null> {
 // Security is unchanged — it's the same short-lived Cognito token.
 let _cachedIdToken: string | null = null;
 let _cachedIdTokenExp = 0; // epoch ms
+let _cachedTokenUser: string | null = null; // username the cached token belongs to
 
 function jwtExpMs(jwt: string): number {
   try {
@@ -267,6 +275,13 @@ function jwtExpMs(jwt: string): number {
 }
 
 export async function getIdToken(): Promise<string> {
+  // Self-heal: if the signed-in Cognito user changed since we cached (account
+  // switch), drop the stale token. Without this, a cached token can outlive the
+  // session that created it and authenticate the WRONG user's API requests.
+  const currentUser = userPool.getCurrentUser()?.getUsername() ?? null;
+  if (_cachedIdToken && _cachedTokenUser !== currentUser) {
+    clearIdTokenCache();
+  }
   // Reuse the cached token until 60s before expiry.
   if (_cachedIdToken && Date.now() < _cachedIdTokenExp - 60_000) {
     return _cachedIdToken;
@@ -275,6 +290,7 @@ export async function getIdToken(): Promise<string> {
   if (!session) throw new Error('User not authenticated');
   _cachedIdToken = session.idToken;
   _cachedIdTokenExp = jwtExpMs(session.idToken);
+  _cachedTokenUser = currentUser;
   return session.idToken;
 }
 
@@ -282,6 +298,7 @@ export async function getIdToken(): Promise<string> {
 export function clearIdTokenCache(): void {
   _cachedIdToken = null;
   _cachedIdTokenExp = 0;
+  _cachedTokenUser = null;
 }
 
 export async function getUserId(): Promise<string> {

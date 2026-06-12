@@ -34,6 +34,12 @@ export function serverError(msg: string): APIGatewayProxyResult {
   return { statusCode: 500, headers: { 'Content-Type': 'application/json', ...CORS_HEADERS }, body: JSON.stringify({ message: msg }) };
 }
 
+/** 402 Payment Required — used to enforce the free-plan meeting limit. The body
+    carries machine-readable fields so the client can show an upgrade prompt. */
+export function paymentRequired(body: Record<string, unknown>): APIGatewayProxyResult {
+  return { statusCode: 402, headers: { 'Content-Type': 'application/json', ...CORS_HEADERS }, body: JSON.stringify(body) };
+}
+
 export function corsPreflightResponse(): APIGatewayProxyResult {
   return { statusCode: 200, headers: CORS_HEADERS, body: '' };
 }

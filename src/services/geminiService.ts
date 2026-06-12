@@ -1,6 +1,7 @@
 import { GoogleGenAI, GenerateContentResponse, Type } from "@google/genai";
 import { fetch as tauriFetch } from '@tauri-apps/plugin-http';
 import { aiProxyFetch } from './aiProxyService';
+import { getChatModel, type ChatModelDef } from './chatModels';
 import { AudioBatch, blobToBase64, BlobReadError } from "./audioService";
 import { logger } from '../lib/logger';
 import { formatDisplayName } from '../lib/displayName';
@@ -1158,6 +1159,114 @@ RULES for plan (1–3 short steps, each ≤ 12 words, describing HOW you'll answ
   }
 }
 
+// ─── Selected-model answer generation (Claude via authed proxy) ──────────────
+// The chat composer's model picker (chatModels.ts) lets the user choose the
+// model that AUTHORS the answer. Claude models are routed to the Anthropic
+// Messages API through the authed Lambda proxy, which injects the Anthropic key
+// server-side (never in the bundle). Gemini stays the default fast path and the
+// agentic-retrieval engine.
+
+function toAnthropicMessages(
+  history: { role: 'user' | 'model'; parts: { text: string }[] }[],
+  userMessage: string,
+): { role: 'user' | 'assistant'; content: string }[] {
+  const msgs = history
+    .filter(m => m.parts?.some(p => (p.text || '').trim()))
+    .map(m => ({
+      role: (m.role === 'model' ? 'assistant' : 'user') as 'user' | 'assistant',
+      content: m.parts.map(p => p.text).join('').trim(),
+    }));
+  // The Anthropic API requires the first message to be a user turn.
+  while (msgs.length && msgs[0].role === 'assistant') msgs.shift();
+  msgs.push({ role: 'user', content: userMessage });
+  return msgs;
+}
+
+/**
+ * Generate an answer with a Claude model via the authed proxy → Anthropic
+ * Messages API. Returns the assistant text; throws on a non-OK response so the
+ * caller can fall back to Gemini.
+ */
+async function generateAnswerWithAnthropic(opts: {
+  model: ChatModelDef;
+  systemInstruction: string;
+  history: { role: 'user' | 'model'; parts: { text: string }[] }[];
+  userMessage: string;
+  maxTokens?: number;
+}): Promise<string> {
+  const body: any = {
+    model: opts.model.providerModel,
+    max_tokens: opts.maxTokens ?? 4096,
+    system: opts.systemInstruction,
+    messages: toAnthropicMessages(opts.history, opts.userMessage),
+  };
+  if (opts.model.thinking) {
+    // Adaptive thinking (Opus 4.8 / Sonnet 4.6). Needs headroom above the
+    // visible answer for the reasoning budget.
+    body.thinking = { type: 'adaptive' };
+    body.max_tokens = Math.max(body.max_tokens, 8000);
+  }
+
+  const resp = await aiProxyFetch('https://api.anthropic.com/v1/messages', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify(body),
+  });
+  if (!resp.ok) {
+    const t = await resp.text().catch(() => '');
+    const err: any = new Error(`Anthropic ${resp.status}: ${t.slice(0, 300)}`);
+    err.status = resp.status;
+    throw err;
+  }
+  const data: any = await resp.json();
+  return (data?.content ?? [])
+    .filter((b: any) => b?.type === 'text')
+    .map((b: any) => b.text)
+    .join('')
+    .trim();
+}
+
+/**
+ * Generate an answer with a specific Gemini model (e.g. Gemini 3.1 Pro) via the
+ * proxied REST endpoint. The Gemini 3.x *Pro preview* models are only served on
+ * the `v1alpha` API surface (they 404 on v1beta), so this calls v1alpha. The
+ * Gemini key is injected server-side by the proxy. Throws on a non-OK response.
+ */
+async function generateAnswerWithGemini(opts: {
+  model: string;
+  systemInstruction: string;
+  history: { role: 'user' | 'model'; parts: { text: string }[] }[];
+  userMessage: string;
+  maxTokens?: number;
+}): Promise<string> {
+  const contents = [
+    ...opts.history
+      .filter(m => m.parts?.some(p => (p.text || '').trim()))
+      .map(m => ({ role: m.role === 'model' ? 'model' : 'user', parts: m.parts })),
+    { role: 'user', parts: [{ text: opts.userMessage }] },
+  ];
+  const body = {
+    systemInstruction: { parts: [{ text: opts.systemInstruction }] },
+    contents,
+    generationConfig: { temperature: 0.15, maxOutputTokens: opts.maxTokens ?? 4096 },
+  };
+  const url = `https://generativelanguage.googleapis.com/v1alpha/models/${encodeURIComponent(opts.model)}:generateContent`;
+  const resp = await aiProxyFetch(url, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify(body),
+  });
+  if (!resp.ok) {
+    const t = await resp.text().catch(() => '');
+    const err: any = new Error(`Gemini ${resp.status}: ${t.slice(0, 300)}`);
+    err.status = resp.status;
+    throw err;
+  }
+  const data: any = await resp.json();
+  const parts: any[] = data?.candidates?.[0]?.content?.parts ?? [];
+  return parts.map((p: any) => p?.text).filter(Boolean).join('').trim();
+}
+
 export async function chatWithNotes(
   taskData: ChatTaskData | string,
   message: string,
@@ -1242,22 +1351,65 @@ ${formatGuide}
 ${fullContext}`;
 
   const recentHistory = trimHistoryToTokenBudget(history, 2400);
+  const maxOut = isOverview ? 4000 : 2400;
 
-  const response = await generateWithFallback({
-    model: "gemini-3-flash-preview",
-    contents: [
-      ...recentHistory,
-      { role: 'user', parts: [{ text: message }] }
-    ],
-    config: {
-      systemInstruction,
-      temperature: 0.15,
-      maxOutputTokens: isOverview ? 4000 : 2400,
+  const runGemini = async (): Promise<string> => {
+    const response = await generateWithFallback({
+      model: "gemini-3-flash-preview",
+      contents: [
+        ...recentHistory,
+        { role: 'user', parts: [{ text: message }] }
+      ],
+      config: {
+        systemInstruction,
+        temperature: 0.15,
+        maxOutputTokens: maxOut,
+      }
+    });
+    return response.text || '';
+  };
+
+  // Route the answer to the user-selected model. Claude models go to Anthropic
+  // (proxied); on any failure we fall back to the Gemini default so chat never
+  // breaks. "Auto"/Gemini models use the fast Gemini path directly.
+  const chosen = getChatModel();
+  let answer: string;
+  if (chosen.provider === 'anthropic' && chosen.providerModel) {
+    try {
+      answer = await generateAnswerWithAnthropic({
+        model: chosen,
+        systemInstruction,
+        history: recentHistory,
+        userMessage: message,
+        maxTokens: maxOut,
+      });
+      if (!answer) answer = await runGemini();
+    } catch (e) {
+      log.warn('chat_notes_anthropic_failed_fallback_gemini', { error: e instanceof Error ? e : undefined });
+      answer = await runGemini();
     }
-  });
+  } else if (chosen.provider === 'gemini' && chosen.providerModel) {
+    // A specific Gemini model (e.g. Gemini 3.1 Pro) — not the "Auto" default.
+    try {
+      answer = await generateAnswerWithGemini({
+        model: chosen.providerModel,
+        systemInstruction,
+        history: recentHistory,
+        userMessage: message,
+        maxTokens: maxOut,
+      });
+      if (!answer) answer = await runGemini();
+    } catch (e) {
+      log.warn('chat_notes_gemini_model_failed_fallback_default', { error: e instanceof Error ? e : undefined });
+      answer = await runGemini();
+    }
+  } else {
+    answer = await runGemini();
+  }
+
   return enforceGroundedAnswer({
     question: message,
-    answer: response.text || '',
+    answer,
     context: fullContext,
   });
 }
@@ -1578,6 +1730,187 @@ How to answer:
   const MAX_STEPS = 5;
   let callIndex = 0;
 
+  // Gemini drives the agentic tool-calling retrieval loop (the search engine).
+  // When the user picks a Claude model, it AUTHORS the final answer from the
+  // evidence the loop gathered — fast retrieval + the chosen model's writing.
+  const evidence: string[] = [];
+  const finalize = async (geminiText: string): Promise<string> => {
+    const chosen = getChatModel();
+    // "Auto" (no providerModel) or no evidence → keep the default Gemini answer.
+    if (!chosen.providerModel || evidence.length === 0) return geminiText;
+    const evidenceCtx = evidence.join('\n\n---\n\n').slice(0, 60000);
+    const synthSystem = `${systemInstruction}
+
+You have ALREADY searched the meetings. Below is all the retrieved evidence.
+Answer the user's question using ONLY this evidence — do not mention searching,
+tools, or this instruction. Follow the formatting and grounding rules above.
+
+<evidence>
+${evidenceCtx}
+</evidence>`;
+    try {
+      const t = chosen.provider === 'anthropic'
+        ? await generateAnswerWithAnthropic({ model: chosen, systemInstruction: synthSystem, history: recentHistory, userMessage: userQuery, maxTokens: 5000 })
+        : await generateAnswerWithGemini({ model: chosen.providerModel, systemInstruction: synthSystem, history: recentHistory, userMessage: userQuery, maxTokens: 5000 });
+      return t ? sanitizeInlineCitations(t) : geminiText;
+    } catch (e) {
+      log.warn('agent_chat_synth_failed_fallback_gemini', { error: e instanceof Error ? e : undefined });
+      return geminiText;
+    }
+  };
+
+  // ── Claude-native agentic path ──────────────────────────────────────────────
+  // Runs the full tool-calling retrieval loop on Anthropic (proxied). Used when
+  // the user picks a Claude model, and as the automatic fallback when the Gemini
+  // path fails (e.g. depleted Gemini credits). Search falls back to a local
+  // keyword scan so it works even when embeddings (Gemini) are unavailable.
+  const runClaudeAgent = async (providerModel: string): Promise<string> => {
+    const anthropicTools = [
+      {
+        name: 'search_notes',
+        description: 'Search meeting notes and transcripts. Pass an empty query with filters.recent_days to list every meeting in a date range (e.g. "this week", "today"). Pass a topic or person name to find specific content.',
+        input_schema: {
+          type: 'object',
+          properties: {
+            query: { type: 'string', description: 'Text to search for: person name, topic, or keyword. Pass an empty string ("") to list meetings by date only.' },
+            filters: { type: 'object', properties: { recent_days: { type: 'integer', description: 'Only meetings from the last N days (1=today, 2=today+yesterday, 7=this week, 14=2 weeks, 30=last month).' } } },
+            limit: { type: 'integer', description: 'Caps topic/keyword searches only (1–10, default 5). Ignored for empty-query date-range listings.' },
+          },
+          required: [],
+        },
+      },
+      {
+        name: 'search_contacts',
+        description: 'Authoritative one-shot lookup for any person-specific query. Returns full evidence (knowledge-graph topics/decisions/action items + meeting notes + summary + transcript excerpts) for every meeting a person attended or was mentioned in within the last 30 days. Call this FIRST for person queries; do not call search_notes for the same person afterwards.',
+        input_schema: {
+          type: 'object',
+          properties: {
+            query: { type: 'string', description: 'Person name, email fragment, role, or company to search.' },
+            limit: { type: 'integer', description: 'Max contacts to return (1–10, default 5).' },
+          },
+          required: ['query'],
+        },
+      },
+    ];
+
+    const messages: any[] = recentHistory
+      .map((m: any) => ({
+        role: m.role === 'model' ? 'assistant' : 'user',
+        content: (m.parts?.map((p: any) => p.text).join('') ?? '').trim(),
+      }))
+      .filter((m: any) => m.content.length > 0);
+    while (messages.length && messages[0].role === 'assistant') messages.shift();
+    messages.push({ role: 'user', content: userQuery });
+
+    const SYNTH_NUDGE = 'You have searched enough. Now synthesize a direct answer from the evidence you retrieved. Do NOT call search_notes or search_contacts again.';
+
+    const runSearch = async (q: string, f: any, l: number) => {
+      try {
+        const fn = callbacks.searchFn ?? ((qq: any, ff: any, ll: any) => executeSearchNotes(qq, ff, ll ?? 5, meetings));
+        return await fn(q, f, l);
+      } catch (e) {
+        log.warn('claude_agent_search_fallback_local', { error: e instanceof Error ? e : undefined });
+        return executeSearchNotes(q, f, l ?? 5, meetings);
+      }
+    };
+    const runContacts = async (q: string, l: number) => {
+      try {
+        return callbacks.contactsFn
+          ? await callbacks.contactsFn(q, l)
+          : { contacts: [], meetings: [], contextText: 'No contacts directory available.' };
+      } catch (e) {
+        log.warn('claude_agent_contacts_fallback', { error: e instanceof Error ? e : undefined });
+        return { contacts: [], meetings: [], contextText: 'Contacts lookup unavailable.' };
+      }
+    };
+
+    for (let step = 0; step < MAX_STEPS; step++) {
+      const isFinalStep = step === MAX_STEPS - 1;
+      const isPreFinalStep = step === MAX_STEPS - 2;
+      if (isPreFinalStep) {
+        // Merge the nudge into the prior turn rather than pushing a second
+        // consecutive user message (Anthropic requires alternating roles).
+        const last = messages[messages.length - 1];
+        if (last && last.role === 'user') {
+          if (Array.isArray(last.content)) last.content.push({ type: 'text', text: SYNTH_NUDGE });
+          else last.content = `${last.content}\n\n${SYNTH_NUDGE}`;
+        } else {
+          messages.push({ role: 'user', content: SYNTH_NUDGE });
+        }
+      }
+
+      const body: any = {
+        model: providerModel,
+        max_tokens: 5000,
+        system: systemInstruction,
+        messages,
+        ...(isFinalStep ? {} : { tools: anthropicTools }),
+      };
+
+      const resp = await aiProxyFetch('https://api.anthropic.com/v1/messages', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify(body),
+      });
+      if (!resp.ok) {
+        const t = await resp.text().catch(() => '');
+        const err: any = new Error(`Anthropic ${resp.status}: ${t.slice(0, 300)}`);
+        err.status = resp.status;
+        throw err;
+      }
+      const data: any = await resp.json();
+      const content: any[] = Array.isArray(data?.content) ? data.content : [];
+      const toolUses = content.filter((b: any) => b?.type === 'tool_use');
+      const textOut = content.filter((b: any) => b?.type === 'text').map((b: any) => b.text).join('').trim();
+
+      if (toolUses.length === 0) {
+        return textOut ? sanitizeInlineCitations(textOut) : 'I could not find relevant information in the meeting notes.';
+      }
+
+      messages.push({ role: 'assistant', content });
+      const toolResults: any[] = [];
+      for (const tu of toolUses) {
+        const callId = `${callIndex++}`;
+        const args: any = tu.input ?? {};
+        const query: string = typeof args.query === 'string' ? args.query : '';
+        const limit: number = typeof args.limit === 'number' ? args.limit : 5;
+
+        if (tu.name === 'search_contacts') {
+          callbacks.onToolCallStart({ callId, query, status: 'running', kind: 'contacts' });
+          const { contacts, meetings: cm, contextText } = await runContacts(query, limit);
+          callbacks.onToolCallDone({ callId, query, status: 'done', kind: 'contacts', contacts, results: cm });
+          toolResults.push({ type: 'tool_result', tool_use_id: tu.id, content: contextText });
+        } else {
+          const filters: { recent_days?: number } | undefined =
+            args.filters && typeof args.filters === 'object'
+              ? { recent_days: typeof args.filters.recent_days === 'number' ? args.filters.recent_days : undefined }
+              : undefined;
+          callbacks.onToolCallStart({ callId, query, filters, status: 'running', kind: 'notes' });
+          const { results, contextText } = await runSearch(query, filters, limit);
+          callbacks.onToolCallDone({ callId, query, filters, status: 'done', kind: 'notes', results });
+          toolResults.push({ type: 'tool_result', tool_use_id: tu.id, content: contextText });
+        }
+      }
+      messages.push({ role: 'user', content: toolResults });
+    }
+    return 'I was unable to find a definitive answer after searching the meeting notes.';
+  };
+
+  const selected = getChatModel();
+  if (selected.provider === 'anthropic' && selected.providerModel) {
+    return await runClaudeAgent(selected.providerModel);
+  }
+
+  // Auto / Gemini path — with automatic Claude fallback if Gemini fails (e.g.
+  // depleted credits) so the chat stays functional.
+  try {
+    return await runGeminiOrOpenRouterAgent();
+  } catch (e) {
+    log.warn('gemini_agent_failed_fallback_claude', { error: e instanceof Error ? e : undefined });
+    return await runClaudeAgent('claude-sonnet-4-6');
+  }
+
+  async function runGeminiOrOpenRouterAgent(): Promise<string> {
   if (getProvider() === 'openrouter') {
     // ── OpenRouter path: OpenAI-compatible tool calling ──────────────────────
     const openaiTools = [
@@ -1696,7 +2029,7 @@ How to answer:
 
       if (toolCalls.length === 0) {
         const text = (msg.content ?? '').trim();
-        return text ? sanitizeInlineCitations(text) : 'I could not find relevant information in the meeting notes.';
+        return await finalize(text ? sanitizeInlineCitations(text) : 'I could not find relevant information in the meeting notes.');
       }
 
       messages.push({ role: 'assistant', content: msg.content ?? null, tool_calls: toolCalls });
@@ -1721,7 +2054,8 @@ How to answer:
           log.debug('agent_tool_result_or', { callId, tool: 'search_contacts', contactCount: contacts.length, meetingCount: meetings.length });
           callbacks.onToolCallDone({ callId, query, status: 'done', kind: 'contacts', contacts, results: meetings });
 
-          messages.push({ role: 'tool', tool_call_id: tc.id, content: contextText });
+          evidence.push(contextText);
+        messages.push({ role: 'tool', tool_call_id: tc.id, content: contextText });
           continue;
         }
 
@@ -1739,11 +2073,12 @@ How to answer:
         log.debug('agent_tool_result_or', { callId, resultCount: results?.length ?? 0 });
         callbacks.onToolCallDone({ callId, query, filters, status: 'done', kind: 'notes', results });
 
+        evidence.push(contextText);
         messages.push({ role: 'tool', tool_call_id: tc.id, content: contextText });
       }
     }
 
-    return 'I was unable to find a definitive answer after searching the meeting notes.';
+    return await finalize('I was unable to find a definitive answer after searching the meeting notes.');
   }
 
   // ── Native Gemini path ────────────────────────────────────────────────────
@@ -1788,7 +2123,7 @@ How to answer:
 
     if (functionCallParts.length === 0) {
       const text = textParts.map((p: any) => p.text).join('').trim() || response.text?.trim() || '';
-      return text ? sanitizeInlineCitations(text) : 'I could not find relevant information in the meeting notes.';
+      return await finalize(text ? sanitizeInlineCitations(text) : 'I could not find relevant information in the meeting notes.');
     }
 
     contents.push({ role: 'model', parts });
@@ -1814,6 +2149,7 @@ How to answer:
         log.debug('agent_tool_result', { callId, tool: 'search_contacts', contactCount: contacts.length, meetingCount: meetings.length });
         callbacks.onToolCallDone({ callId, query, status: 'done', kind: 'contacts', contacts, results: meetings });
 
+        evidence.push(contextText);
         toolResponseParts.push({
           functionResponse: { name: fc.name, response: { content: contextText } },
         });
@@ -1843,7 +2179,8 @@ How to answer:
     contents.push({ role: 'user', parts: toolResponseParts });
   }
 
-  return 'I was unable to find a definitive answer after searching the meeting notes.';
+  return await finalize('I was unable to find a definitive answer after searching the meeting notes.');
+  }
 }
 
 export async function generateConceptImage(description: string): Promise<string | null> {

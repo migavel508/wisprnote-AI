@@ -41,6 +41,17 @@ export default defineConfig(({mode}) => {
         '@': path.resolve(__dirname, '.'),
       },
     },
+    build: {
+      rollupOptions: {
+        input: {
+          // Main app window.
+          main: path.resolve(__dirname, 'index.html'),
+          // Lightweight bundle for the always-on-top overlay windows (recording
+          // indicator + meeting-detection prompt) — see overlay.html / overlay.tsx.
+          overlay: path.resolve(__dirname, 'overlay.html'),
+        },
+      },
+    },
     server: {
       // HMR is disabled in AI Studio via DISABLE_HMR env var.
       // Do not modify—file watching is disabled to prevent flickering during agent edits.
