@@ -1,4 +1,4 @@
-import { useState, useEffect, useRef, useMemo } from 'react';
+import { useState, useEffect, useRef, useMemo, type ReactNode } from 'react';
 import { logger } from '../lib/logger';
 
 const log = logger.scope('NotesPage');
@@ -30,9 +30,11 @@ interface NotesPageProps {
   onTaskUpdated?: (task: TaskHistory) => void;
   session?: { user: { name?: string; email: string } } | null;
   allTasks?: TaskHistory[];
+  /** The AI chat panel for THIS meeting, rendered inline in the "Ask AI" tab. */
+  chatPanel?: ReactNode;
 }
 
-type NoteTab = 'transcription' | 'summary' | 'notes' | 'note';
+type NoteTab = 'transcription' | 'summary' | 'notes' | 'note' | 'chat';
 
 // Helper function to format transcription with bold speaker labels
 function formatTranscriptionWithBoldSpeakers(text: string): string {
@@ -45,7 +47,7 @@ function formatTranscriptionWithBoldSpeakers(text: string): string {
   return text.replace(speakerPattern, (match) => `**${match.trim()}**`);
 }
 
-export default function NotesPage({ selectedTask, isLoading = false, isLoadingDetails = false, onTaskUpdated, session, allTasks = [] }: NotesPageProps) {
+export default function NotesPage({ selectedTask, isLoading = false, isLoadingDetails = false, onTaskUpdated, session, allTasks = [], chatPanel }: NotesPageProps) {
   const [noteTab, setNoteTab] = useState<NoteTab>('summary');
   const [isGeneratingTitle, setIsGeneratingTitle] = useState(false);
   const [titleGenerated, setTitleGenerated] = useState(false);
@@ -749,7 +751,7 @@ export default function NotesPage({ selectedTask, isLoading = false, isLoadingDe
           {/* Tab Switcher — horizontally scrollable on mobile */}
           <div className="overflow-x-auto no-scrollbar -mx-3 sm:mx-0 px-3 sm:px-0">
             <div className="flex gap-[3px] bg-zinc-200/70 dark:bg-app-raised rounded-lg p-[3px] w-fit">
-              {(['transcription', 'summary', 'notes', 'note'] as NoteTab[]).map((tab) => (
+              {(['transcription', 'summary', 'notes', 'note', 'chat'] as NoteTab[]).map((tab) => (
                 <button
                   key={tab}
                   onClick={() => setNoteTab(tab)}
@@ -759,7 +761,7 @@ export default function NotesPage({ selectedTask, isLoading = false, isLoadingDe
                       : 'text-app-fg-muted hover:text-app-fg'
                   }`}
                 >
-                  {tab === 'note' ? 'My Note' : tab.charAt(0).toUpperCase() + tab.slice(1)}
+                  {tab === 'note' ? 'My Note' : tab === 'chat' ? 'Ask AI' : tab.charAt(0).toUpperCase() + tab.slice(1)}
                 </button>
               ))}
             </div>
@@ -768,7 +770,17 @@ export default function NotesPage({ selectedTask, isLoading = false, isLoadingDe
         <div className="h-px bg-gradient-to-r from-transparent via-zinc-300/80 to-transparent dark:via-zinc-600/50" />
       </div>
 
-      {/* Scrollable Content Area */}
+      {/* Content Area — the "Ask AI" tab fills the full height with the inline
+          chat (scoped to this meeting); other tabs scroll in a padded column. */}
+      {noteTab === 'chat' ? (
+        <div className="flex-1 min-h-0 overflow-hidden">
+          {chatPanel ?? (
+            <div className="h-full flex items-center justify-center text-[13px] text-app-fg-subtle">
+              Chat isn’t available here.
+            </div>
+          )}
+        </div>
+      ) : (
       <div className="flex-1 overflow-y-auto min-h-0">
         <div className="max-w-3xl lg:max-w-4xl mx-auto w-full px-3 sm:px-6 md:px-8 py-4 sm:py-8">
           <AnimatePresence mode="wait">
@@ -907,6 +919,7 @@ export default function NotesPage({ selectedTask, isLoading = false, isLoadingDe
           </AnimatePresence>
         </div>
       </div>
+      )}
 
       {selectedTask.id && (
         <ShareModal

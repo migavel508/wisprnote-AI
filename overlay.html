@@ -1,0 +1,24 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <style>
+      /* Overlay windows (recording indicator, meeting-detection prompt) are
+         transparent always-on-top panels — keep every root layer see-through so
+         only the pill/card paints. */
+      html, body, #root {
+        background: transparent !important;
+        background-color: transparent !important;
+        margin: 0;
+        overflow: hidden;
+      }
+    </style>
+    <script>if(typeof global==="undefined"){window.global=window;}</script>
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>Wisprnote</title>
+  </head>
+  <body>
+    <div id="root"></div>
+    <script type="module" src="/src/overlay.tsx"></script>
+  </body>
+</html>

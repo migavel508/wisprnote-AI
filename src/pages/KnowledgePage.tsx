@@ -40,6 +40,39 @@ import {
 } from '../lib/knowledgeGraph.utils';
 import { buildFingerprint, loadCachedArtifact, saveCachedArtifact } from '../lib/kgArtifactCache';
 import { useTheme } from '../theme/ThemeProvider';
+import { getWorkspaces } from '../services/workspaceService';
+import { getWorkspaceKnowledgeGraph } from '../services/awsService';
+
+/**
+ * Lightweight collision force (no extra dependency). Each tick it relaxes
+ * overlapping nodes apart, so the layout self-organises with even spacing and
+ * non-overlapping labels — the clean, "tree-forming" look of Obsidian's graph.
+ * O(n²) per tick, which is fine for the tens–low-hundreds of nodes here.
+ */
+function makeCollideForce(radius: (n: any) => number, strength = 0.7) {
+  let nodes: any[] = [];
+  const force = () => {
+    for (let i = 0; i < nodes.length; i++) {
+      const a = nodes[i];
+      const ra = radius(a);
+      for (let j = i + 1; j < nodes.length; j++) {
+        const b = nodes[j];
+        const dx = (b.x ?? 0) - (a.x ?? 0);
+        const dy = (b.y ?? 0) - (a.y ?? 0);
+        const dist = Math.sqrt(dx * dx + dy * dy) || 0.01;
+        const min = ra + radius(b);
+        if (dist < min) {
+          const push = ((min - dist) / dist) * strength * 0.5;
+          const ox = dx * push, oy = dy * push;
+          a.x -= ox; a.y -= oy;
+          b.x += ox; b.y += oy;
+        }
+      }
+    }
+  };
+  (force as any).initialize = (n: any[]) => { nodes = n; };
+  return force;
+}
 
 interface KnowledgePageProps {
   kgData: any[];
@@ -54,7 +87,7 @@ interface KnowledgePageProps {
 }
 
 export default function KnowledgePage({
-  kgData,
+  kgData: kgDataAll,
   isLoadingKG,
   kgProgress,
   isExtractingNewKG,
@@ -106,6 +139,44 @@ export default function KnowledgePage({
     observer.observe(kgContainerRef.current);
     return () => observer.disconnect();
   }, [kgBuilt]);
+
+  // ── Workspace scoping ───────────────────────────────────────────────────────
+  // The graph can be filtered to a single workspace. null = "All meetings".
+  // Because the build pipeline + artifact cache are keyed by the meeting-id set
+  // (kgDataKey below), simply filtering the meetings here scopes everything
+  // downstream — each workspace gets its own cached graph automatically.
+  const [workspaces, setWorkspaces] = useState<{ id: string; name: string }[]>([]);
+  const [selectedWsId, setSelectedWsId] = useState<string | null>(null);
+  const [wsTaskIds, setWsTaskIds] = useState<Set<string> | null>(null);
+  const [wsLoading, setWsLoading] = useState(false);
+
+  // Load the workspace list for the scope selector.
+  useEffect(() => {
+    let cancelled = false;
+    getWorkspaces()
+      .then((ws) => { if (!cancelled) setWorkspaces(ws.map((w) => ({ id: w.id, name: w.name }))); })
+      .catch(() => { /* selector just shows "All meetings" */ });
+    return () => { cancelled = true; };
+  }, []);
+
+  // When a workspace is picked, load the set of meeting (task) ids in it.
+  useEffect(() => {
+    if (!selectedWsId) { setWsTaskIds(null); return; }
+    let cancelled = false;
+    setWsLoading(true);
+    getWorkspaceKnowledgeGraph(selectedWsId)
+      .then((entries) => { if (!cancelled) setWsTaskIds(new Set(entries.map((e) => e.task_id))); })
+      .catch(() => { if (!cancelled) setWsTaskIds(new Set()); })
+      .finally(() => { if (!cancelled) setWsLoading(false); });
+    return () => { cancelled = true; };
+  }, [selectedWsId]);
+
+  // Effective graph data: all meetings, or only those in the selected workspace.
+  const kgData = useMemo(() => {
+    if (!selectedWsId) return kgDataAll;
+    if (!wsTaskIds) return [];                 // workspace selected, still loading
+    return kgDataAll.filter((m: any) => wsTaskIds.has(m.meetingId));
+  }, [kgDataAll, selectedWsId, wsTaskIds]);
 
   // Compute a stable data fingerprint so we can detect actual data changes
   const kgDataKey = useMemo(() => {
@@ -269,17 +340,23 @@ export default function KnowledgePage({
         const g = graphRef.current;
         if (!g) return;
         const charge = g.d3Force('charge');
-        if (charge) charge.strength(-200);
+        if (charge) {
+          charge.strength(-300);
+          charge.distanceMax?.(440); // bound repulsion so distant clusters don't fly off
+        }
         const linkF = g.d3Force('link');
         if (linkF) {
-          linkF.strength(0.35);
+          linkF.strength(0.28);
           linkF.distance((link: any) => {
-            if (link.type === 'meeting-sibling') return 140;
-            if (link.type === 'meeting-topic') return 65;
-            if (link.type?.startsWith?.('meeting-')) return 55;
-            return 42;
+            if (link.type === 'meeting-sibling') return 170;
+            if (link.type === 'meeting-topic') return 78;
+            if (link.type?.startsWith?.('meeting-')) return 62;
+            return 48;
           });
         }
+        // Collision spacing → even, non-overlapping layout (Obsidian-style).
+        g.d3Force('collide', makeCollideForce((n: any) =>
+          n.type === 'meeting' ? 22 : n.type === 'topic' ? 14 : 10));
         g.d3ReheatSimulation?.();
       });
     });
@@ -549,8 +626,27 @@ export default function KnowledgePage({
               )}
             </div>
 
+            {/* Workspace scope selector — filter the graph to one workspace,
+                or "All meetings" for the global view. */}
+            <div className="relative flex items-center flex-shrink-0">
+              <select
+                value={selectedWsId ?? ''}
+                onChange={(e) => setSelectedWsId(e.target.value || null)}
+                title="Scope the knowledge graph to a workspace"
+                className="appearance-none pl-3 pr-7 py-2 text-[10px] sm:text-xs font-mono uppercase tracking-wider rounded-lg bg-zinc-100 dark:bg-app-chip text-zinc-700 dark:text-app-fg border border-zinc-200/80 dark:border-app-border outline-none cursor-pointer max-w-[160px] truncate"
+              >
+                <option value="">All meetings</option>
+                {workspaces.map((ws) => (
+                  <option key={ws.id} value={ws.id}>{ws.name}</option>
+                ))}
+              </select>
+              {wsLoading
+                ? <Loader2 className="w-3 h-3 animate-spin absolute right-2 pointer-events-none text-zinc-400" />
+                : <ChevronRight className="w-3 h-3 rotate-90 absolute right-2 pointer-events-none text-zinc-400" />}
+            </div>
+
             {/* Build/Rebuild Button */}
-            <button 
+            <button
               onClick={buildKnowledgeGraph}
               disabled={isLoadingKG || historyLength === 0}
               className="px-3 sm:px-4 py-2 bg-zinc-900 text-white dark:bg-zinc-100 dark:text-zinc-900 text-[10px] sm:text-xs font-mono uppercase tracking-wider hover:bg-zinc-800 dark:hover:bg-white disabled:opacity-30 flex items-center gap-1.5 sm:gap-2 rounded-lg transition-colors flex-shrink-0"
@@ -943,9 +1039,13 @@ export default function KnowledgePage({
                         const isSel = selectedNode && node.id === selectedNode.id;
                         const isHover = hoveredNode && node.id === hoveredNode.id;
                         const label = node.label || '';
-                        const showLabel = globalScale >= 0.5 || isSel || isHover;
-                        const fontSize = node.type === 'meeting' ? 11 / globalScale : 9 / globalScale;
-                        ctx.font = `${node.type === 'meeting' ? '600 ' : ''}${fontSize}px Inter, system-ui, sans-serif`;
+                        const isMeeting = node.type === 'meeting';
+                        // Obsidian-style: keep the overview clean by hiding labels at
+                        // low zoom, revealing them progressively as you zoom in
+                        // (meetings first, then detail nodes), plus any focused node.
+                        const showLabel = isSel || isHover || (isMeeting ? globalScale >= 0.7 : globalScale >= 1.7);
+                        const fontSize = (isMeeting ? 10 : 8.5) / globalScale;
+                        ctx.font = `${isMeeting ? '600 ' : '500 '}${fontSize}px Inter, system-ui, sans-serif`;
 
                         const r = node.type === 'meeting' ? 10 : node.type === 'topic' ? 7 : 5;
 
@@ -983,22 +1083,19 @@ export default function KnowledgePage({
 
                         if (!showLabel) return;
 
-                        const maxLen = node.type === 'meeting' ? 22 : 16;
+                        const maxLen = isMeeting ? 26 : 18;
                         const displayLabel = label.length > maxLen ? label.substring(0, maxLen) + '…' : label;
-                        const textWidth = ctx.measureText(displayLabel).width;
-
-                        ctx.fillStyle = isDarkBg ? 'rgba(30,30,34,0.94)' : 'rgba(255,255,255,0.94)';
-                        const pad = 3;
-                        const boxW = textWidth + pad * 2;
-                        const boxH = fontSize + pad;
-                        const rx = node.x - boxW / 2;
-                        const ry = node.y + r + 2 / globalScale;
-                        ctx.fillRect(rx, ry, boxW, boxH);
-
+                        const ly = node.y + r + 3 / globalScale;
                         ctx.textAlign = 'center';
                         ctx.textBaseline = 'top';
-                        ctx.fillStyle = isDarkBg ? '#e4e4e7' : '#1a1a1a';
-                        ctx.fillText(displayLabel, node.x, ry + 2);
+                        // Box-less label with a soft halo for legibility (no overlapping
+                        // pills) — light grey text, like Obsidian.
+                        ctx.lineJoin = 'round';
+                        ctx.lineWidth = 3 / globalScale;
+                        ctx.strokeStyle = isDarkBg ? 'rgba(20,20,22,0.82)' : 'rgba(244,242,236,0.92)';
+                        ctx.strokeText(displayLabel, node.x, ly);
+                        ctx.fillStyle = isDarkBg ? 'rgba(212,212,216,0.92)' : 'rgba(70,66,60,0.9)';
+                        ctx.fillText(displayLabel, node.x, ly);
                       }}
                       cooldownTicks={180}
                       d3AlphaDecay={0.02}

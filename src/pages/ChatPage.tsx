@@ -1,4 +1,5 @@
 import React, { useRef, useEffect, useState } from 'react';
+import { createPortal } from 'react-dom';
 import { motion, AnimatePresence } from 'framer-motion';
 import {
   MessageSquare,
@@ -20,7 +21,13 @@ import {
   Clock,
   History,
   ListChecks,
+  Mic,
+  Paperclip,
+  Check,
+  Lock,
 } from 'lucide-react';
+import { transcribeAudioBlob } from '../services/aiProxyService';
+import { CHAT_MODELS, getChatModelId, setChatModelId, getChatModel, type ChatModelDef } from '../services/chatModels';
 import Markdown from 'react-markdown';
 import remarkGfm from 'remark-gfm';
 import { ChatPageSkeleton } from '../components/Skeleton';
@@ -407,6 +414,9 @@ interface ChatPageProps {
   onNewThread?: () => void;
   onSwitchThread?: (thread: ChatThread) => void;
   session?: { user: { id: string; email: string; name?: string } } | null;
+  /** When embedded inside a meeting's notes tab, hide the redundant title row
+      (the meeting name is already shown by the notes page header). */
+  embedded?: boolean;
 }
 
 function groupThreadsByTime(threads: ChatThread[], taskId?: string | null): { label: string; items: ChatThread[] }[] {
@@ -438,6 +448,36 @@ function groupThreadsByTime(threads: ChatThread[], taskId?: string | null): { la
   return groups;
 }
 
+/** One selectable row in the model picker. Locked models (no provider key) are
+    greyed with a lock and are not selectable — matching the upsell design. */
+function ModelRow({ m, selected, onPick }: { m: ChatModelDef; selected: boolean; onPick: (m: ChatModelDef) => void }) {
+  const locked = !m.available;
+  return (
+    <button
+      type="button"
+      disabled={locked}
+      onClick={() => onPick(m)}
+      className={`w-full flex items-center gap-2.5 px-2.5 py-2 rounded-xl text-left transition-colors ${
+        locked
+          ? 'cursor-not-allowed'
+          : 'hover:bg-zinc-100 dark:hover:bg-black/25'
+      }`}
+    >
+      <span className={`flex-1 flex items-center gap-2 text-[14px] ${locked ? 'text-zinc-400 dark:text-app-fg-subtle' : 'text-zinc-900 dark:text-app-fg font-medium'}`}>
+        {m.label}
+        {m.badge && (
+          <span className="px-1.5 py-0.5 rounded-md bg-[#6a7c3d]/15 text-[#6a7c3d] text-[10px] font-bold tracking-wide">{m.badge}</span>
+        )}
+      </span>
+      {locked
+        ? <Lock className="w-3.5 h-3.5 text-zinc-300 dark:text-app-fg-subtle flex-shrink-0" strokeWidth={2} />
+        : selected
+          ? <Check className="w-4 h-4 text-zinc-900 dark:text-app-fg flex-shrink-0" strokeWidth={2.4} />
+          : null}
+    </button>
+  );
+}
+
 export default function ChatPage({
   selectedTask,
   chatMessages,
@@ -463,16 +503,39 @@ export default function ChatPage({
   onNewThread,
   onSwitchThread,
   session,
+  embedded = false,
 }: ChatPageProps) {
   const chatEndRef = useRef<HTMLDivElement>(null);
   const textareaRef = useRef<HTMLTextAreaElement>(null);
   const historyDropdownRef = useRef<HTMLDivElement>(null);
+  const modelMenuRef = useRef<HTMLDivElement>(null);
+  const modelBtnRef = useRef<HTMLButtonElement>(null);
 
   const [showSlashMenu, setShowSlashMenu] = useState(false);
   const [slashFilter, setSlashFilter] = useState('');
   const [pendingSlashCmd, setPendingSlashCmd] = useState<'email' | 'wiki' | null>(null);
   const [showThreadHistory, setShowThreadHistory] = useState(false);
   const [showAllRecents, setShowAllRecents] = useState(false);
+  const [modelMenuOpen, setModelMenuOpen] = useState(false);
+  const [modelMenuPos, setModelMenuPos] = useState<{ left: number; bottom: number } | null>(null);
+  const [selectedModelId, setSelectedModelId] = useState<string>(getChatModelId());
+
+  const activeModel = CHAT_MODELS.find(m => m.id === selectedModelId) ?? getChatModel();
+  const pickModel = (m: ChatModelDef) => {
+    if (!m.available) return;
+    setChatModelId(m.id);
+    setSelectedModelId(m.id);
+    setModelMenuOpen(false);
+  };
+  const toggleModelMenu = () => {
+    if (!modelMenuOpen && modelBtnRef.current) {
+      const r = modelBtnRef.current.getBoundingClientRect();
+      // Anchor the menu just ABOVE the chip; fixed-positioned so no ancestor
+      // (the composer's overflow-hidden) can clip it.
+      setModelMenuPos({ left: r.left, bottom: window.innerHeight - r.top + 8 });
+    }
+    setModelMenuOpen(o => !o);
+  };
 
   useEffect(() => {
     chatEndRef.current?.scrollIntoView({ behavior: 'smooth' });
@@ -483,10 +546,30 @@ export default function ChatPage({
       if (historyDropdownRef.current && !historyDropdownRef.current.contains(e.target as Node)) {
         setShowThreadHistory(false);
       }
+      const t = e.target as Node;
+      if (
+        modelMenuRef.current && !modelMenuRef.current.contains(t) &&
+        modelBtnRef.current && !modelBtnRef.current.contains(t)
+      ) {
+        setModelMenuOpen(false);
+      }
     };
     document.addEventListener('mousedown', handler);
     return () => document.removeEventListener('mousedown', handler);
   }, []);
+
+  // The portaled (fixed) model menu is anchored to the chip's screen position;
+  // close it on scroll/resize so it can't drift away from the button.
+  useEffect(() => {
+    if (!modelMenuOpen) return;
+    const close = () => setModelMenuOpen(false);
+    window.addEventListener('resize', close);
+    window.addEventListener('scroll', close, true);
+    return () => {
+      window.removeEventListener('resize', close);
+      window.removeEventListener('scroll', close, true);
+    };
+  }, [modelMenuOpen]);
 
   const handleInputChange = (value: string) => {
     setChatInput(value);
@@ -515,45 +598,266 @@ export default function ChatPage({
     if (handleAgentAction) handleAgentAction(type);
   };
 
+  // ── Voice input (record → live waveform → transcribe → fill the box) ─────────
+  const [isRecording, setIsRecording] = useState(false);
+  const [isTranscribing, setIsTranscribing] = useState(false);
+  const [recSeconds, setRecSeconds] = useState(0);
+  const recStreamRef = useRef<MediaStream | null>(null);
+  const recAudioCtxRef = useRef<AudioContext | null>(null);
+  const recAnalyserRef = useRef<AnalyserNode | null>(null);
+  // Raw-PCM capture (instead of MediaRecorder): WKWebView/Tauri's WebM/MP4
+  // MediaRecorder output is unreliable and gets mis-decoded by Deepgram. We tap
+  // the audio graph directly, collect float samples, and send a clean 16 kHz WAV.
+  const recProcessorRef = useRef<ScriptProcessorNode | null>(null);
+  const recSinkRef = useRef<GainNode | null>(null);
+  const recPcmRef = useRef<Float32Array[]>([]);
+  const recSampleRateRef = useRef<number>(48000);
+  const recRafRef = useRef<number | null>(null);
+  const recTimerRef = useRef<ReturnType<typeof setInterval> | null>(null);
+  const recCanvasRef = useRef<HTMLCanvasElement | null>(null);
+  const recCancelledRef = useRef(false);
+  // Rolling history of per-sample loudness (0..1) for the scrolling waveform,
+  // plus the timestamp of the last captured sample (throttles the scroll speed).
+  const recBarsRef = useRef<number[]>([]);
+  const recLastSampleRef = useRef<number>(0);
+
+  const teardownVoice = () => {
+    if (recRafRef.current) cancelAnimationFrame(recRafRef.current);
+    recRafRef.current = null;
+    if (recTimerRef.current) clearInterval(recTimerRef.current);
+    recTimerRef.current = null;
+    recStreamRef.current?.getTracks().forEach(t => t.stop());
+    recStreamRef.current = null;
+    recAnalyserRef.current = null;
+    recBarsRef.current = [];
+    recLastSampleRef.current = 0;
+    if (recProcessorRef.current) { recProcessorRef.current.onaudioprocess = null; try { recProcessorRef.current.disconnect(); } catch {} }
+    recProcessorRef.current = null;
+    if (recSinkRef.current) { try { recSinkRef.current.disconnect(); } catch {} }
+    recSinkRef.current = null;
+    recAudioCtxRef.current?.close().catch(() => {});
+    recAudioCtxRef.current = null;
+  };
+
+  // Build a clean 16 kHz mono 16-bit PCM WAV from captured float chunks. WAV/
+  // linear16 is Deepgram's most reliable input — no container ambiguity.
+  const floatChunksToWav = (chunks: Float32Array[], inRate: number, outRate = 16000): Blob => {
+    let total = 0;
+    for (const c of chunks) total += c.length;
+    const merged = new Float32Array(total);
+    let off = 0;
+    for (const c of chunks) { merged.set(c, off); off += c.length; }
+    // Downsample (averaging) to outRate when the hardware rate is higher.
+    let samples = merged;
+    if (outRate < inRate && total > 0) {
+      const ratio = inRate / outRate;
+      const outLen = Math.floor(total / ratio);
+      const out = new Float32Array(outLen);
+      for (let i = 0; i < outLen; i++) {
+        const start = Math.floor(i * ratio);
+        const end = Math.min(total, Math.floor((i + 1) * ratio));
+        let sum = 0, n = 0;
+        for (let j = start; j < end; j++) { sum += merged[j]; n++; }
+        out[i] = n ? sum / n : merged[start] || 0;
+      }
+      samples = out;
+    } else {
+      outRate = inRate;
+    }
+    const buffer = new ArrayBuffer(44 + samples.length * 2);
+    const view = new DataView(buffer);
+    const writeStr = (o: number, s: string) => { for (let i = 0; i < s.length; i++) view.setUint8(o + i, s.charCodeAt(i)); };
+    writeStr(0, 'RIFF'); view.setUint32(4, 36 + samples.length * 2, true); writeStr(8, 'WAVE');
+    writeStr(12, 'fmt '); view.setUint32(16, 16, true); view.setUint16(20, 1, true); view.setUint16(22, 1, true);
+    view.setUint32(24, outRate, true); view.setUint32(28, outRate * 2, true); view.setUint16(32, 2, true); view.setUint16(34, 16, true);
+    writeStr(36, 'data'); view.setUint32(40, samples.length * 2, true);
+    let p = 44;
+    for (let i = 0; i < samples.length; i++) {
+      const s = Math.max(-1, Math.min(1, samples[i]));
+      view.setInt16(p, s < 0 ? s * 0x8000 : s * 0x7fff, true);
+      p += 2;
+    }
+    return new Blob([view], { type: 'audio/wav' });
+  };
+
+  // Stop capture, encode the WAV, and transcribe (shared by confirm/cancel).
+  const finishVoice = async () => {
+    const pcm = recPcmRef.current;
+    const rate = recSampleRateRef.current || 48000;
+    const cancelled = recCancelledRef.current;
+    teardownVoice();
+    setIsRecording(false);
+    setRecSeconds(0);
+    recPcmRef.current = [];
+    if (cancelled || !pcm.length) return;
+    const wav = floatChunksToWav(pcm, rate);
+    if (wav.size < 1600) return; // < ~50ms of audio — ignore stray taps
+    setIsTranscribing(true);
+    try {
+      const text = await transcribeAudioBlob(wav);
+      if (text) {
+        setChatInput(chatInput ? `${chatInput} ${text}` : text);
+        setTimeout(() => textareaRef.current?.focus(), 0);
+      }
+    } catch { /* non-fatal */ }
+    finally { setIsTranscribing(false); }
+  };
+
+  // Scrolling voice waveform: each captured loudness sample enters at the
+  // leading edge so the wavefront advances left→right as the user speaks; once
+  // the strip is full it scrolls left (newest stays at the right). Quiet moments
+  // render as small dots; the unfilled right edge shows faint placeholder dots.
+  const drawWaveform = () => {
+    const canvas = recCanvasRef.current;
+    const analyser = recAnalyserRef.current;
+    if (!canvas || !analyser) return;
+    const ctx = canvas.getContext('2d');
+    if (!ctx) return;
+    const dpr = window.devicePixelRatio || 1;
+    const W = canvas.clientWidth || 320, H = canvas.clientHeight || 36;
+    canvas.width = W * dpr; canvas.height = H * dpr;
+    ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
+
+    const STEP = 6;        // px per bar (3px bar + 3px gap)
+    const BAR_W = 3;
+    const SAMPLE_MS = 55;  // capture cadence → controls scroll speed
+    const COL = '106,124,61';
+    const maxBars = Math.max(8, Math.floor(W / STEP));
+    const data = new Uint8Array(analyser.fftSize);
+
+    recBarsRef.current = [];
+    recLastSampleRef.current = 0;
+
+    const dot = (x: number, mid: number, alpha: number, h = BAR_W) => {
+      ctx.fillStyle = `rgba(${COL},${alpha})`;
+      const y = mid - h / 2;
+      if ((ctx as any).roundRect) { ctx.beginPath(); (ctx as any).roundRect(x, y, BAR_W, h, BAR_W / 2); ctx.fill(); }
+      else ctx.fillRect(x, y, BAR_W, h);
+    };
+
+    const render = (t: number) => {
+      if (!recAnalyserRef.current) return;
+      // Per-frame loudness = peak deviation from the 128 midpoint (0..1).
+      analyser.getByteTimeDomainData(data);
+      let peak = 0;
+      for (let i = 0; i < data.length; i++) {
+        const d = Math.abs(data[i] - 128);
+        if (d > peak) peak = d;
+      }
+      const amp = Math.min(1, (peak / 128) * 1.6);
+
+      // Append a new bar on a fixed cadence so the scroll is smooth and readable.
+      if (!recLastSampleRef.current || t - recLastSampleRef.current >= SAMPLE_MS) {
+        recLastSampleRef.current = t;
+        recBarsRef.current.push(amp);
+        if (recBarsRef.current.length > maxBars) recBarsRef.current.shift();
+      }
+
+      const bars = recBarsRef.current;
+      const mid = H / 2;
+      ctx.clearRect(0, 0, W, H);
+      for (let i = 0; i < bars.length; i++) {
+        const v = bars[i];
+        const barH = Math.max(BAR_W, v * (H - 4)); // quiet → a dot; loud → tall bar
+        dot(i * STEP + 1, mid, 0.4 + v * 0.6, barH);
+      }
+      // Faint placeholder dots for the not-yet-filled right edge (the live cursor).
+      for (let i = bars.length; i < maxBars; i++) {
+        dot(i * STEP + 1, mid, 0.16);
+      }
+      recRafRef.current = requestAnimationFrame(render);
+    };
+    recRafRef.current = requestAnimationFrame(render);
+  };
+
+  // Start drawing once the canvas is mounted (after isRecording flips true).
+  useEffect(() => {
+    if (isRecording) drawWaveform();
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [isRecording]);
+
+  useEffect(() => () => teardownVoice(), []);
+
+  const startVoice = async () => {
+    if (isRecording || isChatting || isTranscribing) return;
+    try {
+      // Speech-tuned capture: mono, with echo cancellation / noise suppression /
+      // auto-gain so Deepgram Nova-3 gets clean, level English speech.
+      const stream = await navigator.mediaDevices.getUserMedia({
+        audio: {
+          channelCount: 1,
+          echoCancellation: true,
+          noiseSuppression: true,
+          autoGainControl: true,
+        },
+      });
+      recStreamRef.current = stream;
+      recCancelledRef.current = false;
+      recPcmRef.current = [];
+
+      const Ctx = window.AudioContext || (window as any).webkitAudioContext;
+      const audioCtx = new Ctx();
+      await audioCtx.resume().catch(() => {});
+      recAudioCtxRef.current = audioCtx;
+      recSampleRateRef.current = audioCtx.sampleRate;
+
+      const source = audioCtx.createMediaStreamSource(stream);
+      const analyser = audioCtx.createAnalyser();
+      analyser.fftSize = 256;
+      source.connect(analyser);
+      recAnalyserRef.current = analyser;
+
+      // Capture raw PCM. A zero-gain sink keeps the processor in the graph (so
+      // onaudioprocess fires in WebKit) without echoing the mic to the speakers.
+      const processor = audioCtx.createScriptProcessor(4096, 1, 1);
+      processor.onaudioprocess = (e) => {
+        if (recCancelledRef.current) return;
+        recPcmRef.current.push(new Float32Array(e.inputBuffer.getChannelData(0)));
+      };
+      const sink = audioCtx.createGain();
+      sink.gain.value = 0;
+      source.connect(processor);
+      processor.connect(sink);
+      sink.connect(audioCtx.destination);
+      recProcessorRef.current = processor;
+      recSinkRef.current = sink;
+
+      setRecSeconds(0);
+      setIsRecording(true);
+      recTimerRef.current = setInterval(() => setRecSeconds(s => s + 1), 1000);
+    } catch {
+      teardownVoice();
+      setIsRecording(false);
+    }
+  };
+
+  const confirmVoice = () => { recCancelledRef.current = false; void finishVoice(); };
+  const cancelVoice = () => { recCancelledRef.current = true; void finishVoice(); };
+  const fmtRec = (s: number) => `${String(Math.floor(s / 60)).padStart(2, '0')}:${String(s % 60).padStart(2, '0')}`;
+
   if (isLoading) {
     return <ChatPageSkeleton />;
   }
 
   const isEmpty = chatMessages.length === 0 && agentAssetHistory.length === 0 && !pendingSlashCmd && !isGeneratingAsset;
-  const currentTaskLabel = selectedTask ? selectedTask.filename : 'All Meetings';
-  const taskOptions = selectedTask && selectedTask.id && !history.some(t => t.id === selectedTask.id)
-    ? [selectedTask, ...history]
-    : history;
 
   return (
     <div className="h-full w-full bg-app-panel text-app-fg flex flex-col overflow-hidden font-[system-ui]">
-      {/* Header */}
-      <div className="flex-none flex items-center gap-2 sm:gap-2.5 px-3 sm:px-6 md:px-8 py-3 sm:py-4 z-20 border-b border-zinc-200/70 dark:border-app-border">
-        <MessageSquare className="w-4 h-4 flex-shrink-0 text-zinc-400 dark:text-zinc-500" />
-
-        {onSelectTask ? (
-          <select
-            value={selectedTask?.id || 'all'}
-            onChange={(e) => {
-              if (e.target.value === 'all') onSelectTask(null);
-              else {
-                const task = taskOptions.find(t => t.id === e.target.value);
-                if (task) onSelectTask(task);
-              }
-            }}
-            className="bg-transparent text-[13px] font-semibold text-zinc-700 dark:text-zinc-300 outline-none cursor-pointer hover:bg-black/5 rounded px-1 transition-colors"
-          >
-            <option value="all">All Meetings</option>
-            {taskOptions.map(t => (
-              <option key={t.id} value={t.id}>{t.filename}</option>
-            ))}
-          </select>
+      {/* Header — one static "all meetings" chat; no meeting selector. */}
+      <div className="flex-none flex items-center gap-3 px-3 sm:px-6 md:px-8 py-3 sm:py-4 z-20 border-b border-zinc-200/70 dark:border-app-border">
+        {embedded ? (
+          <div className="flex-1" />
         ) : (
-          <span className="text-[13px] text-zinc-500 dark:text-zinc-400 truncate">{currentTaskLabel}</span>
+          <>
+            <div className="w-8 h-8 rounded-xl bg-[#1a1a1a] dark:bg-app-chip flex items-center justify-center flex-shrink-0">
+              <Sparkles className="w-4 h-4 text-white dark:text-app-fg" />
+            </div>
+            <div className="min-w-0 flex-1">
+              <div className="text-[14px] font-semibold text-zinc-800 dark:text-app-fg tracking-[-0.01em] leading-tight">AI Chat</div>
+              <div className="text-[11px] text-zinc-400 dark:text-app-fg-subtle leading-tight">Across all your meetings</div>
+            </div>
+          </>
         )}
-
-        <span className="text-zinc-400 dark:text-zinc-600">/</span>
-        <span className="text-[13px] font-semibold text-zinc-700 dark:text-zinc-300 flex-1">AI Chat</span>
 
         {/* Thread history dropdown */}
         <div className="relative flex-shrink-0" ref={historyDropdownRef}>
@@ -640,9 +944,12 @@ export default function ChatPage({
             <div className="flex flex-col items-center px-4 pt-6 pb-4 w-full max-w-2xl mx-auto">
               {/* Greeting */}
               <div className="w-full mb-8">
-                <h1 className="text-[28px] sm:text-[34px] font-serif italic text-zinc-900 dark:text-zinc-100 leading-tight mb-1">
+                <h1 className="text-[28px] sm:text-[34px] font-serif italic text-zinc-900 dark:text-zinc-100 leading-tight mb-1.5">
                   Hi {formatDisplayName(session?.user?.email, session?.user?.name, 'there')}, ask anything
                 </h1>
+                <p className="text-[13.5px] text-zinc-500 dark:text-app-fg-muted leading-relaxed">
+                  Ask across all your meetings — summaries, decisions, action items, and follow-ups.
+                </p>
               </div>
 
               {/* Recents */}
@@ -1011,51 +1318,132 @@ export default function ChatPage({
             })()}
           </AnimatePresence>
 
-          {/* Textarea */}
-          <div className="bg-[#f5f2ef] dark:bg-app-raised rounded-xl sm:rounded-2xl focus-within:bg-white dark:focus-within:bg-app-chip focus-within:ring-1 focus-within:ring-[#1a1a1a]/12 dark:focus-within:ring-white/10 focus-within:shadow-[0_2px_16px_rgba(0,0,0,0.06)] dark:focus-within:shadow-[0_8px_32px_rgba(0,0,0,0.35)] transition-all overflow-hidden flex flex-col border border-transparent dark:border-app-border">
-            <textarea
-              ref={textareaRef}
-              value={chatInput}
-              onChange={(e) => handleInputChange(e.target.value)}
-              onKeyDown={(e) => {
-                if (e.key === 'Escape') { setShowSlashMenu(false); setPendingSlashCmd(null); return; }
-                if (showSlashMenu && (e.key === 'Enter' || e.key === 'Tab')) {
-                  e.preventDefault();
-                  if (filteredCommands.length > 0) selectSlashCommand(filteredCommands[0]);
-                  return;
-                }
-                if (e.key === 'Enter' && !e.shiftKey && !showSlashMenu) {
-                  e.preventDefault();
-                  handleSendMessage();
-                }
-              }}
-              placeholder="Ask anything… or type / for commands"
-              className="w-full bg-transparent border-none outline-none px-3 sm:px-5 py-3 sm:py-4 text-[14px] text-zinc-900 dark:text-app-fg placeholder:text-zinc-400 dark:placeholder:text-zinc-500 resize-none max-h-40 min-h-[44px] sm:min-h-[52px]"
-              rows={1}
-            />
-            <div className="px-2 sm:px-3 pb-2 sm:pb-3 pt-0.5 sm:pt-1 flex items-center justify-between">
-              <div className="hidden sm:flex items-center gap-1">
-                {SLASH_COMMANDS.map(cmd => (
-                  <button key={cmd.id} onClick={() => selectSlashCommand(cmd)}
-                    className="flex items-center gap-1.5 px-2.5 py-1.5 rounded-lg text-[12px] font-medium text-zinc-500 dark:text-zinc-400 hover:bg-zinc-200/60 dark:hover:bg-black/25 hover:text-zinc-800 dark:hover:text-zinc-100 transition-colors">
-                    <cmd.icon className="w-3 h-3" />{cmd.label}
-                  </button>
-                ))}
+          {/* Composer — white rounded box (Wispr-style voice-first input) */}
+          <div className="bg-white dark:bg-app-raised rounded-3xl border border-zinc-200/80 dark:border-app-border shadow-[0_2px_18px_-6px_rgba(0,0,0,0.08)] dark:shadow-[0_8px_32px_rgba(0,0,0,0.35)] focus-within:ring-1 focus-within:ring-[#1a1a1a]/10 dark:focus-within:ring-white/10 transition-all overflow-hidden flex flex-col">
+            {isRecording ? (
+              /* Recording → live waveform + timer */
+              <div className="flex items-center gap-3 px-4 sm:px-5 pt-4 pb-1">
+                <canvas ref={recCanvasRef} className="flex-1 h-9 min-w-0" />
+                <span className="text-[13px] font-semibold text-[#6a7c3d] tabular-nums flex-shrink-0">{fmtRec(recSeconds)}</span>
               </div>
-              <div className="flex sm:hidden items-center gap-1">
-                {SLASH_COMMANDS.map(cmd => (
-                  <button key={cmd.id} onClick={() => selectSlashCommand(cmd)}
-                    className="p-1.5 rounded-lg text-zinc-500 dark:text-zinc-400 hover:bg-zinc-200/60 dark:hover:bg-black/25 hover:text-zinc-800 dark:hover:text-zinc-200 transition-colors">
-                    <cmd.icon className="w-4 h-4" />
-                  </button>
-                ))}
-              </div>
-              <div className="flex items-center gap-2">
-                <span className="text-[10px] text-zinc-400 dark:text-zinc-500 hidden sm:block">{chatInput.length}/4000</span>
-                <button onClick={handleSendMessage} disabled={!chatInput.trim() || isChatting}
-                  className="w-8 h-8 bg-[#1a1a1a] text-white flex items-center justify-center rounded-xl hover:bg-[#333] active:scale-95 disabled:opacity-20 transition-all">
-                  <Send className="w-3.5 h-3.5" />
+            ) : (
+              <textarea
+                ref={textareaRef}
+                value={chatInput}
+                onChange={(e) => handleInputChange(e.target.value)}
+                onKeyDown={(e) => {
+                  if (e.key === 'Escape') { setShowSlashMenu(false); setPendingSlashCmd(null); return; }
+                  if (showSlashMenu && (e.key === 'Enter' || e.key === 'Tab')) {
+                    e.preventDefault();
+                    if (filteredCommands.length > 0) selectSlashCommand(filteredCommands[0]);
+                    return;
+                  }
+                  if (e.key === 'Enter' && !e.shiftKey && !showSlashMenu) {
+                    e.preventDefault();
+                    handleSendMessage();
+                  }
+                }}
+                placeholder={isTranscribing ? 'Transcribing…' : 'Ask anything… or type / for commands'}
+                disabled={isTranscribing}
+                className="w-full bg-transparent border-none outline-none px-4 sm:px-5 py-3.5 sm:py-4 text-[15px] text-zinc-900 dark:text-app-fg placeholder:text-zinc-400 dark:placeholder:text-zinc-500 resize-none max-h-40 min-h-[48px] sm:min-h-[56px]"
+                rows={1}
+              />
+            )}
+
+            {/* Bottom bar: attach + model (left) · mic / send / record controls (right) */}
+            <div className="px-3 sm:px-4 pb-2.5 sm:pb-3 pt-1 flex items-center justify-between gap-2">
+              <div className="flex items-center gap-0.5">
+                <button
+                  type="button"
+                  title="Attach"
+                  className="p-1.5 rounded-lg text-zinc-400 dark:text-app-fg-subtle hover:text-zinc-700 dark:hover:text-app-fg hover:bg-zinc-100 dark:hover:bg-black/25 transition-colors"
+                >
+                  <Paperclip className="w-[18px] h-[18px]" strokeWidth={1.7} />
                 </button>
+                <button
+                  ref={modelBtnRef}
+                  type="button"
+                  title="Model"
+                  onClick={toggleModelMenu}
+                  className="flex items-center gap-1 px-2 py-1 rounded-lg text-[13px] text-zinc-600 dark:text-app-fg-muted hover:bg-zinc-100 dark:hover:bg-black/25 transition-colors"
+                >
+                  {activeModel.label} <ChevronDown className={`w-3.5 h-3.5 transition-transform ${modelMenuOpen ? 'rotate-180' : ''}`} strokeWidth={2} />
+                </button>
+                {createPortal(
+                  <AnimatePresence>
+                    {modelMenuOpen && modelMenuPos && (
+                      <motion.div
+                        ref={modelMenuRef}
+                        initial={{ opacity: 0, y: 6, scale: 0.98 }}
+                        animate={{ opacity: 1, y: 0, scale: 1 }}
+                        exit={{ opacity: 0, y: 6, scale: 0.98 }}
+                        transition={{ duration: 0.14, ease: 'easeOut' }}
+                        style={{ position: 'fixed', left: modelMenuPos.left, bottom: modelMenuPos.bottom, transformOrigin: 'bottom left' }}
+                        className="w-[290px] max-h-[60vh] overflow-y-auto rounded-2xl border border-zinc-200/80 dark:border-app-border bg-white dark:bg-app-raised shadow-[0_16px_48px_-8px_rgba(0,0,0,0.28)] dark:shadow-[0_20px_56px_rgba(0,0,0,0.6)] p-1.5 z-[100]"
+                      >
+                        {/* Auto */}
+                        {CHAT_MODELS.filter(m => m.group === 'auto').map(m => (
+                          <button
+                            key={m.id}
+                            type="button"
+                            onClick={() => pickModel(m)}
+                            className="w-full flex items-center gap-2.5 px-2.5 py-2 rounded-xl text-left hover:bg-zinc-100 dark:hover:bg-black/25 transition-colors"
+                          >
+                            <Sparkles className="w-[18px] h-[18px] text-[#6a7c3d] flex-shrink-0" strokeWidth={1.8} />
+                            <span className="flex-1 text-[14px] font-medium text-zinc-900 dark:text-app-fg">{m.label}</span>
+                            {selectedModelId === m.id && <Check className="w-4 h-4 text-zinc-900 dark:text-app-fg flex-shrink-0" strokeWidth={2.4} />}
+                          </button>
+                        ))}
+
+                        {/* Access all models / Upgrade upsell */}
+                        <div className="flex items-center gap-2.5 px-2.5 py-2 mt-0.5 rounded-xl bg-zinc-50 dark:bg-black/20">
+                          <span className="flex-1 text-[13px] text-zinc-500 dark:text-app-fg-muted">Access all models</span>
+                          <span className="px-2.5 py-1 rounded-full bg-[#1a1a1a] text-white text-[11px] font-semibold">Upgrade</span>
+                        </div>
+
+                        {/* Standard Models */}
+                        <div className="px-2.5 pt-2 pb-1 text-[11px] font-semibold uppercase tracking-wide text-zinc-400 dark:text-app-fg-subtle">Standard Models</div>
+                        {CHAT_MODELS.filter(m => m.group === 'standard').map(m => (
+                          <ModelRow key={m.id} m={m} selected={selectedModelId === m.id} onPick={pickModel} />
+                        ))}
+
+                        {/* Thinking Models */}
+                        <div className="px-2.5 pt-2 pb-1 text-[11px] font-semibold uppercase tracking-wide text-zinc-400 dark:text-app-fg-subtle">Thinking Models</div>
+                        {CHAT_MODELS.filter(m => m.group === 'thinking').map(m => (
+                          <ModelRow key={m.id} m={m} selected={selectedModelId === m.id} onPick={pickModel} />
+                        ))}
+                      </motion.div>
+                    )}
+                  </AnimatePresence>,
+                  document.body
+                )}
+              </div>
+
+              <div className="flex items-center gap-2">
+                {isRecording ? (
+                  <>
+                    <button onClick={cancelVoice} title="Cancel" className="w-9 h-9 rounded-full bg-[#1a1a1a] text-white flex items-center justify-center hover:bg-[#333] active:scale-95 transition-all">
+                      <X className="w-4 h-4" strokeWidth={2.4} />
+                    </button>
+                    <button onClick={confirmVoice} title="Use voice" className="w-9 h-9 rounded-full bg-[#4b4b4b] text-white flex items-center justify-center hover:bg-[#333] active:scale-95 transition-all">
+                      <Check className="w-4 h-4" strokeWidth={2.6} />
+                    </button>
+                  </>
+                ) : isTranscribing ? (
+                  <div className="w-9 h-9 flex items-center justify-center">
+                    <Loader2 className="w-4 h-4 animate-spin text-zinc-500 dark:text-app-fg-subtle" />
+                  </div>
+                ) : chatInput.trim() ? (
+                  <button onClick={handleSendMessage} disabled={isChatting}
+                    className="w-9 h-9 bg-[#1a1a1a] text-white flex items-center justify-center rounded-full hover:bg-[#333] active:scale-95 disabled:opacity-20 transition-all">
+                    <Send className="w-4 h-4" />
+                  </button>
+                ) : (
+                  <button onClick={startVoice} title="Voice input"
+                    className="w-9 h-9 rounded-full bg-zinc-100 dark:bg-app-chip text-zinc-600 dark:text-app-fg-muted flex items-center justify-center hover:bg-zinc-200 dark:hover:bg-app-raised active:scale-95 transition-all">
+                    <Mic className="w-[18px] h-[18px]" strokeWidth={1.8} />
+                  </button>
+                )}
               </div>
             </div>
           </div>

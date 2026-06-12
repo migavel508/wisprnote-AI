@@ -90,6 +90,9 @@ export interface TaskHistory {
   personal_note?: string;
   visualization_image?: string;
   attendees?: string[];
+  /** 'batch' for uploaded recordings (counts toward batch-hour limits) or
+      'realtime' for live transcription. Defaults to realtime server-side. */
+  source?: 'batch' | 'realtime';
 }
 
 export interface TaskMetadata {
@@ -137,6 +140,65 @@ export async function getTasksLightweight(
   pageSize: number = 20
 ): Promise<{ data: TaskMetadata[]; hasMore: boolean; total: number }> {
   return apiRequest('GET', `/tasks?page=${page}&pageSize=${pageSize}`);
+}
+
+/**
+ * One-shot launch payload: first page of history + workspace membership index +
+ * chat threads + ledger, in a SINGLE request. Used to prime caches on login so
+ * the app paints instantly with one round-trip instead of ~6.
+ */
+export interface BootstrapPayload {
+  history: { data: TaskMetadata[]; hasMore: boolean; total: number };
+  workspaceIndex: {
+    workspaces: any[];
+    folders: any[];
+    taskWorkspaces: { task_id: string; workspace_id: string }[];
+    taskFolders: { task_id: string; folder_id: string }[];
+  };
+  chatThreads: Array<{
+    thread_id: string; task_id: string | null; title: string | null;
+    preview: string | null; created_at: string; updated_at: string; task_title: string | null;
+  }>;
+  ledger: any | null;
+  entitlements?: Entitlements;
+}
+
+/** Plan + quota info used to gate plan limits and show usage. */
+export interface Entitlements {
+  plan: string;
+  planLabel: string;
+  unlimited: boolean;
+  meetingCount: number;
+  meetingLimit: number | null;             // null when unlimited
+  meetingsPeriod: 'total' | 'month';
+  meetingsRemaining: number | null;        // null when unlimited
+  batchHours: { usedHours: number; limitHours: number | null; remainingHours: number | null };
+}
+
+export interface ModelTokenUsage {
+  provider: string;
+  model: string | null;
+  input_tokens: number;
+  output_tokens: number;
+  total_tokens: number;
+  calls: number;
+}
+
+/** Detailed usage for the billing screen (this calendar month). */
+export interface UsageSummary {
+  plan: string;
+  planLabel: string;
+  tokens: { totalTokens: number; calls: number; byModel: ModelTokenUsage[] };
+  meetings: { used: number; limit: number | null; period: 'total' | 'month'; remaining: number | null };
+  batchHours: { usedHours: number; limitHours: number | null; remainingHours: number | null };
+}
+
+export async function getUsage(): Promise<UsageSummary> {
+  return apiRequest('GET', '/billing/usage');
+}
+
+export async function getBootstrap(): Promise<BootstrapPayload> {
+  return apiRequest('GET', '/bootstrap');
 }
 
 export async function getTaskById(taskId: string): Promise<TaskHistory | null> {
@@ -280,6 +342,15 @@ export async function getKnowledgeGraph(): Promise<KnowledgeGraphEntry[]> {
   return apiRequest<KnowledgeGraphEntry[]>('GET', '/knowledge-graph');
 }
 
+/**
+ * Workspace-scoped knowledge graph: the same per-meeting KG entries, filtered to
+ * the meetings that belong to the given workspace. Used to render a graph for one
+ * workspace, mirroring how meeting notes are scoped per workspace.
+ */
+export async function getWorkspaceKnowledgeGraph(workspaceId: string): Promise<KnowledgeGraphEntry[]> {
+  return apiRequest<KnowledgeGraphEntry[]>('GET', `/workspaces/${workspaceId}/knowledge-graph`);
+}
+
 export async function getKnowledgeGraphForTask(taskId: string): Promise<KnowledgeGraphEntry | null> {
   try {
     return await apiRequest<KnowledgeGraphEntry>('GET', `/knowledge-graph/${taskId}`);
@@ -351,7 +422,22 @@ export async function getChatHistory(taskId: string): Promise<ChatMessage[]> {
 }
 
 export async function getChatHistoryByThread(threadId: string): Promise<ChatMessage[]> {
-  return apiRequest<ChatMessage[]>('GET', `/chat?threadId=${threadId}`);
+  return apiRequest<ChatMessage[]>('GET', `/chat?threadId=${encodeURIComponent(threadId)}`);
+}
+
+export interface ChatThreadRow {
+  thread_id: string;
+  task_id: string | null;
+  created_at: string;
+  updated_at: string;
+  title: string | null;
+  preview: string | null;
+  task_title: string | null;
+}
+
+/** Durable thread index derived server-side from chat_history. */
+export async function getChatThreads(): Promise<ChatThreadRow[]> {
+  return apiRequest<ChatThreadRow[]>('GET', `/chat?threads=1`);
 }
 
 export async function deleteChatHistory(taskId: string): Promise<void> {
@@ -366,6 +452,15 @@ interface PendingTaskRecord {
   local_id: string;
   created_at: string;
   task: TaskHistory;
+  /** Owner of this offline-queued task — so it's only ever flushed into the
+      account that created it, never whoever happens to be signed in later. */
+  userId?: string;
+}
+
+// The signed-in user, used to scope the offline queue per account.
+let _pendingUser: string | null = null;
+export function setPendingTaskUser(userId: string | null): void {
+  _pendingUser = userId;
 }
 
 const PENDING_TASK_DB = 'WisprnotePendingTaskDB';
@@ -439,18 +534,26 @@ export async function queuePendingTask(task: TaskHistory): Promise<string> {
     local_id: localId,
     created_at: new Date().toISOString(),
     task,
+    userId: _pendingUser ?? undefined,
   });
   await trimPendingTaskQueueIfNeeded();
   return localId;
 }
 
+/** Records belonging to the signed-in user. Legacy records (no userId) are
+    treated as the current user's only when no user is set — never cross-account. */
+function ownPendingRecords(records: PendingTaskRecord[]): PendingTaskRecord[] {
+  return records.filter(r => (r.userId ?? null) === (_pendingUser ?? null));
+}
+
 export async function getPendingTaskCount(): Promise<number> {
   const records = await getPendingTaskRecords();
-  return records.length;
+  return ownPendingRecords(records).length;
 }
 
 export async function flushPendingTasks(): Promise<TaskHistory[]> {
-  const records = await getPendingTaskRecords();
+  const all = await getPendingTaskRecords();
+  const records = ownPendingRecords(all); // only flush THIS user's queued tasks
   if (!records.length) return [];
 
   const syncedTasks: TaskHistory[] = [];

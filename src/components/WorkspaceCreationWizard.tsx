@@ -200,14 +200,23 @@ export default function WorkspaceCreationWizard({ session, onClose, onCreated }:
               />
             </div>
 
-            <button
-              onClick={handleCreate}
-              disabled={!name.trim() || creating}
-              className="mt-7 px-6 py-2.5 rounded-full bg-app-fg text-app-canvas text-[13.5px] font-semibold tracking-[-0.01em] disabled:opacity-40 disabled:cursor-not-allowed hover:opacity-90 transition-opacity flex items-center gap-2"
-            >
-              {creating && <Loader2 size={13} className="animate-spin" />}
-              Create workspace
-            </button>
+            <div className="mt-7 flex items-center gap-3">
+              <button
+                onClick={onClose}
+                disabled={creating}
+                className="px-6 py-2.5 rounded-full border border-app-divider text-app-fg text-[13.5px] font-semibold tracking-[-0.01em] hover:bg-app-nav-hover-bg disabled:opacity-40 transition-colors"
+              >
+                Cancel
+              </button>
+              <button
+                onClick={handleCreate}
+                disabled={!name.trim() || creating}
+                className="px-6 py-2.5 rounded-full bg-app-fg text-app-canvas text-[13.5px] font-semibold tracking-[-0.01em] disabled:opacity-40 disabled:cursor-not-allowed hover:opacity-90 transition-opacity flex items-center gap-2"
+              >
+                {creating && <Loader2 size={13} className="animate-spin" />}
+                Create workspace
+              </button>
+            </div>
           </div>
         )}
 

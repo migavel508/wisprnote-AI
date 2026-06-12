@@ -3,10 +3,42 @@ import { logger } from '../lib/logger';
 
 const log = logger.scope('HistoryPage');
 import { motion, AnimatePresence } from 'framer-motion';
-import { FileText, Search, ChevronRight, X, Loader2, Sparkles, Calendar, Clock } from 'lucide-react';
+import { FileText, Search, X, Loader2 } from 'lucide-react';
 import { TaskHistory, TaskMetadata, getTasksLightweight, getTaskById, updateTaskTitle } from '../services/awsService';
 import { generateMeetingTitle } from '../services/geminiService';
 import { MeetingGridSkeleton } from '../components/Skeleton';
+import {
+  getWorkspaceIndex,
+  addMeetingToWorkspace, removeMeetingFromWorkspace, addMeetingToFolder, removeMeetingFromFolder,
+  createFolder, type Workspace, type Folder, type WorkspaceIndex,
+} from '../services/workspaceService';
+import { cacheGet, cacheSet } from '../services/appCache';
+import { FolderPicker } from './WorkspacePage';
+import CreateFolderModal, { type FolderDraft } from '../components/CreateFolderModal';
+
+// ── Date grouping (Today / Yesterday / "Fri, Jun 5") — matches the workspace UI ──
+function groupHistoryByDate(items: TaskHistory[]) {
+  const groups: { label: string; items: TaskHistory[] }[] = [];
+  const map = new Map<string, TaskHistory[]>();
+  const today = new Date();
+  const yesterday = new Date(today); yesterday.setDate(today.getDate() - 1);
+  for (const m of items) {
+    const d = new Date(m.created_at || Date.now());
+    let label: string;
+    if (d.toDateString() === today.toDateString()) label = 'Today';
+    else if (d.toDateString() === yesterday.toDateString()) label = 'Yesterday';
+    else label = d.toLocaleDateString('en-US', { weekday: 'short', month: 'short', day: 'numeric' });
+    if (!map.has(label)) { const arr: TaskHistory[] = []; map.set(label, arr); groups.push({ label, items: arr }); }
+    map.get(label)!.push(m);
+  }
+  return groups;
+}
+
+function formatTime(iso?: string) {
+  if (!iso) return '';
+  return new Date(iso).toLocaleTimeString('en-US', { hour: '2-digit', minute: '2-digit', hour12: false });
+}
+
 
 interface HistoryPageProps {
   history: TaskHistory[];
@@ -16,6 +48,8 @@ interface HistoryPageProps {
   onLoadMore?: () => Promise<void>;
   hasMoreFromServer?: boolean;
   totalCount?: number;
+  /** Open a workspace when its badge is clicked. */
+  onOpenWorkspace?: (workspaceId: string) => void;
 }
 
 // Cache for full task details to avoid re-fetching
@@ -92,9 +126,75 @@ function searchMeetings(meetings: (TaskHistory | TaskMetadata)[], query: string)
 
 const PAGE_SIZE = 12; // Number of items to show initially and load more
 
-export default function HistoryPage({ history, onSelectTask, isLoading = false, onTaskUpdated, onLoadMore, hasMoreFromServer = false, totalCount }: HistoryPageProps) {
+export default function HistoryPage({ history, onSelectTask, isLoading = false, onTaskUpdated, onLoadMore, hasMoreFromServer = false, totalCount, onOpenWorkspace }: HistoryPageProps) {
   const [searchQuery, setSearchQuery] = useState('');
   const [generatingTitleId, setGeneratingTitleId] = useState<string | null>(null);
+  // Workspace/folder context for the per-row picker (move a note between spaces).
+  const [workspaces, setWorkspaces] = useState<Workspace[]>([]);
+  const [foldersByWs, setFoldersByWs] = useState<Record<string, Folder[]>>({});
+  const [meetingWs, setMeetingWs] = useState<Record<string, string>>({});       // meetingId → workspaceId
+  const [meetingFolder, setMeetingFolder] = useState<Record<string, string>>({}); // meetingId → folderId
+  const [folderModalWsId, setFolderModalWsId] = useState<string | null>(null);
+
+  // Build the picker maps from a single index payload.
+  const applyIndex = useCallback((idx: WorkspaceIndex) => {
+    setWorkspaces(idx.workspaces || []);
+    const fbw: Record<string, Folder[]> = {};
+    for (const f of idx.folders || []) {
+      const wsId = (f as any).workspace_id;
+      (fbw[wsId] ??= []).push(f);
+    }
+    setFoldersByWs(fbw);
+    const wsNext: Record<string, string> = {};
+    for (const r of idx.taskWorkspaces || []) wsNext[r.task_id] = r.workspace_id;
+    setMeetingWs(wsNext);
+    const folderNext: Record<string, string> = {};
+    for (const r of idx.taskFolders || []) folderNext[r.task_id] = r.folder_id;
+    setMeetingFolder(folderNext);
+  }, []);
+
+  // Cache-first: paint the chips instantly from the cached index, then refresh
+  // from the single /workspaces/index endpoint (one request instead of N+1).
+  const loadWorkspaceContext = useCallback(async () => {
+    try {
+      const cached = await cacheGet<WorkspaceIndex>('ws-index');
+      if (cached) applyIndex(cached);
+    } catch { /* ignore */ }
+    try {
+      const idx = await getWorkspaceIndex();
+      applyIndex(idx);
+      await cacheSet('ws-index', idx);
+    } catch { /* keep cached / empty */ }
+  }, [applyIndex]);
+
+  useEffect(() => { void loadWorkspaceContext(); }, [loadWorkspaceContext, history.length]);
+
+  // Move a note to a workspace root or a folder (backend + optimistic local maps).
+  const changeMeetingFolder = useCallback(async (taskId: string, newWsId: string, newFolderId: string | null) => {
+    const oldWsId = meetingWs[taskId];
+    const oldFolderId = meetingFolder[taskId];
+    setMeetingWs(prev => ({ ...prev, [taskId]: newWsId }));
+    setMeetingFolder(prev => {
+      const next = { ...prev };
+      if (newFolderId) next[taskId] = newFolderId; else delete next[taskId];
+      return next;
+    });
+    try {
+      if (oldFolderId && oldFolderId !== newFolderId) await removeMeetingFromFolder(oldFolderId, taskId).catch(() => {});
+      if (oldWsId && oldWsId !== newWsId) await removeMeetingFromWorkspace(oldWsId, taskId).catch(() => {});
+      await addMeetingToWorkspace(newWsId, taskId).catch(() => {});
+      if (newFolderId) await addMeetingToFolder(newFolderId, taskId).catch(() => {});
+    } catch { /* best effort; local state already reflects intent */ }
+  }, [meetingWs, meetingFolder]);
+
+  const handleCreateFolder = useCallback(async (draft: FolderDraft) => {
+    if (!draft.workspaceId) return;
+    const created = await createFolder(draft.workspaceId, draft.title, {
+      iconType: draft.iconType, iconName: draft.iconName, color: draft.iconColor, emoji: draft.emoji, description: draft.description,
+    });
+    setFoldersByWs(p => ({ ...p, [draft.workspaceId]: [...(p[draft.workspaceId] || []), created] }));
+    setFolderModalWsId(null);
+  }, []);
   const [visibleCount, setVisibleCount] = useState(PAGE_SIZE);
   const [isLoadingMore, setIsLoadingMore] = useState(false);
   const scrollContainerRef = useRef<HTMLDivElement>(null);
@@ -293,53 +393,48 @@ export default function HistoryPage({ history, onSelectTask, isLoading = false, 
             </div>
           ) : (
             <>
-              <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-3 gap-3 sm:gap-4">
-                {visibleHistory.map((task, index) => (
-                <motion.div 
-                  key={task.id}
-                  initial={{ opacity: 0, y: 12 }}
-                  animate={{ opacity: 1, y: 0 }}
-                  transition={{ duration: 0.3, delay: Math.min(index * 0.04, 0.3), ease: [0.22, 1, 0.36, 1] }}
-                  whileHover={{ y: -2 }}
-                  onClick={() => handleSelectTask(task)}
-                  className="bg-[#f5f2ef] hover:bg-[#eeebe7] dark:bg-app-raised dark:hover:bg-app-chip rounded-xl sm:rounded-2xl p-4 sm:p-5 cursor-pointer group relative transition-colors duration-200 border border-[#1a1a1a]/[0.04] dark:border-app-border"
-                >
-                  <div className="flex justify-between items-start mb-3 sm:mb-4">
-                    <div className="w-8 h-8 sm:w-9 sm:h-9 rounded-lg sm:rounded-xl bg-white dark:bg-app-panel shadow-[0_1px_4px_rgba(0,0,0,0.06)] dark:shadow-none flex items-center justify-center">
-                      <FileText className="w-3.5 h-3.5 sm:w-4 sm:h-4 text-[#1a1a1a]/50 dark:text-app-fg/50" />
-                    </div>
-                    <span className="text-[11px] text-[#1a1a1a]/40 dark:text-app-fg/40 font-medium">
-                      {new Date(task.created_at!).toLocaleDateString('en-US', { month: 'numeric', day: 'numeric', year: 'numeric' })}
-                    </span>
+              {/* Date-grouped list — workspace-style rows: icon · title/Me · workspace badge · time */}
+              <div className="-mx-1">
+                {groupHistoryByDate(visibleHistory).map(group => (
+                  <div key={group.label} className="mb-3">
+                    <div className="px-3 py-1.5 text-[11px] text-app-fg-subtle tracking-tight">{group.label}</div>
+                    {group.items.map(task => {
+                      return (
+                        <div
+                          key={task.id}
+                          onClick={() => handleSelectTask(task)}
+                          className="group flex items-center gap-3 px-3 py-2.5 rounded-xl hover:bg-app-nav-hover-bg cursor-pointer transition-colors"
+                        >
+                          <div className="w-8 h-8 rounded-lg bg-app-nav-hover-bg flex items-center justify-center flex-shrink-0">
+                            <FileText size={14} strokeWidth={1.7} className="text-app-fg-subtle" />
+                          </div>
+                          <div className="flex-1 min-w-0">
+                            <p className="text-[13.5px] font-medium text-app-fg truncate leading-tight tracking-[-0.01em]">
+                              {task.filename || 'Untitled'}
+                            </p>
+                            <p className="text-[11px] text-app-fg-subtle mt-0.5">Me</p>
+                          </div>
+                          <div className="flex items-center gap-1.5 flex-shrink-0" onClick={e => e.stopPropagation()}>
+                            {task.id && (
+                              <FolderPicker
+                                workspaces={workspaces}
+                                foldersByWs={foldersByWs}
+                                currentWsId={meetingWs[task.id] ?? null}
+                                currentFolderId={meetingFolder[task.id] ?? null}
+                                onSelectWorkspace={(wsId) => changeMeetingFolder(task.id!, wsId, null)}
+                                onSelectFolder={(wsId, folderId) => changeMeetingFolder(task.id!, wsId, folderId)}
+                                onCreateFolder={() => setFolderModalWsId(meetingWs[task.id!] ?? workspaces[0]?.id ?? null)}
+                              />
+                            )}
+                            <span className="text-[11.5px] text-app-fg-subtle px-1 tabular-nums">{formatTime(task.created_at)}</span>
+                          </div>
+                        </div>
+                      );
+                    })}
                   </div>
-
-                  <div className="flex items-center gap-2 mb-2">
-                    <h3 className="text-[14px] font-semibold text-[#1a1a1a] dark:text-app-fg truncate flex-1 leading-snug">{task.filename}</h3>
-                    <button
-                      onClick={(e) => handleGenerateTitle(e, task)}
-                      disabled={generatingTitleId === task.id}
-                      className="flex-shrink-0 p-1.5 opacity-0 group-hover:opacity-50 hover:!opacity-100 hover:bg-white/80 dark:hover:bg-white/10 rounded-lg transition-all disabled:opacity-30"
-                      title="Generate AI title"
-                    >
-                      {generatingTitleId === task.id ? (
-                        <Loader2 className="w-3.5 h-3.5 animate-spin text-[#1a1a1a]/50 dark:text-app-fg/50" />
-                      ) : (
-                        <Sparkles className="w-3.5 h-3.5 text-[#1a1a1a]/40 dark:text-app-fg/40" />
-                      )}
-                    </button>
-                  </div>
-
-                  <p className="text-[12px] text-[#1a1a1a]/50 dark:text-app-fg/50 line-clamp-2 sm:line-clamp-3 leading-relaxed mb-3 sm:mb-4">
-                    {task.summary || 'No summary available'}
-                  </p>
-
-                  <div className="flex items-center gap-1.5 text-[11px] font-medium text-[#1a1a1a]/30 dark:text-app-fg/30 group-hover:text-[#1a1a1a]/60 dark:group-hover:text-app-fg/60 transition-colors">
-                    View <ChevronRight className="w-3 h-3" />
-                  </div>
-                </motion.div>
-              ))}
+                ))}
               </div>
-              
+
               {/* Load More Trigger */}
               {hasMore && (
                 <div ref={loadMoreRef} className="flex justify-center py-8">
@@ -364,6 +459,16 @@ export default function HistoryPage({ history, onSelectTask, isLoading = false, 
           )}
         </div>
       </div>
+
+      {/* New folder (from the row's workspace picker) */}
+      {folderModalWsId && (
+        <CreateFolderModal
+          workspaces={workspaces}
+          defaultWorkspaceId={folderModalWsId}
+          onClose={() => setFolderModalWsId(null)}
+          onCreate={handleCreateFolder}
+        />
+      )}
     </div>
   );
 }

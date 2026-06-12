@@ -23,6 +23,7 @@ const baseFetch: typeof globalThis.fetch = isTauri
 function isProviderHost(host: string): boolean {
   return (
     host === 'generativelanguage.googleapis.com' ||
+    host === 'api.anthropic.com' ||
     host === 'openrouter.ai' ||
     host.endsWith('.turbopuffer.com')
   );
@@ -60,26 +61,88 @@ export const aiProxyFetch: typeof globalThis.fetch = (async (
   });
 }) as typeof globalThis.fetch;
 
-/** Mint a short-lived Deepgram streaming token via the authed proxy. */
-export async function getDeepgramToken(ttlSeconds = 3600): Promise<string> {
+/**
+ * Transcribe a short voice clip (recorded in the chat box) to text via the authed
+ * backend (Deepgram prerecorded; key stays server-side). Returns the transcript.
+ */
+export async function transcribeAudioBlob(blob: Blob): Promise<string> {
   const token = await getIdToken();
-  const resp = await baseFetch(`${API_BASE}/ai/deepgram-token`, {
+  // blob → base64 (no data: prefix)
+  const base64: string = await new Promise((resolve, reject) => {
+    const reader = new FileReader();
+    reader.onloadend = () => {
+      const result = String(reader.result || '');
+      resolve(result.includes(',') ? result.split(',')[1] : result);
+    };
+    reader.onerror = reject;
+    reader.readAsDataURL(blob);
+  });
+  // Send the base container type only (e.g. "audio/webm"), not
+  // "audio/webm;codecs=opus", so Deepgram gets a Content-Type it recognises.
+  const mimetype = (blob.type || 'audio/webm').split(';')[0].trim() || 'audio/webm';
+  const resp = await baseFetch(`${API_BASE}/ai/transcribe`, {
     method: 'POST',
     headers: { 'Content-Type': 'application/json', Authorization: token },
-    body: JSON.stringify({ ttl_seconds: ttlSeconds }),
+    body: JSON.stringify({ audio: base64, mimetype }),
   });
-  if (!resp.ok) {
-    // 403 = the server's Deepgram key lacks the Member+ role needed to mint
-    // streaming tokens. Surface an actionable message, not a bare status code.
-    if (resp.status === 403) {
-      throw new Error(
-        'Live transcription unavailable: the Deepgram key needs "Member" role to issue streaming tokens. Update the key in Deepgram, then retry.'
-      );
-    }
-    throw new Error(`Deepgram token request failed: ${resp.status}`);
-  }
+  if (!resp.ok) throw new Error(`Transcription failed: ${resp.status}`);
   const data = await resp.json();
-  const access = data.access_token || data.accessToken;
-  if (!access) throw new Error('Deepgram token response missing access_token');
-  return access as string;
+  return (data.text || '').trim();
+}
+
+// Cache the Deepgram streaming token so Record/Resume don't pay a network
+// round-trip (client → Lambda → Deepgram) on every action — that round-trip is
+// the main reason the buttons felt slow / "had to be clicked many times".
+let _dgToken: string | null = null;
+let _dgTokenExp = 0; // epoch ms
+let _dgInFlight: Promise<string> | null = null;
+
+/** Mint (or reuse) a short-lived Deepgram streaming token via the authed proxy. */
+export async function getDeepgramToken(ttlSeconds = 3600): Promise<string> {
+  // Reuse the cached token until 60s before expiry.
+  if (_dgToken && Date.now() < _dgTokenExp - 60_000) return _dgToken;
+  // Coalesce concurrent requests so a burst of Record/Resume mints just one.
+  if (_dgInFlight) return _dgInFlight;
+
+  _dgInFlight = (async () => {
+    const token = await getIdToken();
+    const resp = await baseFetch(`${API_BASE}/ai/deepgram-token`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json', Authorization: token },
+      body: JSON.stringify({ ttl_seconds: ttlSeconds }),
+    });
+    if (!resp.ok) {
+      // 403 = the server's Deepgram key lacks the Member+ role needed to mint
+      // streaming tokens. Surface an actionable message, not a bare status code.
+      if (resp.status === 403) {
+        throw new Error(
+          'Live transcription unavailable: the Deepgram key needs "Member" role to issue streaming tokens. Update the key in Deepgram, then retry.'
+        );
+      }
+      throw new Error(`Deepgram token request failed: ${resp.status}`);
+    }
+    const data = await resp.json();
+    const access = data.access_token || data.accessToken;
+    if (!access) throw new Error('Deepgram token response missing access_token');
+    const expiresIn = Number(data.expires_in) || ttlSeconds;
+    _dgToken = access as string;
+    _dgTokenExp = Date.now() + expiresIn * 1000;
+    return _dgToken;
+  })();
+  try {
+    return await _dgInFlight;
+  } catch (e) {
+    _dgToken = null;
+    _dgTokenExp = 0;
+    throw e;
+  } finally {
+    _dgInFlight = null;
+  }
+}
+
+/** Drop the cached Deepgram token (call on sign-out / account switch). */
+export function clearDeepgramTokenCache(): void {
+  _dgToken = null;
+  _dgTokenExp = 0;
+  _dgInFlight = null;
 }

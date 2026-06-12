@@ -175,6 +175,21 @@ async function apiRequest<T = any>(method: string, path: string, body?: any): Pr
 
 // ── Workspaces ────────────────────────────────────────────────────────────────
 
+/**
+ * Membership index in ONE request — workspaces, all folders, and the
+ * task↔workspace / task↔folder links. Replaces the per-workspace/per-folder
+ * fan-out so the workspace chips populate fast (and can be cached).
+ */
+export interface WorkspaceIndex {
+  workspaces: Workspace[];
+  folders: Folder[];
+  taskWorkspaces: { task_id: string; workspace_id: string }[];
+  taskFolders: { task_id: string; folder_id: string }[];
+}
+
+export const getWorkspaceIndex = (): Promise<WorkspaceIndex> =>
+  apiRequest('GET', '/workspaces/index');
+
 export const getWorkspaces = (): Promise<Workspace[]> =>
   apiRequest('GET', '/workspaces');
 

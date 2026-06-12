@@ -10,10 +10,59 @@ mod device_monitor;
 mod logger;
 #[cfg(target_os = "macos")]
 mod mic_cpal;
+mod mic_detect;
 mod permissions;
 mod system_audio;
 use system_audio::SystemAudioRecorder;
 use system_audio::RealtimeRecorder;
+
+/// macOS App Nap control. While recording, we hold an `NSProcessInfo` activity
+/// with `UserInitiated` options so the OS does NOT throttle/nap the app when its
+/// main window is backgrounded behind a fullscreen meeting — keeping the main
+/// window's WebView (and its Record/Pause/Resume/Stop controls) responsive.
+#[cfg(target_os = "macos")]
+mod app_nap {
+    use std::sync::Mutex;
+    use objc2::rc::Retained;
+    use objc2::runtime::{NSObjectProtocol, ProtocolObject};
+    use objc2_foundation::{NSActivityOptions, NSProcessInfo, NSString};
+
+    struct Activity(Retained<ProtocolObject<dyn NSObjectProtocol>>);
+    // The activity token is opaque and NSProcessInfo's begin/endActivity are
+    // documented thread-safe, so it's safe to hold across threads.
+    unsafe impl Send for Activity {}
+
+    static CURRENT: Mutex<Option<Activity>> = Mutex::new(None);
+
+    pub fn set_active(active: bool) {
+        let mut guard = match CURRENT.lock() {
+            Ok(g) => g,
+            Err(p) => p.into_inner(),
+        };
+        if active {
+            if guard.is_none() {
+                let pi = NSProcessInfo::processInfo();
+                let reason = NSString::from_str("WisprNote is recording a meeting");
+                let token = pi.beginActivityWithOptions_reason(NSActivityOptions::UserInitiated, &reason);
+                *guard = Some(Activity(token));
+            }
+        } else if let Some(Activity(token)) = guard.take() {
+            let pi = NSProcessInfo::processInfo();
+            unsafe { pi.endActivity(&token) };
+        }
+    }
+}
+
+/// Hold/release the App Nap-disabling activity. Called true on record start,
+/// false on stop, so the main window stays responsive while a meeting records.
+#[tauri::command]
+fn set_recording_active(active: bool) {
+    #[cfg(target_os = "macos")]
+    app_nap::set_active(active);
+    #[cfg(not(target_os = "macos"))]
+    let _ = active;
+}
+
 
 // Global state for the audio recorder
 struct AppState {
@@ -29,7 +78,14 @@ fn is_system_audio_available() -> bool {
 
 /// Start recording system + mic audio
 #[tauri::command]
-fn start_system_audio(state: tauri::State<AppState>) -> Result<(), String> {
+fn start_system_audio(
+    state: tauri::State<AppState>,
+    detect: tauri::State<mic_detect::MicDetectState>,
+) -> Result<(), String> {
+    // Pause mic detection while we record so our own capture can't re-trigger an
+    // "are you in a meeting?" prompt. Done here in Rust (not via a JS round-trip)
+    // so it's immediate even when the main window is backgrounded/throttled.
+    detect.paused.store(true, std::sync::atomic::Ordering::SeqCst);
     let mut recorder = state.recorder.lock().map_err(|e| e.to_string())?;
     recorder.start()
 }
@@ -48,7 +104,9 @@ fn start_system_audio(state: tauri::State<AppState>) -> Result<(), String> {
 fn stop_system_audio(
     app: tauri::AppHandle,
     state: tauri::State<AppState>,
+    detect: tauri::State<mic_detect::MicDetectState>,
 ) -> Result<String, String> {
+    detect.paused.store(false, std::sync::atomic::Ordering::SeqCst);
     let wav_data = {
         let mut recorder = state.recorder.lock().map_err(|e| e.to_string())?;
         recorder.stop()?
@@ -143,14 +201,20 @@ fn start_realtime_audio(
     keyterms: Option<Vec<String>>,
     app_handle: tauri::AppHandle,
     state: tauri::State<AppState>,
+    detect: tauri::State<mic_detect::MicDetectState>,
 ) -> Result<(), String> {
+    detect.paused.store(true, std::sync::atomic::Ordering::SeqCst);
     let mut recorder = state.realtime_recorder.lock().map_err(|e| e.to_string())?;
     recorder.start(api_key, keyterms, app_handle)
 }
 
 /// Stop realtime recording and return the full transcript
 #[tauri::command]
-fn stop_realtime_audio(state: tauri::State<AppState>) -> Result<String, String> {
+fn stop_realtime_audio(
+    state: tauri::State<AppState>,
+    detect: tauri::State<mic_detect::MicDetectState>,
+) -> Result<String, String> {
+    detect.paused.store(false, std::sync::atomic::Ordering::SeqCst);
     let mut recorder = state.realtime_recorder.lock().map_err(|e| e.to_string())?;
     recorder.stop()
 }
@@ -231,9 +295,368 @@ fn open_microphone_settings() -> Result<(), String> {
     { permissions::stub::open_microphone_settings() }
 }
 
+// ─── Meeting Detection Commands ──────────────────────────────────────────────
+
+/// Pause/resume microphone-usage detection. The frontend pauses it while we are
+/// recording so our own capture never triggers an "are you in a meeting?" prompt.
+#[tauri::command]
+fn set_detection_paused(paused: bool, state: tauri::State<mic_detect::MicDetectState>) {
+    state
+        .paused
+        .store(paused, std::sync::atomic::Ordering::SeqCst);
+}
+
+/// Enable/disable meeting detection. The frontend enables it once the user is
+/// signed in (it's off by default so we never prompt on the auth screen).
+#[tauri::command]
+fn set_detection_enabled(enabled: bool, state: tauri::State<mic_detect::MicDetectState>) {
+    state
+        .enabled
+        .store(enabled, std::sync::atomic::Ordering::SeqCst);
+}
+
+/// The most recent mic-detection, so the meeting-prompt overlay window can
+/// render the right app name immediately on open without racing the event.
+#[tauri::command]
+fn get_pending_meeting(
+    state: tauri::State<mic_detect::MicDetectState>,
+) -> Option<mic_detect::MicDetectedInfo> {
+    state.last_detected.lock().ok().and_then(|g| g.clone())
+}
+
+// ─── Floating Recording Indicator Window ─────────────────────────────────────
+
+const RECORDING_INDICATOR_LABEL: &str = "recording-indicator";
+
+/// Show or hide the small always-on-top recording indicator overlay. The window
+/// is created lazily on first show and reused afterwards. It loads the same web
+/// bundle with a `?window=recording-indicator` query so the frontend renders the
+/// indicator UI instead of the main app.
+#[tauri::command]
+fn set_recording_indicator(app: tauri::AppHandle, visible: bool) -> Result<(), String> {
+    if app.get_webview_window(RECORDING_INDICATOR_LABEL).is_none() {
+        // Normally pre-created at startup; build as a fallback if missing.
+        build_recording_indicator_window(&app, false)?;
+        #[cfg(target_os = "macos")]
+        configure_overlay_panel(&app, RECORDING_INDICATOR_LABEL);
+    }
+    if let Some(win) = app.get_webview_window(RECORDING_INDICATOR_LABEL) {
+        if visible {
+            let _ = win.set_visible_on_all_workspaces(true);
+            let _ = win.set_always_on_top(true);
+            let _ = win.show();
+        } else {
+            let _ = win.hide();
+        }
+        mark_overlay_visible(RECORDING_INDICATOR_LABEL, visible);
+    }
+    Ok(())
+}
+
+/// Build the floating recording-indicator overlay (optionally hidden). Pre-built
+/// hidden at startup so it can be converted to an NSPanel on the main thread and
+/// shown instantly later.
+fn build_recording_indicator_window(app: &tauri::AppHandle, visible: bool) -> Result<(), String> {
+    // Tight to anarlog's vertical pill (container 40×79). Right-edge, centered.
+    let width = 40.0_f64;
+    let height = 80.0_f64;
+
+    let mut builder = tauri::WebviewWindowBuilder::new(
+        app,
+        RECORDING_INDICATOR_LABEL,
+        tauri::WebviewUrl::App("overlay.html?window=recording-indicator".into()),
+    )
+    .title("Recording")
+    .inner_size(width, height)
+    .resizable(false)
+    .decorations(false)
+    .transparent(true)
+    .always_on_top(true)
+    .visible_on_all_workspaces(true)
+    .skip_taskbar(true)
+    .shadow(false)
+    .focused(false)
+    .visible(visible);
+
+    // Pin to the RIGHT edge, vertically centered (matching anarlog's placement).
+    if let Ok(Some(monitor)) = app.primary_monitor() {
+        let scale = monitor.scale_factor();
+        let logical_width = monitor.size().width as f64 / scale;
+        let logical_height = monitor.size().height as f64 / scale;
+        let x = (logical_width - width - 12.0).max(0.0);
+        let y = ((logical_height - height) / 2.0).max(0.0);
+        builder = builder.position(x, y);
+    }
+
+    builder.build().map_err(|e| e.to_string())?;
+    Ok(())
+}
+
+/// Convert an overlay window into a NON-ACTIVATING NSPanel (macOS).
+///
+/// This is the load-bearing fix (matching anarlog/Hyprnote's native panels): a
+/// plain Tauri window is a regular `NSWindow` that ACTIVATES when clicked — so
+/// its buttons need a focus-stealing first click, and clicking it deactivates
+/// (and throttles) the main window. A non-activating `NSPanel`:
+///   • delivers clicks to its buttons on the FIRST click, and
+///   • never becomes key / never steals focus from the app you're in.
+/// It also floats over fullscreen on every Space.
+#[cfg(target_os = "macos")]
+fn configure_overlay_panel(app: &tauri::AppHandle, label: &str) {
+    use tauri_nspanel::cocoa::appkit::NSWindowCollectionBehavior;
+    use tauri_nspanel::WebviewWindowExt;
+
+    let Some(window) = app.get_webview_window(label) else { return };
+    let panel = match window.to_panel() {
+        Ok(p) => p,
+        Err(_) => return,
+    };
+    panel.set_style_mask(1 << 7); // NSWindowStyleMaskNonactivatingPanel
+    panel.set_level(3); // NSFloatingWindowLevel
+    panel.set_collection_behaviour(
+        NSWindowCollectionBehavior::NSWindowCollectionBehaviorCanJoinAllSpaces
+            | NSWindowCollectionBehavior::NSWindowCollectionBehaviorFullScreenAuxiliary
+            | NSWindowCollectionBehavior::NSWindowCollectionBehaviorStationary,
+    );
+    panel.set_becomes_key_only_if_needed(true); // don't grab key focus on click
+    panel.set_hides_on_deactivate(false);
+    panel.set_released_when_closed(false);
+
+    // Start click-through: the panel passes ALL mouse events to whatever is
+    // beneath it; the passthrough poll flips it interactive only while the cursor
+    // is over the visible pill. Without this baseline the panel blocks its rect.
+    let _ = window.set_ignore_cursor_events(true);
+
+    // Exclude the overlay from screen capture — it's visible to the user but does
+    // NOT appear in screen recordings, screen shares, or screenshots
+    // (NSWindowSharingNone = 0). Same as anarlog's `panel.sharingType = .none`.
+    if let Ok(ptr) = window.ns_window() {
+        if !ptr.is_null() {
+            let ns_window = ptr as *mut objc2::runtime::AnyObject;
+            unsafe {
+                let _: () = objc2::msg_send![ns_window, setSharingType: 0usize];
+            }
+        }
+    }
+}
+
+const MEETING_PROMPT_LABEL: &str = "meeting-prompt";
+
+// Cheap, lock-free visibility flags for the two overlays. The passthrough poll
+// reads these instead of calling `is_visible()` (a main-thread hop) every tick,
+// so a hidden overlay costs the main thread NOTHING — the whole reason the main
+// window's pause/stop clicks stopped lagging.
+static INDICATOR_VISIBLE: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+static PROMPT_VISIBLE: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+
+fn overlay_visible_flag(label: &str) -> Option<&'static std::sync::atomic::AtomicBool> {
+    match label {
+        RECORDING_INDICATOR_LABEL => Some(&INDICATOR_VISIBLE),
+        MEETING_PROMPT_LABEL => Some(&PROMPT_VISIBLE),
+        _ => None,
+    }
+}
+
+/// Record an overlay's shown/hidden state for the passthrough poll. Called from
+/// every show/hide path (including the native detector thread in `mic_detect`).
+pub(crate) fn mark_overlay_visible(label: &str, visible: bool) {
+    if let Some(flag) = overlay_visible_flag(label) {
+        flag.store(visible, std::sync::atomic::Ordering::SeqCst);
+    }
+}
+
+/// Keep a transparent overlay click-through EXCEPT when the cursor is over it.
+///
+/// A WKWebView captures every click in its window rect (it can't hit-test the
+/// pill shape the way anarlog's native panel does), so without this the overlay
+/// traps all mouse input under it and the user "loses access to the screen".
+///
+/// This poll (ported from Hyprnote's overlay plugin) keeps the window
+/// `ignore_cursor_events(true)` — clicks pass straight through — and flips it to
+/// interactive ONLY while the cursor is within the window's bounds. It is
+/// FAIL-SAFE: if the cursor position can't be read for any reason, it defaults
+/// to click-through, so the screen is never blocked.
+fn spawn_overlay_passthrough(app: tauri::AppHandle, label: &'static str) {
+    let Some(visible_flag) = overlay_visible_flag(label) else { return };
+    std::thread::spawn(move || {
+        // `None` = real window state unknown → force-apply on the next iteration.
+        // (anarlog's bug-free version calls `set_ignore_cursor_events(true)` ONCE
+        // before its loop so the tracker matches reality; we replicate that by
+        // forcing the baseline whenever the window (re)appears.)
+        let mut last_ignore: Option<bool> = None;
+        let mut was_visible = false;
+        // Cached window rect (physical px): x0, y0, x1, y1. The overlay sits at a
+        // fixed spot (only the user dragging the pill moves it), so we DON'T query
+        // its position/size from the main thread every tick — we cache it and
+        // refresh on the show edge + every ~750ms. Only the cursor is polled live.
+        let mut rect: Option<(f64, f64, f64, f64)> = None;
+        let mut rect_age = 0u32;
+        // Whether the cursor was over the pill last tick (i.e. the user is
+        // interacting — possibly dragging) and how many consecutive ticks it has
+        // been outside. Both exist to keep a native window drag from being
+        // cancelled by us flipping click-through back on mid-drag.
+        let mut was_inside = false;
+        let mut outside_streak = 0u32;
+        loop {
+            std::thread::sleep(std::time::Duration::from_millis(50)); // 20 Hz (anarlog's rate)
+
+            // Cheap atomic read — no main-thread hop. A hidden overlay costs the
+            // main thread NOTHING here, so it never competes with the main window's
+            // IPC (the source of the pause/stop lag).
+            if !visible_flag.load(std::sync::atomic::Ordering::SeqCst) {
+                was_visible = false;
+                last_ignore = None; // re-sync (force click-through) on next show
+                rect = None;
+                continue;
+            }
+            let Some(win) = app.get_webview_window(label) else { continue };
+
+            // On the hidden→visible edge, hard-assert click-through as the baseline
+            // — a freshly shown window defaults to ignore=false (it would block its
+            // whole rect), so this is the load-bearing line that frees the screen.
+            if !was_visible {
+                let _ = win.set_ignore_cursor_events(true);
+                last_ignore = Some(true);
+                was_visible = true;
+                rect = None; // force a geometry refresh below
+            }
+
+            // Refresh the cached rect on the edge, ~every 750ms, AND every tick
+            // while the cursor is over the pill — the last case lets the rect
+            // follow the window during a user DRAG so the hit-test keeps matching.
+            if rect.is_none() || rect_age >= 15 || was_inside {
+                rect = (|| -> Option<(f64, f64, f64, f64)> {
+                    let pos = win.outer_position().ok()?;
+                    let size = win.outer_size().ok()?;
+                    let x0 = pos.x as f64;
+                    let y0 = pos.y as f64;
+                    Some((x0, y0, x0 + size.width as f64, y0 + size.height as f64))
+                })();
+                rect_age = 0;
+            } else {
+                rect_age += 1;
+            }
+
+            // Only the cursor is polled live each tick. Fail-safe → click-through.
+            let raw_inside = match (rect, win.cursor_position().ok()) {
+                (Some((x0, y0, x1, y1)), Some(cur)) => {
+                    cur.x >= x0 && cur.x <= x1 && cur.y >= y0 && cur.y <= y1
+                }
+                _ => false,
+            };
+            // Hysteresis: stay interactive for a few ticks after the cursor leaves
+            // so a native window drag — during which the cursor can momentarily
+            // sit just off the (moving) rect — isn't cancelled by flipping
+            // click-through back on mid-drag.
+            if raw_inside {
+                outside_streak = 0;
+            } else {
+                outside_streak = outside_streak.saturating_add(1);
+            }
+            was_inside = raw_inside;
+            let inside = raw_inside || outside_streak < 3;
+            let ignore = !inside;
+            if last_ignore != Some(ignore) {
+                let _ = win.set_ignore_cursor_events(ignore);
+                last_ignore = Some(ignore);
+            }
+        }
+    });
+}
+
+/// Build the meeting-prompt overlay window (optionally hidden). Pre-created
+/// hidden at startup so showing it later is instant — the slow part (spinning
+/// up the webview + loading the bundle) happens once, off the critical path.
+fn build_meeting_prompt_window(
+    app: &tauri::AppHandle,
+    visible: bool,
+) -> Result<(), String> {
+    // Snug to the compact "Meeting detected" banner, with headroom for the
+    // chevron dropdown to open beneath it.
+    let width = 372.0_f64;
+    let height = 150.0_f64;
+
+    let mut builder = tauri::WebviewWindowBuilder::new(
+        app,
+        MEETING_PROMPT_LABEL,
+        tauri::WebviewUrl::App("overlay.html?window=meeting-prompt".into()),
+    )
+    .title("Meeting detected")
+    .inner_size(width, height)
+    .resizable(false)
+    .decorations(false)
+    .transparent(true)
+    .always_on_top(true)
+    // Join all spaces + full-screen aux so the prompt appears OVER a fullscreen
+    // meeting app (Zoom/Teams/Meet) — without this it hides behind the call.
+    .visible_on_all_workspaces(true)
+    .skip_taskbar(true)
+    .shadow(false)
+    .focused(false)
+    .visible(visible);
+
+    // Top-right of the primary monitor (logical coordinates), just under the
+    // macOS menu bar — matching the reference notification placement.
+    if let Ok(Some(monitor)) = app.primary_monitor() {
+        let scale = monitor.scale_factor();
+        let logical_width = monitor.size().width as f64 / scale;
+        let x = (logical_width - width - 16.0).max(0.0);
+        let y = 36.0_f64;
+        builder = builder.position(x, y);
+    }
+
+    builder.build().map_err(|e| e.to_string())?;
+    Ok(())
+}
+
+/// Show or hide the always-on-top "Are you in a meeting?" prompt overlay.
+/// Reuses the pre-created window when present (instant show), matching
+/// anarlog's native notification that appears the moment a meeting app grabs
+/// the mic.
+#[tauri::command]
+fn set_meeting_prompt(app: tauri::AppHandle, visible: bool) -> Result<(), String> {
+    if let Some(win) = app.get_webview_window(MEETING_PROMPT_LABEL) {
+        if visible {
+            let _ = win.set_visible_on_all_workspaces(true);
+            let _ = win.set_always_on_top(true);
+            let _ = win.show();
+        } else {
+            let _ = win.hide();
+        }
+        mark_overlay_visible(MEETING_PROMPT_LABEL, visible);
+        return Ok(());
+    }
+
+    if !visible {
+        return Ok(());
+    }
+
+    mark_overlay_visible(MEETING_PROMPT_LABEL, true);
+    build_meeting_prompt_window(&app, true)
+}
+
+/// Bring the main window to the front. Overlay windows call this right before
+/// asking the main window to start/stop recording — macOS heavily throttles a
+/// backgrounded WebView's timers, so foregrounding it first makes the action
+/// run immediately instead of lagging behind by seconds.
+#[tauri::command]
+fn focus_main_window(app: tauri::AppHandle) {
+    if let Some(win) = app.get_webview_window("main") {
+        let _ = win.show();
+        let _ = win.unminimize();
+        let _ = win.set_focus();
+    }
+}
+
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
-    tauri::Builder::default()
+    #[allow(unused_mut)]
+    let mut builder = tauri::Builder::default();
+    // NSPanel plugin (macOS) — lets us convert the overlays into non-activating
+    // panels so their buttons work on first click and never steal focus.
+    #[cfg(target_os = "macos")]
+    { builder = builder.plugin(tauri_nspanel::init()); }
+    builder
         .plugin(tauri_plugin_shell::init())
         .plugin(tauri_plugin_deep_link::init())
         .plugin(tauri_plugin_http::init())
@@ -242,6 +665,7 @@ pub fn run() {
             recorder: Mutex::new(SystemAudioRecorder::new()),
             realtime_recorder: Mutex::new(RealtimeRecorder::new()),
         })
+        .manage(mic_detect::MicDetectState::default())
         // Show the window only AFTER the webview finishes loading its content.
         // The window starts hidden (visible:false in tauri.conf.json); revealing
         // it post-paint means the user never sees a blank/black unpainted frame
@@ -310,6 +734,28 @@ pub fn run() {
                 .item(&quit_item)
                 .build()?;
 
+            // Start microphone/meeting detection (macOS). Emits `mic-detected`
+            // / `mic-stopped` events the frontend listens for to offer recording.
+            {
+                let detect_state = app.state::<mic_detect::MicDetectState>().inner().clone();
+                mic_detect::spawn(app.handle().clone(), detect_state);
+            }
+
+            // Pre-create the overlay windows hidden so they pop instantly (no
+            // webview spin-up) and — critically — so they can be converted to
+            // non-activating NSPanels HERE on the main thread.
+            let _ = build_meeting_prompt_window(app.handle(), false);
+            let _ = build_recording_indicator_window(app.handle(), false);
+            #[cfg(target_os = "macos")]
+            {
+                configure_overlay_panel(app.handle(), MEETING_PROMPT_LABEL);
+                configure_overlay_panel(app.handle(), RECORDING_INDICATOR_LABEL);
+            }
+            // Keep the overlays click-through except when the cursor is over them,
+            // so they never trap mouse input / block the rest of the screen.
+            spawn_overlay_passthrough(app.handle().clone(), MEETING_PROMPT_LABEL);
+            spawn_overlay_passthrough(app.handle().clone(), RECORDING_INDICATOR_LABEL);
+
             if let Some(tray) = app.tray_by_id("main-tray") {
                 tray.set_menu(Some(menu)).ok();
                 tray.set_show_menu_on_left_click(true).ok();
@@ -366,6 +812,13 @@ pub fn run() {
             request_microphone_permission,
             open_screen_recording_settings,
             open_microphone_settings,
+            set_detection_paused,
+            set_detection_enabled,
+            get_pending_meeting,
+            set_recording_indicator,
+            set_meeting_prompt,
+            focus_main_window,
+            set_recording_active,
             logger::write_logs
         ])
         .run(tauri::generate_context!())
