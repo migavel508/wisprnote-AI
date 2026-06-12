@@ -465,6 +465,42 @@ pub(crate) fn mark_overlay_visible(label: &str, visible: bool) {
     }
 }
 
+// Optional "fake window bounds" (anarlog's technique): the frontend reports the
+// rectangle of the actual visible content (in window-logical px, relative to the
+// window's top-left). The passthrough then makes the window interactive ONLY
+// over that rectangle instead of its whole transparent rect — so the empty space
+// around a card/pill stays click-through and never blocks the screen beneath it.
+static INDICATOR_HIT: Mutex<Option<(f64, f64, f64, f64)>> = Mutex::new(None);
+static PROMPT_HIT: Mutex<Option<(f64, f64, f64, f64)>> = Mutex::new(None);
+
+fn overlay_hit_mutex(label: &str) -> Option<&'static Mutex<Option<(f64, f64, f64, f64)>>> {
+    match label {
+        RECORDING_INDICATOR_LABEL => Some(&INDICATOR_HIT),
+        MEETING_PROMPT_LABEL => Some(&PROMPT_HIT),
+        _ => None,
+    }
+}
+
+/// Report the interactive content rectangle (window-logical px) for an overlay.
+#[tauri::command]
+fn set_overlay_hit_bounds(label: String, x: f64, y: f64, width: f64, height: f64) {
+    if let Some(m) = overlay_hit_mutex(&label) {
+        if let Ok(mut g) = m.lock() {
+            *g = Some((x, y, width, height));
+        }
+    }
+}
+
+/// Clear an overlay's reported bounds → it falls back to whole-window hit-testing.
+#[tauri::command]
+fn clear_overlay_hit_bounds(label: String) {
+    if let Some(m) = overlay_hit_mutex(&label) {
+        if let Ok(mut g) = m.lock() {
+            *g = None;
+        }
+    }
+}
+
 /// Keep a transparent overlay click-through EXCEPT when the cursor is over it.
 ///
 /// A WKWebView captures every click in its window rect (it can't hit-test the
@@ -489,9 +525,13 @@ fn spawn_overlay_passthrough(app: tauri::AppHandle, label: &'static str) {
         // fixed spot (only the user dragging the pill moves it), so we DON'T query
         // its position/size from the main thread every tick — we cache it and
         // refresh on the show edge + every ~750ms. Only the cursor is polled live.
-        let mut rect: Option<(f64, f64, f64, f64)> = None;
-        let mut rect_age = 0u32;
-        // Whether the cursor was over the pill last tick (i.e. the user is
+        // Cached window geometry (physical px): position x/y, size w/h, scale.
+        // The overlay sits at a fixed spot (only dragging moves it), so we DON'T
+        // query this from the main thread every tick — cache + refresh on the show
+        // edge, every ~750ms, and while the cursor is over the content (drag).
+        let mut geo: Option<(f64, f64, f64, f64, f64)> = None;
+        let mut geo_age = 0u32;
+        // Whether the cursor was over the content last tick (i.e. the user is
         // interacting — possibly dragging) and how many consecutive ticks it has
         // been outside. Both exist to keep a native window drag from being
         // cancelled by us flipping click-through back on mid-drag.
@@ -506,7 +546,7 @@ fn spawn_overlay_passthrough(app: tauri::AppHandle, label: &'static str) {
             if !visible_flag.load(std::sync::atomic::Ordering::SeqCst) {
                 was_visible = false;
                 last_ignore = None; // re-sync (force click-through) on next show
-                rect = None;
+                geo = None;
                 continue;
             }
             let Some(win) = app.get_webview_window(label) else { continue };
@@ -518,27 +558,40 @@ fn spawn_overlay_passthrough(app: tauri::AppHandle, label: &'static str) {
                 let _ = win.set_ignore_cursor_events(true);
                 last_ignore = Some(true);
                 was_visible = true;
-                rect = None; // force a geometry refresh below
+                geo = None; // force a geometry refresh below
             }
 
-            // Refresh the cached rect on the edge, ~every 750ms, AND every tick
-            // while the cursor is over the pill — the last case lets the rect
+            // Refresh the cached geometry on the edge, ~every 750ms, AND every
+            // tick while the cursor is over the content — the last case lets it
             // follow the window during a user DRAG so the hit-test keeps matching.
-            if rect.is_none() || rect_age >= 15 || was_inside {
-                rect = (|| -> Option<(f64, f64, f64, f64)> {
+            if geo.is_none() || geo_age >= 15 || was_inside {
+                geo = (|| -> Option<(f64, f64, f64, f64, f64)> {
                     let pos = win.outer_position().ok()?;
                     let size = win.outer_size().ok()?;
-                    let x0 = pos.x as f64;
-                    let y0 = pos.y as f64;
-                    Some((x0, y0, x0 + size.width as f64, y0 + size.height as f64))
+                    let scale = win.scale_factor().ok()?;
+                    Some((pos.x as f64, pos.y as f64, size.width as f64, size.height as f64, scale))
                 })();
-                rect_age = 0;
+                geo_age = 0;
             } else {
-                rect_age += 1;
+                geo_age += 1;
             }
 
+            // Interactive hit rectangle (physical px). If the frontend reported
+            // content bounds (window-logical px), use ONLY that rect — so the
+            // transparent area around the card/pill stays click-through. Otherwise
+            // fall back to the whole window.
+            let reported = overlay_hit_mutex(label).and_then(|m| m.lock().ok().and_then(|g| *g));
+            let hit = geo.map(|(px, py, sw, sh, scale)| match reported {
+                Some((bx, by, bw, bh)) => {
+                    let x0 = px + bx * scale;
+                    let y0 = py + by * scale;
+                    (x0, y0, x0 + bw * scale, y0 + bh * scale)
+                }
+                None => (px, py, px + sw, py + sh),
+            });
+
             // Only the cursor is polled live each tick. Fail-safe → click-through.
-            let raw_inside = match (rect, win.cursor_position().ok()) {
+            let raw_inside = match (hit, win.cursor_position().ok()) {
                 (Some((x0, y0, x1, y1)), Some(cur)) => {
                     cur.x >= x0 && cur.x <= x1 && cur.y >= y0 && cur.y <= y1
                 }
@@ -571,10 +624,13 @@ fn build_meeting_prompt_window(
     app: &tauri::AppHandle,
     visible: bool,
 ) -> Result<(), String> {
-    // Snug to the compact "Meeting detected" banner, with headroom for the
-    // chevron dropdown to open beneath it.
-    let width = 372.0_f64;
-    let height = 150.0_f64;
+    // Sized so the protruding ✕ button (top-left), the compact card, and the
+    // full chevron dropdown (3 rows) all fit inside the window bounds without
+    // being clipped. The window is transparent and — thanks to the reported hit
+    // bounds — click-through everywhere EXCEPT over the card itself, so its size
+    // no longer blocks the screen beneath.
+    let width = 384.0_f64;
+    let height = 220.0_f64;
 
     let mut builder = tauri::WebviewWindowBuilder::new(
         app,
@@ -595,13 +651,14 @@ fn build_meeting_prompt_window(
     .focused(false)
     .visible(visible);
 
-    // Top-right of the primary monitor (logical coordinates), just under the
-    // macOS menu bar — matching the reference notification placement.
+    // Top-RIGHT of the primary monitor (logical coordinates), just under the
+    // macOS menu bar — exactly where Granola/anarlog pops its notification. The
+    // card itself is right-aligned inside the window and slides in right→left.
     if let Ok(Some(monitor)) = app.primary_monitor() {
         let scale = monitor.scale_factor();
         let logical_width = monitor.size().width as f64 / scale;
-        let x = (logical_width - width - 16.0).max(0.0);
-        let y = 36.0_f64;
+        let x = (logical_width - width - 12.0).max(0.0);
+        let y = 16.0_f64;
         builder = builder.position(x, y);
     }
 
@@ -817,6 +874,8 @@ pub fn run() {
             get_pending_meeting,
             set_recording_indicator,
             set_meeting_prompt,
+            set_overlay_hit_bounds,
+            clear_overlay_hit_bounds,
             focus_main_window,
             set_recording_active,
             logger::write_logs
