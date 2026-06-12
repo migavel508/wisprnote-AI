@@ -151,6 +151,34 @@ export async function setRecordingIndicator(visible: boolean): Promise<void> {
   }
 }
 
+/**
+ * Report the interactive content rectangle of an overlay window (window-logical
+ * px, relative to the window's top-left). The Rust passthrough then makes the
+ * window interactive ONLY over this rect, leaving the transparent area around it
+ * click-through so it never blocks the screen beneath. anarlog's exact trick.
+ */
+export async function setOverlayHitBounds(
+  label: string,
+  bounds: { x: number; y: number; width: number; height: number },
+): Promise<void> {
+  if (!isTauri()) return;
+  try {
+    await tauriInvoke<void>('set_overlay_hit_bounds', { label, ...bounds });
+  } catch {
+    /* non-fatal */
+  }
+}
+
+/** Clear an overlay's reported bounds (falls back to whole-window hit-testing). */
+export async function clearOverlayHitBounds(label: string): Promise<void> {
+  if (!isTauri()) return;
+  try {
+    await tauriInvoke<void>('clear_overlay_hit_bounds', { label });
+  } catch {
+    /* non-fatal */
+  }
+}
+
 /** Broadcast the live recording state to the indicator window. */
 export async function emitRecordingIndicatorState(state: RecordingIndicatorState): Promise<void> {
   if (!isTauri()) return;

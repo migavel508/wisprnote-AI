@@ -30,6 +30,9 @@ export default function RecordingIndicator() {
   const [stopHover, setStopHover] = useState(false);
   const canvasRef = useRef<HTMLCanvasElement>(null);
   const rafRef = useRef<number | null>(null);
+  // Read live by the (persistent) draw loop so it never has to restart when
+  // pause/resume toggles — restarting is what used to blank the waveform.
+  const amplitudeRef = useRef(0.6);
 
   useEffect(() => {
     document.documentElement.style.background = 'transparent';
@@ -44,7 +47,15 @@ export default function RecordingIndicator() {
     return () => { cancelled = true; unlisten?.(); };
   }, []);
 
+  // Keep the live amplitude in a ref (bars dance while recording, rest when
+  // paused) so the draw loop reads it without ever needing to restart.
+  useEffect(() => { amplitudeRef.current = state.paused ? 0 : 0.6; }, [state.paused]);
+
   // Animated 3-bar waveform — anarlog's DancingBars formula, ported 1:1.
+  // ONE persistent loop for the component's whole life: the canvas element is
+  // never unmounted and the loop never restarts on state changes, so the red
+  // waves stay visible. It also re-kicks itself on visibility/focus changes to
+  // recover if macOS throttled rAF while the overlay was hidden or being dragged.
   useEffect(() => {
     const canvas = canvasRef.current;
     if (!canvas) return;
@@ -55,10 +66,12 @@ export default function RecordingIndicator() {
     canvas.width = W * dpr; canvas.height = H * dpr;
     ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
     const barCount = 3, barWidth = 4, barSpacing = 2, minH = 2, maxH = 13;
-    const amplitude = state.paused ? 0 : 0.6; // bars rest when paused, dance otherwise
     const center = (barCount - 1) / 2;
+    let running = true;
     const draw = (tms: number) => {
+      if (!running) return;
       const t = tms / 1000;
+      const amplitude = amplitudeRef.current;
       ctx.clearRect(0, 0, W, H);
       ctx.fillStyle = ACCENT;
       for (let i = 0; i < barCount; i++) {
@@ -78,9 +91,21 @@ export default function RecordingIndicator() {
       }
       rafRef.current = requestAnimationFrame(draw);
     };
-    rafRef.current = requestAnimationFrame(draw);
-    return () => { if (rafRef.current) cancelAnimationFrame(rafRef.current); };
-  }, [state.paused]);
+    const kick = () => {
+      if (!running) return;
+      if (rafRef.current) cancelAnimationFrame(rafRef.current);
+      rafRef.current = requestAnimationFrame(draw);
+    };
+    kick();
+    document.addEventListener('visibilitychange', kick);
+    window.addEventListener('focus', kick);
+    return () => {
+      running = false;
+      if (rafRef.current) cancelAnimationFrame(rafRef.current);
+      document.removeEventListener('visibilitychange', kick);
+      window.removeEventListener('focus', kick);
+    };
+  }, []);
 
   return (
     <div
@@ -115,18 +140,26 @@ export default function RecordingIndicator() {
           <img src="/logo.png" alt="" className="w-[18px] h-[18px] rounded-md object-cover" draggable={false} />
         </button>
 
-        {/* bottom: waveform → stop square on hover */}
+        {/* bottom: animated waveform → stop square on hover. The canvas stays
+            mounted at all times (only fades on hover) so its rAF loop never
+            breaks and the red waves never blank out. */}
         <button
           onClick={() => void handleStop()}
           onMouseEnter={() => setStopHover(true)}
           onMouseLeave={() => setStopHover(false)}
           title="Stop recording"
-          className="w-7 h-7 rounded-full flex items-center justify-center transition-colors"
+          className="relative w-7 h-7 rounded-full flex items-center justify-center transition-colors"
           style={{ background: stopHover ? 'rgba(255,115,122,0.16)' : 'transparent' }}
         >
-          {stopHover
-            ? <span style={{ width: 9, height: 9, background: ACCENT, borderRadius: 1.5 }} />
-            : <canvas ref={canvasRef} style={{ width: 18, height: 13 }} />}
+          <canvas
+            ref={canvasRef}
+            style={{ width: 18, height: 13, opacity: stopHover ? 0 : 1, transition: 'opacity 0.1s' }}
+          />
+          {stopHover && (
+            <span className="absolute inset-0 flex items-center justify-center">
+              <span style={{ width: 9, height: 9, background: ACCENT, borderRadius: 1.5 }} />
+            </span>
+          )}
         </button>
       </div>
 
