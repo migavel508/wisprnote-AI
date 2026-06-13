@@ -27,26 +27,21 @@ export const paddleConfig = {
 };
 
 export type PlanId = 'free' | 'pro' | 'pro_plus' | 'enterprise';
-export type BillingCycle = 'monthly' | 'yearly';
+// Monthly-only billing. (Kept as a named type so call sites read clearly.)
+export type BillingCycle = 'monthly';
 
 /**
  * Live Paddle price IDs, baked in so checkout works without per-env wiring.
- * An env var (VITE_PADDLE_<PLAN>_<CYCLE>_PRICE_ID), if set, overrides the default
+ * An env var (VITE_PADDLE_<PLAN>_MONTHLY_PRICE_ID), if set, overrides the default
  * — handy for sandbox testing. Enterprise is sales-led (no self-serve price).
  */
 const DEFAULT_PRICE_IDS: Record<'pro' | 'pro_plus', Record<BillingCycle, string>> = {
-  pro: {
-    monthly: 'pri_01ktk4bhps03ydb5w01mbe66xf',
-    yearly: 'pri_01ktk4bjc4n1r7j79050b2aeq9',
-  },
-  pro_plus: {
-    monthly: 'pri_01ktk4bjryvtypx056f14nb3ew',
-    yearly: 'pri_01ktk4bk7ffa438r0rcnccx2d5',
-  },
+  pro: { monthly: 'pri_01ktk4bhps03ydb5w01mbe66xf' },
+  pro_plus: { monthly: 'pri_01ktk4bjryvtypx056f14nb3ew' },
 };
 
-/** Resolve the Paddle price ID for a paid self-serve plan + billing cycle. */
-function priceIdFor(plan: Exclude<PlanId, 'free' | 'enterprise'>, cycle: BillingCycle): string {
+/** Resolve the Paddle price ID for a paid self-serve plan (monthly). */
+function priceIdFor(plan: Exclude<PlanId, 'free' | 'enterprise'>, cycle: BillingCycle = 'monthly'): string {
   const key = `VITE_PADDLE_${plan.toUpperCase()}_${cycle.toUpperCase()}_PRICE_ID`;
   const fromEnv = import.meta.env[key as keyof ImportMetaEnv] as string | undefined;
   return fromEnv || DEFAULT_PRICE_IDS[plan]?.[cycle] || '';
@@ -77,7 +72,8 @@ async function openExternal(url: string): Promise<void> {
 export interface CheckoutOptions {
   /** Self-serve paid plans only — Enterprise is sales-led (Contact Sales). */
   plan: Exclude<PlanId, 'free' | 'enterprise'>;
-  cycle: BillingCycle;
+  /** Billing cycle — monthly only. Optional; defaults to 'monthly'. */
+  cycle?: BillingCycle;
   /** Number of seats. Defaults to 1. */
   quantity?: number;
   session: AuthSession | null;
@@ -91,7 +87,7 @@ export interface CheckoutOptions {
  * Returns `false` (and logs) when config is missing, so the UI can show a
  * "not yet available" state instead of opening a broken link.
  */
-export async function openCheckout({ plan, cycle, quantity = 1, session }: CheckoutOptions): Promise<boolean> {
+export async function openCheckout({ plan, cycle = 'monthly', quantity = 1, session }: CheckoutOptions): Promise<boolean> {
   const priceId = priceIdFor(plan as 'pro' | 'pro_plus', cycle);
   if (!priceId) {
     log.warn('checkout_no_price', { plan, cycle });

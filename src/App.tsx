@@ -131,7 +131,7 @@ import {
   listenForTranscripts,
   RecordingMode,
 } from './services/nativeRecorderService';
-import { getDeepgramToken } from './services/aiProxyService';
+import { getDeepgramToken, reportTranscriptionUsage } from './services/aiProxyService';
 import { checkPermissions } from './services/permissionService';
 import {
   listenForDeviceChanges,
@@ -1818,6 +1818,19 @@ export default function App() {
         const pausedTranscript = pausedRealtimeTranscriptRef.current.join(' ').trim();
         const refTranscript = realtimeTranscriptRef.current.join(' ').trim();
         const transcriptToUse = [pausedTranscript, fullTranscript.trim(), refTranscript].filter(Boolean).join(' ').trim();
+
+        // Observability: the realtime stream goes client→Deepgram directly (not
+        // through the traced proxy), so report this session's audio duration to
+        // Braintrust + usage metering. Best-effort, fire-and-forget.
+        if (transcriptToUse) {
+          void reportTranscriptionUsage({
+            mode: 'realtime',
+            durationSeconds: recordingTime,
+            model: 'nova-3',
+            language: 'multi',
+            words: transcriptToUse.split(/\s+/).filter(Boolean).length,
+          });
+        }
 
         if (realtimeNetworkInterrupted && backupAudioFile) {
           setError('Realtime network interruption detected. Switching to local backup transcription.');
