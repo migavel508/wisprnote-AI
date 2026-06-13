@@ -29,6 +29,10 @@ export function ensureUsageSchema(): Promise<void> {
         )
       `);
       await query('CREATE INDEX IF NOT EXISTS idx_usage_user_created ON usage_events(user_id, created_at)');
+      // Transcription (Deepgram) is billed by AUDIO time, not tokens — track the
+      // seconds of audio processed alongside token columns so one usage_events
+      // table covers every model (Deepgram, Gemini, Claude) uniformly.
+      await query('ALTER TABLE usage_events ADD COLUMN IF NOT EXISTS audio_seconds NUMERIC NOT NULL DEFAULT 0');
       // Distinguish uploaded ("batch") meetings from realtime recordings so the
       // batch-hour caps can be enforced without counting live transcription.
       await query("ALTER TABLE task_history ADD COLUMN IF NOT EXISTS source TEXT NOT NULL DEFAULT 'realtime'");
@@ -64,33 +68,61 @@ export async function recordTokenUsage(
   }
 }
 
+/**
+ * Persist one transcription call's AUDIO usage (Deepgram, billed by seconds).
+ * The token columns stay 0; `audio_seconds` carries the cost signal. Used for
+ * both prerecorded `/ai/transcribe` and realtime-streaming usage reports.
+ * Never throws (billing must not break the call).
+ */
+export async function recordAudioUsage(
+  userId: string,
+  provider: string,
+  model: string | undefined,
+  audioSeconds: number,
+): Promise<void> {
+  if (!userId || !(audioSeconds > 0)) return;
+  try {
+    await ensureUsageSchema();
+    await query(
+      `INSERT INTO usage_events (user_id, provider, model, audio_seconds)
+       VALUES ($1,$2,$3,$4)`,
+      [userId, provider, model || null, audioSeconds],
+    );
+  } catch (e) {
+    console.error('recordAudioUsage failed:', e);
+  }
+}
+
 export interface ModelUsageRow {
   provider: string;
   model: string | null;
   input_tokens: number;
   output_tokens: number;
   total_tokens: number;
+  audio_seconds: number;
   calls: number;
 }
 
 /** Token usage for the current calendar month, grouped by model. */
-export async function getMonthlyTokenUsage(userId: string): Promise<{ totalTokens: number; calls: number; byModel: ModelUsageRow[] }> {
+export async function getMonthlyTokenUsage(userId: string): Promise<{ totalTokens: number; totalAudioSeconds: number; calls: number; byModel: ModelUsageRow[] }> {
   await ensureUsageSchema();
   const byModel = await query<ModelUsageRow>(
     `SELECT provider, model,
-            SUM(input_tokens)::int  AS input_tokens,
-            SUM(output_tokens)::int AS output_tokens,
-            SUM(total_tokens)::int  AS total_tokens,
-            COUNT(*)::int           AS calls
+            SUM(input_tokens)::int   AS input_tokens,
+            SUM(output_tokens)::int  AS output_tokens,
+            SUM(total_tokens)::int   AS total_tokens,
+            SUM(audio_seconds)::float AS audio_seconds,
+            COUNT(*)::int            AS calls
      FROM usage_events
      WHERE user_id=$1 AND created_at >= date_trunc('month', now())
      GROUP BY provider, model
-     ORDER BY total_tokens DESC`,
+     ORDER BY total_tokens DESC, audio_seconds DESC`,
     [userId],
   );
   const totalTokens = byModel.reduce((s, r) => s + (r.total_tokens || 0), 0);
+  const totalAudioSeconds = byModel.reduce((s, r) => s + (Number(r.audio_seconds) || 0), 0);
   const calls = byModel.reduce((s, r) => s + (r.calls || 0), 0);
-  return { totalTokens, calls, byModel };
+  return { totalTokens, totalAudioSeconds, calls, byModel };
 }
 
 /** Meeting count used vs the plan's cap (lifetime total for free, else this month). */

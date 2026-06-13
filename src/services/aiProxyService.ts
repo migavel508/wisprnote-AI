@@ -90,6 +90,40 @@ export async function transcribeAudioBlob(blob: Blob): Promise<string> {
   return (data.text || '').trim();
 }
 
+/**
+ * Report a finished transcription session's audio duration to the backend so it
+ * lands in Braintrust + usage metering. The realtime meeting stream goes
+ * client → Deepgram directly (over a WebSocket), so unlike the proxied
+ * intelligence calls it can't be traced server-side — this is how realtime
+ * (and batch) transcription gets full observability coverage. Best-effort:
+ * never throws, never blocks the recording flow.
+ */
+export async function reportTranscriptionUsage(opts: {
+  mode: 'realtime' | 'batch';
+  durationSeconds: number;
+  model?: string;
+  words?: number;
+  language?: string;
+}): Promise<void> {
+  try {
+    if (!(opts.durationSeconds > 0)) return;
+    const token = await getIdToken();
+    await baseFetch(`${API_BASE}/ai/transcription-usage`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json', Authorization: token },
+      body: JSON.stringify({
+        mode: opts.mode,
+        duration_seconds: Math.round(opts.durationSeconds),
+        model: opts.model || 'nova-3',
+        words: opts.words ?? 0,
+        language: opts.language || (opts.mode === 'realtime' ? 'multi' : 'en'),
+      }),
+    });
+  } catch {
+    /* observability is best-effort — never affect the recording */
+  }
+}
+
 // Cache the Deepgram streaming token so Record/Resume don't pay a network
 // round-trip (client → Lambda → Deepgram) on every action — that round-trip is
 // the main reason the buttons felt slow / "had to be clicked many times".

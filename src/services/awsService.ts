@@ -181,6 +181,8 @@ export interface ModelTokenUsage {
   input_tokens: number;
   output_tokens: number;
   total_tokens: number;
+  /** Seconds of audio processed (transcription/Deepgram); 0 for LLM models. */
+  audio_seconds?: number;
   calls: number;
 }
 
@@ -188,7 +190,7 @@ export interface ModelTokenUsage {
 export interface UsageSummary {
   plan: string;
   planLabel: string;
-  tokens: { totalTokens: number; calls: number; byModel: ModelTokenUsage[] };
+  tokens: { totalTokens: number; totalAudioSeconds?: number; calls: number; byModel: ModelTokenUsage[] };
   meetings: { used: number; limit: number | null; period: 'total' | 'month'; remaining: number | null };
   batchHours: { usedHours: number; limitHours: number | null; remainingHours: number | null };
 }

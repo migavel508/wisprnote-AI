@@ -150,7 +150,22 @@ export function providerFromHost(host: string): string {
   if (host === 'api.anthropic.com') return 'anthropic';
   if (host === 'openrouter.ai') return 'openrouter';
   if (host.endsWith('.turbopuffer.com')) return 'turbopuffer';
+  if (host === 'api.deepgram.com') return 'deepgram';
   return host;
+}
+
+/**
+ * Build Braintrust metrics for a transcription (Deepgram) call. Deepgram bills
+ * by AUDIO seconds, not LLM tokens, so `audio_seconds` is the cost signal — the
+ * transcription analogue of input/output tokens. Used for both the prerecorded
+ * `/ai/transcribe` call and the realtime-streaming usage reported by the client.
+ */
+export function audioMetrics(seconds: number, words?: number): Record<string, number> {
+  const s = Number(seconds);
+  if (!(s > 0)) return {};
+  const m: Record<string, number> = { audio_seconds: s, audio_minutes: s / 60 };
+  if (words && words > 0) m.words = words;
+  return m;
 }
 
 /** Best-effort model id from the request URL/body for the given provider. */
@@ -195,6 +210,11 @@ export function usageMetrics(provider: string, responseText: string): Record<str
         output_tokens: Number(d.usage.completion_tokens) || 0,
         total_tokens: Number(d.usage.total_tokens) || 0,
       };
+    }
+    if (provider === 'deepgram') {
+      // Prerecorded response → metadata.duration is the seconds of audio billed.
+      const dur = Number(d?.metadata?.duration);
+      if (dur > 0) return audioMetrics(dur);
     }
   } catch { /* ignore */ }
   return {};

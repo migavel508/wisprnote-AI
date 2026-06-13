@@ -7,8 +7,9 @@ import {
   providerFromHost,
   modelFromRequest,
   usageMetrics,
+  audioMetrics,
 } from './observability';
-import { recordTokenUsage } from './usage';
+import { recordTokenUsage, recordAudioUsage } from './usage';
 
 /**
  * Authenticated AI proxy. Every route sits BEHIND verifyToken (see the router in
@@ -30,6 +31,10 @@ import { recordTokenUsage } from './usage';
  *                             uniformly (any endpoint/shape) with no per-shape code.
  *   POST /ai/transcribe     → Deepgram prerecorded transcription (voice input).
  *   POST /ai/deepgram-token → mint a short-lived Deepgram streaming token.
+ *   POST /ai/transcription-usage → client reports a finished realtime streaming
+ *                             session's audio duration (the realtime stream goes
+ *                             client→Deepgram directly, so this is how it gets
+ *                             traced to Braintrust + metered).
  */
 export async function handleAI(
   method: string,
@@ -108,10 +113,46 @@ async function routeAI(
         });
         const data: any = await r.json().catch(() => ({}));
         const text = data?.results?.channels?.[0]?.alternatives?.[0]?.transcript ?? '';
-        return { status: r.ok ? 200 : r.status, output: text, body: JSON.stringify({ text }) };
+        // Deepgram bills by audio seconds → metadata.duration is the cost signal.
+        const seconds = Number(data?.metadata?.duration) || 0;
+        return {
+          status: r.ok ? 200 : r.status,
+          output: text,
+          metrics: audioMetrics(seconds),
+          body: JSON.stringify({ text }),
+        };
       }
     );
+    // Meter the audio processed (per user/model) for billing & analytics.
+    await recordAudioUsage(userId, 'deepgram', 'nova-3', Number(out.metrics?.audio_seconds) || 0);
     return { statusCode: out.status, headers: jsonHeaders(), body: out.body };
+  }
+
+  if (sub === 'transcription-usage') {
+    // The realtime meeting transcription streams CLIENT → Deepgram directly (over
+    // a WebSocket, using a short-lived token), so it can't be traced server-side
+    // like the proxy. The client reports the finished session's audio duration
+    // here so realtime transcription still shows up in Braintrust + usage metering
+    // — giving the whole app (every model) complete observability.
+    const mode = String(body.mode || 'realtime');
+    const model = String(body.model || 'nova-3');
+    const seconds = Math.max(0, Number(body.duration_seconds) || 0);
+    const words = Math.max(0, Number(body.words) || 0);
+    if (seconds <= 0) return badRequest('duration_seconds required');
+    await traceAI(
+      {
+        name: 'deepgram.streaming',
+        kind: 'function',
+        provider: 'deepgram',
+        model,
+        userId,
+        input: `[realtime ${mode} session]`,
+        metadata: { mode, language: String(body.language || 'multi'), streaming: true, reported_by: 'client' },
+      },
+      async () => ({ status: 200, output: `[${seconds.toFixed(1)}s transcribed]`, metrics: audioMetrics(seconds, words) }),
+    );
+    await recordAudioUsage(userId, 'deepgram', model, seconds);
+    return { statusCode: 200, headers: jsonHeaders(), body: JSON.stringify({ ok: true }) };
   }
 
   if (sub === 'proxy') {

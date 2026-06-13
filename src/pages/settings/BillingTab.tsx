@@ -1,17 +1,23 @@
 import { useState, useEffect } from 'react';
-import { Check, Loader2, ExternalLink, Sparkles, Building2, User, Activity, Cpu } from 'lucide-react';
+import { Check, Loader2, ExternalLink, Sparkles, Building2, User, Activity, Cpu, Mic, CalendarClock, Clock } from 'lucide-react';
 import type { AuthSession } from '../../services/awsAuthService';
 import {
   openCheckout,
   openCustomerPortal,
   isPaddleConfigured,
   type PlanId,
-  type BillingCycle,
 } from '../../services/paddleService';
-import { getUsage, type UsageSummary } from '../../services/awsService';
+import { getUsage, type UsageSummary, type ModelTokenUsage } from '../../services/awsService';
 
 const fmtTokens = (n: number): string =>
   n >= 1_000_000 ? `${(n / 1_000_000).toFixed(2)}M` : n >= 1_000 ? `${(n / 1_000).toFixed(1)}K` : `${n}`;
+
+const fmtMinutes = (seconds: number): string => {
+  const m = seconds / 60;
+  if (m >= 60) return `${(m / 60).toFixed(1)}h`;
+  if (m >= 1) return `${m.toFixed(1)} min`;
+  return `${Math.round(seconds)}s`;
+};
 
 const prettyModel = (provider: string, model: string | null): string => {
   if (!model) return provider;
@@ -22,11 +28,45 @@ const prettyModel = (provider: string, model: string | null): string => {
     .replace(/-\d{8}$/, '');
 };
 
-/** "Usage this month" panel — meetings, batch hours, and per-model token spend. */
+const isAudioModel = (r: ModelTokenUsage): boolean => (r.audio_seconds ?? 0) > 0 && r.total_tokens === 0;
+
+// ── Usage / analytics dashboard ────────────────────────────────────────────────
+
+/** A compact metric tile with an optional usage bar. */
+function StatTile({
+  icon: Icon,
+  label,
+  value,
+  sub,
+  pct,
+}: {
+  icon: typeof Activity;
+  label: string;
+  value: string;
+  sub?: string;
+  pct?: number | null;
+}) {
+  return (
+    <div className="rounded-xl bg-app-panel border border-app-card-border p-3.5">
+      <div className="flex items-center gap-1.5 mb-1.5 text-app-fg-subtle">
+        <Icon className="w-3.5 h-3.5" strokeWidth={2} />
+        <span className="text-[11px] font-medium tracking-[-0.01em]">{label}</span>
+      </div>
+      <div className="text-[19px] font-semibold text-app-fg tabular-nums leading-none">{value}</div>
+      {sub && <div className="text-[10.5px] text-app-fg-subtle mt-1">{sub}</div>}
+      {pct != null && (
+        <div className="mt-2.5 h-1.5 rounded-full bg-app-divider overflow-hidden">
+          <div className="h-full rounded-full bg-app-accent transition-all" style={{ width: `${pct}%` }} />
+        </div>
+      )}
+    </div>
+  );
+}
+
 function UsagePanel({ usage, loading }: { usage: UsageSummary | null; loading: boolean }) {
   if (loading) {
     return (
-      <div className="mb-6 rounded-2xl border border-app-divider bg-app-canvas p-5 flex items-center gap-2 text-[12.5px] text-app-fg-subtle">
+      <div className="mb-7 rounded-2xl border border-app-divider bg-app-canvas p-5 flex items-center gap-2 text-[12.5px] text-app-fg-subtle">
         <Loader2 className="w-4 h-4 animate-spin" /> Loading usage…
       </div>
     );
@@ -35,77 +75,89 @@ function UsagePanel({ usage, loading }: { usage: UsageSummary | null; loading: b
 
   const m = usage.meetings;
   const b = usage.batchHours;
-  const meetingLabel = m.limit === null ? `${m.used} · Unlimited` : `${m.used} / ${m.limit}`;
-  const hoursLabel = b.limitHours === null ? `${b.usedHours.toFixed(1)}h · Unlimited` : `${b.usedHours.toFixed(1)}h / ${b.limitHours}h`;
-  const meetingPct = m.limit ? Math.min(100, (m.used / m.limit) * 100) : 0;
-  const hoursPct = b.limitHours ? Math.min(100, (b.usedHours / b.limitHours) * 100) : 0;
+  const audioSec = usage.tokens.totalAudioSeconds ?? usage.tokens.byModel.reduce((s, r) => s + (r.audio_seconds ?? 0), 0);
+
+  const meetingValue = m.limit === null ? `${m.used}` : `${m.used} / ${m.limit}`;
+  const meetingSub = m.limit === null ? 'Unlimited' : `${m.period === 'total' ? 'total' : 'this month'} · ${Math.max(0, (m.limit ?? 0) - m.used)} left`;
+  const meetingPct = m.limit ? Math.min(100, (m.used / m.limit) * 100) : null;
+
+  const hoursValue = b.limitHours === null ? `${b.usedHours.toFixed(1)}h` : `${b.usedHours.toFixed(1)} / ${b.limitHours}h`;
+  const hoursSub = b.limitHours === null ? 'Unlimited' : `${Math.max(0, (b.limitHours ?? 0) - b.usedHours).toFixed(1)}h left`;
+  const hoursPct = b.limitHours ? Math.min(100, (b.usedHours / b.limitHours) * 100) : null;
+
+  const maxModelTotal = Math.max(1, ...usage.tokens.byModel.map((r) => (isAudioModel(r) ? (r.audio_seconds ?? 0) : r.total_tokens)));
 
   return (
     <div className="mb-7 rounded-2xl border border-app-divider bg-app-canvas p-5">
       <div className="flex items-center gap-2 mb-4">
-        <Activity className="w-4 h-4 text-[#6a7c3d]" strokeWidth={2} />
+        <Activity className="w-4 h-4 text-app-accent" strokeWidth={2} />
         <h2 className="text-[14px] font-semibold text-app-fg tracking-[-0.01em]">Usage this month</h2>
         <span className="ml-auto text-[11px] font-semibold px-2 py-0.5 rounded-full bg-app-raised text-app-fg-muted">{usage.planLabel} plan</span>
       </div>
 
-      <div className="grid grid-cols-2 gap-3 mb-4">
-        <div className="rounded-xl bg-app-raised/60 p-3.5">
-          <div className="text-[11px] text-app-fg-subtle mb-1">{m.period === 'total' ? 'Meetings (total)' : 'Meetings (this month)'}</div>
-          <div className="text-[18px] font-semibold text-app-fg tabular-nums">{meetingLabel}</div>
-          {m.limit !== null && (
-            <div className="mt-2 h-1.5 rounded-full bg-app-divider overflow-hidden">
-              <div className="h-full rounded-full bg-[#6a7c3d]" style={{ width: `${meetingPct}%` }} />
-            </div>
-          )}
-        </div>
-        <div className="rounded-xl bg-app-raised/60 p-3.5">
-          <div className="text-[11px] text-app-fg-subtle mb-1">Batch hours</div>
-          <div className="text-[18px] font-semibold text-app-fg tabular-nums">{hoursLabel}</div>
-          {b.limitHours !== null && (
-            <div className="mt-2 h-1.5 rounded-full bg-app-divider overflow-hidden">
-              <div className="h-full rounded-full bg-[#6a7c3d]" style={{ width: `${hoursPct}%` }} />
-            </div>
-          )}
-        </div>
+      {/* Top-line metrics */}
+      <div className="grid grid-cols-2 md:grid-cols-3 gap-3 mb-5">
+        <StatTile icon={CalendarClock} label={m.period === 'total' ? 'Meetings (total)' : 'Meetings'} value={meetingValue} sub={meetingSub} pct={meetingPct} />
+        <StatTile icon={Clock} label="Batch hours" value={hoursValue} sub={hoursSub} pct={hoursPct} />
+        <StatTile icon={Mic} label="Transcription" value={fmtMinutes(audioSec)} sub="audio processed" />
       </div>
 
-      <div className="flex items-center gap-2 mb-2">
+      {/* AI model breakdown */}
+      <div className="flex items-center gap-2 mb-2.5">
         <Cpu className="w-3.5 h-3.5 text-app-fg-subtle" strokeWidth={2} />
-        <span className="text-[12px] font-medium text-app-fg">AI tokens this month</span>
-        <span className="ml-auto text-[12px] font-semibold text-app-fg tabular-nums">{fmtTokens(usage.tokens.totalTokens)} tokens · {usage.tokens.calls} calls</span>
+        <span className="text-[12px] font-medium text-app-fg">AI usage by model</span>
+        <span className="ml-auto text-[12px] font-semibold text-app-fg tabular-nums">
+          {fmtTokens(usage.tokens.totalTokens)} tokens · {usage.tokens.calls} calls
+        </span>
       </div>
+
       {usage.tokens.byModel.length === 0 ? (
-        <div className="text-[12px] text-app-fg-subtle py-2">No AI usage yet this month.</div>
+        <div className="text-[12px] text-app-fg-subtle py-3 text-center rounded-lg bg-app-raised/50">No AI usage yet this month.</div>
       ) : (
-        <div className="divide-y divide-app-divider">
-          {usage.tokens.byModel.map((r, i) => (
-            <div key={i} className="flex items-center gap-2 py-1.5 text-[12px]">
-              <span className="font-medium text-app-fg">{prettyModel(r.provider, r.model)}</span>
-              <span className="text-app-fg-subtle">· {r.provider}</span>
-              <span className="ml-auto text-app-fg-muted tabular-nums">
-                {fmtTokens(r.input_tokens)} in · {fmtTokens(r.output_tokens)} out · <span className="font-semibold text-app-fg">{fmtTokens(r.total_tokens)}</span>
-              </span>
-            </div>
-          ))}
+        <div className="space-y-2">
+          {usage.tokens.byModel.map((r, i) => {
+            const audio = isAudioModel(r);
+            const magnitude = audio ? (r.audio_seconds ?? 0) : r.total_tokens;
+            const barPct = Math.max(3, Math.min(100, (magnitude / maxModelTotal) * 100));
+            return (
+              <div key={i} className="rounded-lg bg-app-raised/50 px-3 py-2">
+                <div className="flex items-center gap-2 text-[12px] mb-1.5">
+                  <span className="font-medium text-app-fg">{prettyModel(r.provider, r.model)}</span>
+                  <span className="text-[10px] px-1.5 py-px rounded-full bg-app-badge-bg text-app-badge-fg">{r.provider}</span>
+                  <span className="ml-auto text-app-fg-muted tabular-nums">
+                    {audio ? (
+                      <span className="font-semibold text-app-fg">{fmtMinutes(r.audio_seconds ?? 0)}</span>
+                    ) : (
+                      <>
+                        {fmtTokens(r.input_tokens)} in · {fmtTokens(r.output_tokens)} out · <span className="font-semibold text-app-fg">{fmtTokens(r.total_tokens)}</span>
+                      </>
+                    )}
+                  </span>
+                </div>
+                <div className="h-1 rounded-full bg-app-divider overflow-hidden">
+                  <div className={`h-full rounded-full ${audio ? 'bg-app-fg-subtle' : 'bg-app-accent'}`} style={{ width: `${barPct}%` }} />
+                </div>
+              </div>
+            );
+          })}
         </div>
       )}
     </div>
   );
 }
 
-// ── Plan catalog ──────────────────────────────────────────────────────────────
+// ── Plan catalog (monthly only) ────────────────────────────────────────────────
 // Display metadata only. The amount actually charged is whatever the matching
-// Paddle price (VITE_PADDLE_*_PRICE_ID) is configured to in the Paddle dashboard;
-// keep these labels in sync with that configuration.
+// Paddle MONTHLY price (VITE_PADDLE_*_PRICE_ID) is configured to in the Paddle
+// dashboard; keep these labels in sync with that configuration.
 interface PlanDef {
   id: PlanId;
   name: string;
   icon: typeof User;
   tagline: string;
-  price: Record<BillingCycle, string>;
-  priceSuffix: Record<BillingCycle, string>;
+  price: string;
+  priceSuffix: string;
   features: string[];
-  perSeat?: boolean;
   highlight?: boolean;
   /** Sales-led plan — no self-serve checkout; opens a Contact Sales email. */
   salesLed?: boolean;
@@ -119,8 +171,8 @@ const PLANS: PlanDef[] = [
     name: 'Pro',
     icon: User,
     tagline: 'For professionals who want clarity from every meeting',
-    price: { monthly: '$29', yearly: '$24' },
-    priceSuffix: { monthly: 'per month', yearly: 'per month, billed yearly' },
+    price: '$29',
+    priceSuffix: 'per month',
     features: [
       '20 meetings per month',
       '5 batch hours per month',
@@ -134,8 +186,8 @@ const PLANS: PlanDef[] = [
     name: 'Pro Plus',
     icon: Sparkles,
     tagline: 'Real-time + multilingual batch, across every meeting',
-    price: { monthly: '$49', yearly: '$41' },
-    priceSuffix: { monthly: 'per month', yearly: 'per month, billed yearly' },
+    price: '$49',
+    priceSuffix: 'per month',
     features: [
       'Unlimited meetings',
       '15 batch hours · 70+ languages',
@@ -150,9 +202,8 @@ const PLANS: PlanDef[] = [
     name: 'Enterprise',
     icon: Building2,
     tagline: 'Governance and controls your organisation can trust',
-    price: { monthly: '$99', yearly: '$99' },
-    priceSuffix: { monthly: 'per user / month', yearly: 'per user / month · min 5 seats' },
-    perSeat: true,
+    price: '$99',
+    priceSuffix: 'per user / month',
     salesLed: true,
     features: [
       'Unlimited everything',
@@ -168,38 +219,13 @@ const PLANS: PlanDef[] = [
 // table reconciled via custom_data.user_id), everyone is treated as Free.
 const CURRENT_PLAN: PlanId = 'free';
 
-function BillingCycleToggle({ cycle, onChange }: { cycle: BillingCycle; onChange: (c: BillingCycle) => void }) {
-  return (
-    <div className="inline-flex items-center gap-0.5 p-0.5 rounded-full bg-app-canvas border border-app-divider">
-      {(['monthly', 'yearly'] as BillingCycle[]).map((c) => (
-        <button
-          key={c}
-          onClick={() => onChange(c)}
-          className={`px-3.5 py-1.5 text-[12px] rounded-full transition-all duration-200 tracking-[-0.01em] ${
-            cycle === c
-              ? 'bg-app-nav-active-bg text-app-nav-active-fg font-medium shadow-sm'
-              : 'text-app-fg-subtle hover:text-app-fg'
-          }`}
-        >
-          {c === 'monthly' ? 'Monthly' : 'Yearly'}
-          {c === 'yearly' && (
-            <span className="ml-1.5 text-[10px] font-medium text-emerald-600 dark:text-emerald-400">Save ~17%</span>
-          )}
-        </button>
-      ))}
-    </div>
-  );
-}
-
 function PlanCard({
   plan,
-  cycle,
   isCurrent,
   busy,
   onChoose,
 }: {
   plan: PlanDef;
-  cycle: BillingCycle;
   isCurrent: boolean;
   busy: boolean;
   onChoose: () => void;
@@ -208,35 +234,40 @@ function PlanCard({
 
   return (
     <div
-      className={`relative flex flex-col rounded-2xl border p-5 transition-colors ${
+      className={`relative flex flex-col rounded-2xl border p-5 transition-all ${
         plan.highlight
-          ? 'border-app-fg-subtle/40 bg-app-canvas shadow-sm'
-          : 'border-app-divider bg-app-canvas'
+          ? 'border-app-accent/50 bg-app-panel shadow-md ring-1 ring-app-accent/20'
+          : 'border-app-card-border bg-app-panel hover:border-app-fg-subtle/40'
       }`}
     >
       {plan.highlight && (
-        <div className="absolute -top-2.5 left-1/2 -translate-x-1/2 px-2.5 py-0.5 rounded-full bg-app-nav-active-bg text-app-nav-active-fg text-[10px] font-medium tracking-[0.04em] uppercase shadow-sm">
+        <div className="absolute -top-2.5 left-1/2 -translate-x-1/2 px-2.5 py-0.5 rounded-full bg-app-accent text-app-accent-fg text-[10px] font-semibold tracking-[0.04em] uppercase shadow-sm">
           Most popular
         </div>
       )}
 
       <div className="flex items-center gap-2 mb-1">
-        <div className="w-7 h-7 rounded-lg bg-emerald-50 dark:bg-emerald-900/30 text-emerald-700 dark:text-emerald-300 flex items-center justify-center flex-shrink-0">
+        <div className="w-7 h-7 rounded-lg bg-app-accent/15 text-app-accent flex items-center justify-center flex-shrink-0">
           <Icon size={15} strokeWidth={1.8} />
         </div>
         <div className="text-[15px] font-semibold text-app-fg tracking-[-0.01em]">{plan.name}</div>
+        {isCurrent && (
+          <span className="ml-auto text-[10px] font-semibold px-2 py-0.5 rounded-full bg-app-raised text-app-fg-muted">Current</span>
+        )}
       </div>
-      <div className="text-[12px] text-app-fg-subtle mb-4">{plan.tagline}</div>
+      <div className="text-[12px] text-app-fg-subtle mb-4 leading-snug min-h-[32px]">{plan.tagline}</div>
 
-      <div className="flex items-baseline gap-1.5 mb-0.5">
-        <span className="text-[28px] font-serif text-app-fg tracking-[-0.02em]">{plan.price[cycle]}</span>
+      <div className="flex items-baseline gap-1.5">
+        <span className="text-[30px] font-serif text-app-fg tracking-[-0.02em] leading-none">{plan.price}</span>
       </div>
-      <div className="text-[11.5px] text-app-fg-subtle mb-5">{plan.priceSuffix[cycle]}</div>
+      <div className="text-[11.5px] text-app-fg-subtle mt-1.5 mb-5">{plan.priceSuffix}</div>
 
       <ul className="space-y-2 mb-6 flex-1">
         {plan.features.map((f) => (
           <li key={f} className="flex items-start gap-2 text-[12.5px] text-app-fg leading-snug">
-            <Check size={14} strokeWidth={2} className="text-emerald-600 dark:text-emerald-400 flex-shrink-0 mt-0.5" />
+            <span className="mt-0.5 flex-shrink-0 w-4 h-4 rounded-full bg-app-accent/15 flex items-center justify-center">
+              <Check size={11} strokeWidth={2.6} className="text-app-accent" />
+            </span>
             <span className="tracking-[-0.01em]">{f}</span>
           </li>
         ))}
@@ -245,11 +276,11 @@ function PlanCard({
       <button
         disabled={isCurrent || busy}
         onClick={onChoose}
-        className={`w-full flex items-center justify-center gap-1.5 py-2 rounded-xl text-[13px] font-medium tracking-[-0.01em] transition-all duration-200 ${
+        className={`w-full flex items-center justify-center gap-1.5 py-2.5 rounded-xl text-[13px] font-medium tracking-[-0.01em] transition-all duration-200 ${
           isCurrent
-            ? 'bg-app-canvas border border-app-divider text-app-fg-subtle cursor-default'
+            ? 'bg-app-raised border border-app-divider text-app-fg-subtle cursor-default'
             : plan.highlight
-              ? 'bg-app-fg text-app-bg hover:opacity-90'
+              ? 'bg-app-fg text-app-canvas hover:opacity-90'
               : 'bg-app-canvas border border-app-divider text-app-fg hover:border-app-fg-subtle/40'
         }`}
       >
@@ -274,7 +305,6 @@ function PlanCard({
 }
 
 export default function BillingTab({ session }: { session: AuthSession | null }) {
-  const [cycle, setCycle] = useState<BillingCycle>('monthly');
   const [busyPlan, setBusyPlan] = useState<PlanId | null>(null);
   const [error, setError] = useState<string | null>(null);
   const [usage, setUsage] = useState<UsageSummary | null>(null);
@@ -310,7 +340,7 @@ export default function BillingTab({ session }: { session: AuthSession | null })
     try {
       const ok = await openCheckout({
         plan: plan.id as 'pro' | 'pro_plus',
-        cycle,
+        cycle: 'monthly',
         quantity: 1,
         session,
       });
@@ -330,10 +360,9 @@ export default function BillingTab({ session }: { session: AuthSession | null })
   };
 
   return (
-    <div className="max-w-[860px] mx-auto px-8 pb-16">
-      <div className="flex items-end justify-between pt-2 mb-1 flex-wrap gap-3">
+    <div className="max-w-[920px] mx-auto px-8 pb-16">
+      <div className="pt-2 mb-1">
         <h1 className="text-[28px] font-serif text-app-fg tracking-[-0.02em]">Billing</h1>
-        <BillingCycleToggle cycle={cycle} onChange={setCycle} />
       </div>
       <p className="text-[13px] text-app-fg-subtle tracking-[-0.01em] mb-6">
         Choose the plan that fits your workflow. Checkout opens securely in your browser, powered by Paddle.
@@ -355,12 +384,11 @@ export default function BillingTab({ session }: { session: AuthSession | null })
         </div>
       )}
 
-      <div className="grid grid-cols-1 md:grid-cols-3 gap-4">
+      <div className="grid grid-cols-1 md:grid-cols-3 gap-4 items-stretch">
         {PLANS.map((plan) => (
           <PlanCard
             key={plan.id}
             plan={plan}
-            cycle={cycle}
             isCurrent={plan.id === currentPlan}
             busy={busyPlan === plan.id}
             onChoose={() => handleChoose(plan)}
@@ -377,7 +405,7 @@ export default function BillingTab({ session }: { session: AuthSession | null })
         </div>
         <button
           onClick={handleManage}
-          className="flex items-center gap-1.5 px-3.5 py-2 rounded-xl text-[12.5px] font-medium text-app-fg bg-app-canvas border border-app-divider hover:border-app-fg-subtle/40 transition-colors tracking-[-0.01em]"
+          className="flex items-center gap-1.5 px-3.5 py-2 rounded-xl text-[12.5px] font-medium text-app-fg bg-app-panel border border-app-divider hover:border-app-fg-subtle/40 transition-colors tracking-[-0.01em]"
         >
           Billing portal <ExternalLink size={13} strokeWidth={1.8} />
         </button>
