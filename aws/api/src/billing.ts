@@ -87,9 +87,30 @@ function effectivePlan(row: { plan: string; status: string; current_period_end: 
 /** Free plan is capped at this many meetings; paid plans are unlimited. */
 export const FREE_MEETING_LIMIT = 5;
 
-/** The caller's effective plan ('free' | 'pro' | 'pro_plus'). Used to gate
-    paid-only capacity (e.g. the free meeting limit) server-side. */
-export async function getUserPlan(userId: string): Promise<string> {
+/**
+ * Pricing-exempt accounts — TEMPORARY, for testing only.
+ *
+ * Any email here resolves to the unlimited `enterprise` plan regardless of
+ * billing state, so the account is free from every plan limit while we finish
+ * the consumption/cost-control work. Remove the email to re-tie the account to
+ * normal pricing. Matching is case-insensitive. Everyone NOT listed is
+ * completely unaffected.
+ */
+const PRICING_EXEMPT_EMAILS = new Set<string>([
+  'owner@example.com',
+]);
+
+/** Is this account temporarily exempt from all plan limits? */
+export function isPricingExempt(email: string | null | undefined): boolean {
+  return !!email && PRICING_EXEMPT_EMAILS.has(email.trim().toLowerCase());
+}
+
+/** The caller's effective plan ('free' | 'pro' | 'pro_plus' | 'enterprise').
+    Used to gate paid-only capacity (e.g. the free meeting limit) server-side.
+    Pass `email` to honour the temporary pricing-exempt allowlist above. */
+export async function getUserPlan(userId: string, email?: string | null): Promise<string> {
+  // Testing exemption: short-circuit to unlimited before touching billing state.
+  if (isPricingExempt(email)) return 'enterprise';
   await ensureSchema();
   const row = await queryOne<{ plan: string; status: string; current_period_end: string | null }>(
     'SELECT plan, status, current_period_end FROM subscriptions WHERE user_id=$1',
@@ -204,6 +225,7 @@ export async function handleBilling(
   method: string,
   segments: string[],
   userId: string,
+  email: string | null = null,
 ): Promise<APIGatewayProxyResult> {
   if (method === 'GET' && segments[1] === 'status') {
     await ensureSchema();
@@ -211,10 +233,12 @@ export async function handleBilling(
       'SELECT plan, cycle, status, current_period_end FROM subscriptions WHERE user_id=$1',
       [userId],
     );
+    // Honour the temporary pricing-exempt allowlist so the client UI also
+    // reflects the unlimited plan (unlocks premium models / advanced features).
     return ok({
-      plan: effectivePlan(row),
+      plan: isPricingExempt(email) ? 'enterprise' : effectivePlan(row),
       cycle: row?.cycle || null,
-      status: row?.status || 'inactive',
+      status: isPricingExempt(email) ? 'active' : (row?.status || 'inactive'),
       current_period_end: row?.current_period_end || null,
     });
   }
@@ -222,7 +246,7 @@ export async function handleBilling(
   // GET /billing/usage → detailed usage for the billing/usage UI: this month's
   // token usage per model + meeting and batch-hour consumption vs plan limits.
   if (method === 'GET' && segments[1] === 'usage') {
-    const plan = await getUserPlan(userId);
+    const plan = await getUserPlan(userId, email);
     const [tokens, meeting, batch] = await Promise.all([
       getMonthlyTokenUsage(userId),
       getMeetingUsage(userId, plan),

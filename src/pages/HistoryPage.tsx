@@ -426,7 +426,7 @@ export default function HistoryPage({ history, onSelectTask, isLoading = false, 
                                 onCreateFolder={() => setFolderModalWsId(meetingWs[task.id!] ?? workspaces[0]?.id ?? null)}
                               />
                             )}
-                            <span className="text-[11.5px] text-app-fg-subtle px-1 tabular-nums">{formatTime(task.created_at)}</span>
+                            <span className="text-[11.5px] text-app-fg-subtle px-1 tabular-nums group-hover:hidden">{formatTime(task.created_at)}</span>
                           </div>
                         </div>
                       );

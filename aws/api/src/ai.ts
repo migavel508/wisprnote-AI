@@ -10,6 +10,8 @@ import {
   audioMetrics,
 } from './observability';
 import { recordTokenUsage, recordAudioUsage } from './usage';
+import { handleChatAgent } from './chatAgent';
+import { MODELS } from './models/registry';
 
 /**
  * Authenticated AI proxy. Every route sits BEHIND verifyToken (see the router in
@@ -92,7 +94,7 @@ async function routeAI(
     if (!audioB64) return badRequest('audio required');
     const audioBuf = Buffer.from(audioB64, 'base64');
     const out = await traceAI(
-      { name: 'deepgram.transcribe', kind: 'function', provider: 'deepgram', model: 'nova-3', userId, input: `[audio ${audioBuf.length} bytes, ${mimetype}]`, metadata: { mimetype } },
+      { name: 'deepgram.transcribe', kind: 'function', provider: 'deepgram', model: MODELS.transcription.primary, userId, input: `[audio ${audioBuf.length} bytes, ${mimetype}]`, metadata: { mimetype } },
       async () => {
         // English-only, max accuracy on Nova-3:
         //  - language=en pins the English-optimized path (no language detection /
@@ -100,7 +102,7 @@ async function routeAI(
         //  - smart_format + punctuate clean up casing, punctuation, numbers.
         //  - filler_words=false drops "um/uh" for clean chat input.
         const dgParams = new URLSearchParams({
-          model: 'nova-3',
+          model: MODELS.transcription.primary,
           language: 'en',
           smart_format: 'true',
           punctuate: 'true',
@@ -124,7 +126,7 @@ async function routeAI(
       }
     );
     // Meter the audio processed (per user/model) for billing & analytics.
-    await recordAudioUsage(userId, 'deepgram', 'nova-3', Number(out.metrics?.audio_seconds) || 0);
+    await recordAudioUsage(userId, 'deepgram', MODELS.transcription.primary, Number(out.metrics?.audio_seconds) || 0);
     return { statusCode: out.status, headers: jsonHeaders(), body: out.body };
   }
 
@@ -135,7 +137,7 @@ async function routeAI(
     // here so realtime transcription still shows up in Braintrust + usage metering
     // — giving the whole app (every model) complete observability.
     const mode = String(body.mode || 'realtime');
-    const model = String(body.model || 'nova-3');
+    const model = String(body.model || MODELS.transcription.primary);
     const seconds = Math.max(0, Number(body.duration_seconds) || 0);
     const words = Math.max(0, Number(body.words) || 0);
     if (seconds <= 0) return badRequest('duration_seconds required');
@@ -153,6 +155,12 @@ async function routeAI(
     );
     await recordAudioUsage(userId, 'deepgram', model, seconds);
     return { statusCode: 200, headers: jsonHeaders(), body: JSON.stringify({ ok: true }) };
+  }
+
+  if (sub === 'chat') {
+    // Server-side chat agent: tenant-isolated retrieval + grounded synthesis,
+    // entirely in the Lambda (the corpus never reaches the browser).
+    return handleChatAgent(userId, body);
   }
 
   if (sub === 'proxy') {
@@ -189,9 +197,19 @@ async function routeAI(
 
     const fwdMethod = String(body.method || 'POST').toUpperCase();
     const hasBody = fwdMethod !== 'GET' && fwdMethod !== 'HEAD' && body.body !== undefined;
-    const fwdBody = hasBody
+    let fwdBody = hasBody
       ? (typeof body.body === 'string' ? body.body : JSON.stringify(body.body))
       : undefined;
+
+    // MULTI-TENANT ISOLATION (server-enforced; cannot be bypassed by the client):
+    // every Turbopuffer write is stamped with the authenticated user_id, and —
+    // once existing chunks are backfilled and TURBOPUFFER_ENFORCE_USER_ID=1 is
+    // set — every query/delete is hard-filtered to that user_id. The write-tagging
+    // is always on (safe, additive); the query filter is gated so it never drops
+    // un-backfilled chunks before the backfill completes.
+    if (host.endsWith('.turbopuffer.com')) {
+      fwdBody = tenantScopeTurbopuffer(fwdBody, userId, process.env.TURBOPUFFER_ENFORCE_USER_ID === '1');
+    }
 
     const provider = providerFromHost(host);
     const model = modelFromRequest(provider, parsed, fwdBody);
@@ -209,7 +227,7 @@ async function routeAI(
         metadata: { path: parsed.pathname, method: fwdMethod },
       },
       async () => {
-        const r = await fetch(parsed.toString(), { method: fwdMethod, headers, body: fwdBody });
+        const r = await fetchWithRetry(parsed.toString(), { method: fwdMethod, headers, body: fwdBody });
         const text = await r.text();
         return {
           status: r.ok ? 200 : r.status,
@@ -221,12 +239,67 @@ async function routeAI(
       }
     );
     // Persist token usage to our DB (per user/provider/model) for billing &
-    // analytics — separate from the Braintrust trace. Never blocks the response.
-    await recordTokenUsage(userId, provider, model, out.metrics ?? {});
+    // analytics. Fire-and-forget so it never adds latency to the response.
+    void recordTokenUsage(userId, provider, model, out.metrics ?? {}).catch(() => {});
     return { statusCode: out.status, headers: jsonHeaders(), body: out.body };
   }
 
   return notFound();
+}
+
+/**
+ * Server-side multi-tenant isolation for Turbopuffer. The vector index is a
+ * single shared namespace, so a user's data must be partitioned by `user_id`:
+ *  - WRITES (`upsert_rows`): stamp every row with the caller's user_id and
+ *    declare it in the schema (always on — additive, never breaks anything).
+ *  - QUERIES / DELETES (`enforce`): AND a `['user_id','Eq',userId]` filter so a
+ *    query can NEVER return another tenant's chunks. Gated behind an env flag
+ *    because existing chunks have no user_id yet — enable only after backfill.
+ */
+function tenantScopeTurbopuffer(rawBody: string | undefined, userId: string, enforce: boolean): string | undefined {
+  if (!rawBody || !userId) return rawBody;
+  let obj: any;
+  try { obj = JSON.parse(rawBody); } catch { return rawBody; }
+  if (!obj || typeof obj !== 'object') return rawBody;
+
+  if (Array.isArray(obj.upsert_rows)) {
+    obj.upsert_rows = obj.upsert_rows.map((r: any) => ({ ...r, user_id: userId }));
+    obj.schema = { ...(obj.schema || {}), user_id: { type: 'string' } };
+  }
+
+  if (enforce) {
+    const withUser = (f: any) => (f ? ['And', [f, ['user_id', 'Eq', userId]]] : ['user_id', 'Eq', userId]);
+    if (Array.isArray(obj.queries)) {
+      obj.queries = obj.queries.map((q: any) => ({ ...q, filters: withUser(q.filters) }));
+    } else if (obj.rank_by) {
+      obj.filters = withUser(obj.filters);
+    }
+    if (obj.delete_by_filter) obj.delete_by_filter = withUser(obj.delete_by_filter);
+  }
+
+  return JSON.stringify(obj);
+}
+
+/**
+ * Fetch with exponential backoff on transient provider errors (429 / 502 / 503 /
+ * 504). At scale, provider rate limits (429) are routine; retrying with backoff
+ * (honoring Retry-After) turns a user-facing failure into a brief delay. Caps
+ * total added latency so it never hangs the request.
+ */
+const RETRYABLE = new Set([429, 502, 503, 504]);
+async function fetchWithRetry(url: string, init: any, maxRetries = 2): Promise<Response> {
+  let attempt = 0;
+  // eslint-disable-next-line no-constant-condition
+  while (true) {
+    const r = await fetch(url, init);
+    if (!RETRYABLE.has(r.status) || attempt >= maxRetries) return r;
+    const retryAfter = Number(r.headers.get('retry-after'));
+    const waitMs = Number.isFinite(retryAfter) && retryAfter > 0
+      ? Math.min(retryAfter * 1000, 8000)
+      : Math.min(400 * 2 ** attempt, 4000); // 400ms, 800ms, …
+    await new Promise((res) => setTimeout(res, waitMs));
+    attempt++;
+  }
 }
 
 function jsonHeaders() {

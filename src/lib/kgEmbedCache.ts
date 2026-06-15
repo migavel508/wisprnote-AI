@@ -11,6 +11,7 @@
 // ──────────────────────────────────────────────────────────────────────────────
 
 import { logger } from './logger';
+import { MODELS } from '../config/models';
 
 const log = logger.scope('KGEmbedCache');
 
@@ -19,7 +20,7 @@ function getEmbedCacheDbName(): string {
   if (p === 'openrouter') {
     const m = String(
       (import.meta as any).env?.VITE_OPENROUTER_EMBED_MODEL ||
-        'google/gemini-embedding-001',
+        MODELS.embeddings.or!.primary,
     ).replace(/[^a-zA-Z0-9._-]/g, '_');
     return `kg_embed_cache_or_${m}`;
   }

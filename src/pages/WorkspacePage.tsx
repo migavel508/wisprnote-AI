@@ -17,6 +17,10 @@ import {
 } from '../services/workspaceService';
 import { setWorkspaceSelection, useWorkspaceSelection } from '../services/workspaceSelection';
 import type { TaskHistory } from '../services/awsService';
+import { getTaskById, getWorkspaceKnowledgeGraph } from '../services/awsService';
+import WorkspaceChat from '../components/WorkspaceChat';
+import type { SearchableMeeting } from '../services/geminiService';
+import type { KGLite } from '../services/meetingEvidence';
 import CreateFolderModal, { type FolderDraft } from '../components/CreateFolderModal';
 
 // ── helpers ───────────────────────────────────────────────────────────────────
@@ -139,15 +143,31 @@ export function FolderPicker({
     <div className="relative" ref={popRef}>
       <button
         onClick={e => { e.stopPropagation(); setOpen(v => !v); }}
-        className="flex items-center gap-1.5 px-2 py-1 rounded-lg text-[11.5px] text-app-fg-subtle hover:bg-app-nav-hover-bg transition-colors"
+        title={label}
+        className={`flex items-center rounded-full text-[12px] text-app-fg-muted transition-all duration-150 ${
+          open
+            ? 'pl-1 pr-2 py-0.5 bg-app-nav-active-bg'
+            : 'p-0.5 group-hover:pl-1 group-hover:pr-2 group-hover:py-0.5 group-hover:bg-app-nav-active-bg'
+        }`}
       >
         {currentFolder ? (
-          <FolderGlyph folder={currentFolder} size={14} />
+          <FolderGlyph folder={currentFolder} size={18} />
         ) : currentWs ? (
-          <WorkspaceGlyph ws={currentWs} size={14} />
+          <WorkspaceGlyph ws={currentWs} size={18} />
         ) : null}
-        <span className="truncate max-w-[120px]">{label}</span>
-        <ChevronDown size={11} strokeWidth={1.7} />
+        {/* Granola-style: collapsed to just the icon; the exact workspace/folder
+            name + chevron reveal — inside a rounded pill — on row hover or while
+            the picker is open. */}
+        <span
+          className={`flex items-center overflow-hidden whitespace-nowrap transition-all duration-150 ${
+            open || !(currentFolder || currentWs)
+              ? 'max-w-[170px] opacity-100'
+              : 'max-w-0 opacity-0 group-hover:max-w-[170px] group-hover:opacity-100'
+          }`}
+        >
+          <span className="truncate max-w-[120px] pl-1.5 font-medium">{label}</span>
+          <ChevronDown size={12} strokeWidth={1.9} className="ml-1 flex-shrink-0" />
+        </span>
       </button>
 
       {open && (
@@ -264,7 +284,7 @@ function NoteRow({
           onSelectFolder={(wsId, folderId) => onChangeFolder(meeting.id, wsId, folderId)}
           onCreateFolder={onCreateFolder}
         />
-        <span className="text-[11px] text-app-fg-subtle px-1">{formatTime(meeting.created_at)}</span>
+        <span className="text-[11px] text-app-fg-subtle px-1 group-hover:hidden">{formatTime(meeting.created_at)}</span>
         <div className="relative" ref={menuRef}>
           <button
             onClick={e => { e.stopPropagation(); setMenuOpen(v => !v); }}
@@ -422,6 +442,55 @@ export default function WorkspacePage({ allTasks, onSelectTask }: WorkspacePageP
     // — that previously triggered a redundant second N+1 reload of every folder.
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [activeWs?.id, activeFolder?.id, foldersByWs[activeWs?.id ?? '']]);
+
+  // Full-text evidence for the workspace chat (transcription/notes/summary).
+  // Reuse the already-loaded `allTasks` where present; lazily hydrate the rest
+  // via getTaskById (workspaces hold few meetings), cached across re-renders so
+  // the chat only ever fetches each note once.
+  const [scopedMeetings, setScopedMeetings] = useState<SearchableMeeting[]>([]);
+  const scopedTextCacheRef = useRef<Map<string, { transcription: string; summary: string; notes: string; attendees: string[] }>>(new Map());
+  useEffect(() => {
+    if (!activeWs || activeFolder) { setScopedMeetings([]); return; }
+    let cancelled = false;
+    const byId = new Map(allTasks.filter(t => t.id).map(t => [t.id as string, t]));
+    (async () => {
+      // Per-meeting knowledge graph (action items, decisions, people, topic
+      // status incl. off-track) for this workspace → powers structured evidence
+      // cards + the "off-track" filter in the workspace chat.
+      const kgByTask = new Map<string, KGLite>();
+      try {
+        const kg = await getWorkspaceKnowledgeGraph(activeWs.id);
+        for (const e of kg) kgByTask.set(e.task_id, { topics: e.topics, decisions: e.decisions, action_items: e.action_items, people: e.people });
+      } catch { /* non-fatal — cards still carry date/attendees */ }
+
+      const built = await Promise.all(meetings.map(async (wm): Promise<SearchableMeeting> => {
+        let text = scopedTextCacheRef.current.get(wm.id);
+        if (!text) {
+          const local = byId.get(wm.id);
+          if (local && (local.transcription || local.notes || local.summary)) {
+            text = { transcription: local.transcription || '', summary: local.summary || wm.summary || '', notes: local.notes || '', attendees: local.attendees || [] };
+          } else {
+            const full = await getTaskById(wm.id).catch(() => null);
+            text = { transcription: full?.transcription || '', summary: full?.summary || wm.summary || '', notes: full?.notes || '', attendees: full?.attendees || [] };
+          }
+          scopedTextCacheRef.current.set(wm.id, text);
+        }
+        return {
+          meetingId: wm.id,
+          title: wm.filename || byId.get(wm.id)?.filename || 'Untitled',
+          transcription: text.transcription,
+          summary: text.summary,
+          notes: text.notes,
+          createdAt: wm.created_at,
+          attendees: text.attendees,
+          kg: kgByTask.get(wm.id) ?? null,
+        };
+      }));
+      if (!cancelled) setScopedMeetings(built);
+    })();
+    return () => { cancelled = true; };
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [activeWs?.id, activeFolder?.id, meetings, allTasks]);
 
   // Click-outside for header menu
   useEffect(() => {
@@ -705,40 +774,18 @@ export default function WorkspacePage({ allTasks, onSelectTask }: WorkspacePageP
           )}
         </div>
 
-        {/* Ask bar */}
-        <div className="px-8 max-w-[920px] mx-auto w-full">
-          <div className="flex items-center gap-3 px-4 py-3 bg-app-canvas border border-app-divider rounded-2xl hover:border-app-fg-subtle transition-colors">
-            <span className="flex-1 text-[13px] text-app-fg-subtle tracking-[-0.01em]">
-              {activeFolder ? 'Ask about folder' : 'Ask anything'}
-            </span>
-            <button className="text-[11px] text-app-fg-subtle hover:text-app-fg flex items-center gap-1">
-              Sonnet 4.6 <ChevronDown size={11} />
-            </button>
-            <Paperclip size={13} strokeWidth={1.7} className="text-app-fg-subtle" />
-            <Mic size={13} strokeWidth={1.7} className="text-app-fg-subtle" />
+        {/* Workspace chat — scoped to this workspace's notes (+ its folders).
+            Shown on the workspace home (not inside a single folder). */}
+        {activeWs && !activeFolder && (
+          <div className="px-8 max-w-[920px] mx-auto w-full">
+            <WorkspaceChat
+              key={activeWs.id}
+              workspaceId={activeWs.id}
+              workspaceName={activeWs.name}
+              scopedMeetings={scopedMeetings}
+            />
           </div>
-
-          {/* Quick recipes */}
-          <div className="flex items-center justify-between mt-3">
-            <div className="flex items-center gap-3 flex-wrap">
-              {['Catch me up', 'List key decisions', 'Show in flight projects'].map(chip => (
-                <button key={chip} className="text-[12px] text-app-fg-subtle hover:text-app-fg flex items-center gap-1.5 transition-colors">
-                  <span className="inline-block w-3.5 h-3.5 rounded border border-app-divider text-center text-[8px] leading-[12px]">/</span>
-                  {chip}
-                </button>
-              ))}
-            </div>
-            <button className="text-[12px] text-app-fg-subtle hover:text-app-fg flex items-center gap-1.5">
-              <span className="inline-block w-3.5 h-3.5 grid grid-cols-2 gap-[1px]">
-                <span className="bg-app-fg-subtle rounded-[1px]" />
-                <span className="bg-app-fg-subtle rounded-[1px]" />
-                <span className="bg-app-fg-subtle rounded-[1px]" />
-                <span className="bg-app-fg-subtle rounded-[1px]" />
-              </span>
-              All recipes
-            </button>
-          </div>
-        </div>
+        )}
 
         {/* Divider */}
         <div className="h-px bg-app-divider mx-auto mt-6 max-w-[920px]" />

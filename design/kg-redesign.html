@@ -1,0 +1,409 @@
+<!DOCTYPE html>
+<html lang="en" data-theme="dark">
+<head>
+<meta charset="utf-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1" />
+<title>Knowledge Graph — Redesign Prototype</title>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600&family=Newsreader:ital,wght@1,500&family=JetBrains+Mono:wght@500&display=swap" rel="stylesheet">
+<style>
+:root{
+  --canvas:#141414; --panel:rgba(28,28,28,.72); --panel-solid:#1c1c1c; --raised:#2c2c2c;
+  --border:rgba(255,255,255,.08); --border-strong:rgba(255,255,255,.14);
+  --fg:#f5f5f5; --fg-muted:#a3a3a3; --fg-subtle:#737373;
+  --accent:#f3a738; --accent-soft:rgba(243,167,56,.16);
+  --grid:rgba(255,255,255,.025); --glass-blur:18px;
+  --s-resolved:#22c55e; --s-offtrack:#ef4444; --s-ongoing:#3b82f6; --s-revisited:#f3a738; --s-new:#8b5cf6;
+  --t-meeting:#e8e2d6; --t-person:#22d3ee; --t-decision:#f3a738; --t-action:#ec4899;
+}
+[data-theme="light"]{
+  --canvas:#f4f2ec; --panel:rgba(255,255,255,.78); --panel-solid:#ffffff; --raised:#faf9f6;
+  --border:rgba(38,32,24,.10); --border-strong:#e6e0d5;
+  --fg:#1c1a17; --fg-muted:#6c655c; --fg-subtle:#968d81;
+  --accent:#e8991f; --accent-soft:rgba(232,153,31,.14);
+  --grid:rgba(38,32,24,.035);
+  --t-meeting:#475569;
+}
+*{box-sizing:border-box;margin:0;padding:0}
+html,body{height:100%}
+body{font-family:Inter,system-ui,sans-serif;background:var(--canvas);color:var(--fg);overflow:hidden;-webkit-font-smoothing:antialiased}
+.sr-only{position:absolute;width:1px;height:1px;overflow:hidden;clip:rect(0 0 0 0)}
+#stage{position:fixed;inset:0}
+canvas{position:absolute;inset:0;display:block}
+
+/* ---- chrome shell ---- */
+.glass{background:var(--panel);backdrop-filter:blur(var(--glass-blur));-webkit-backdrop-filter:blur(var(--glass-blur));border:1px solid var(--border);}
+.topbar{position:absolute;top:14px;left:14px;right:14px;height:54px;border-radius:16px;display:flex;align-items:center;gap:14px;padding:0 14px;z-index:30;box-shadow:0 8px 40px rgba(0,0,0,.28)}
+.brand{display:flex;align-items:center;gap:10px;padding-right:14px;border-right:1px solid var(--border)}
+.brand .mark{width:30px;height:30px;border-radius:9px;background:var(--accent-soft);display:grid;place-items:center;color:var(--accent)}
+.brand h1{font-family:Newsreader,serif;font-style:italic;font-weight:500;font-size:18px;letter-spacing:.2px}
+.brand .sub{font-size:11px;color:var(--fg-subtle);margin-top:-2px}
+.search{flex:1;display:flex;align-items:center;gap:9px;height:36px;border-radius:10px;background:var(--raised);border:1px solid var(--border);padding:0 12px;max-width:340px;cursor:text;transition:border-color .15s}
+.search:focus-within{border-color:var(--accent)}
+.search input{flex:1;background:none;border:none;outline:none;color:var(--fg);font-size:13px;font-family:inherit}
+.search .kbd{font-family:'JetBrains Mono',monospace;font-size:10px;color:var(--fg-subtle);border:1px solid var(--border);border-radius:5px;padding:2px 6px}
+.seg{display:flex;background:var(--raised);border:1px solid var(--border);border-radius:10px;padding:3px;gap:3px}
+.seg button{border:none;background:none;color:var(--fg-muted);font:inherit;font-size:12px;font-weight:500;padding:6px 12px;border-radius:7px;cursor:pointer;display:flex;align-items:center;gap:6px;transition:.15s}
+.seg button.on{background:var(--accent);color:#1c1a17}
+.spacer{flex:1}
+.count{font-size:12px;color:var(--fg-muted);white-space:nowrap}
+.count b{color:var(--fg);font-weight:600}
+.iconbtn{width:36px;height:36px;border-radius:10px;background:var(--raised);border:1px solid var(--border);color:var(--fg-muted);display:grid;place-items:center;cursor:pointer;transition:.15s;font-size:16px}
+.iconbtn:hover{color:var(--fg);border-color:var(--border-strong)}
+
+/* ---- lens rail ---- */
+.lenses{position:absolute;top:82px;left:14px;display:flex;gap:8px;z-index:25;flex-wrap:wrap;max-width:60%}
+.lens{display:flex;align-items:center;gap:7px;height:30px;padding:0 12px;border-radius:999px;font-size:12px;font-weight:500;cursor:pointer;background:var(--panel);backdrop-filter:blur(var(--glass-blur));border:1px solid var(--border);color:var(--fg-muted);transition:.15s}
+.lens:hover{color:var(--fg)}
+.lens.on{color:var(--fg);border-color:var(--accent);background:var(--accent-soft)}
+.lens .dot{width:8px;height:8px;border-radius:50%}
+
+/* ---- insights card ---- */
+.insights{position:absolute;left:14px;bottom:14px;width:248px;border-radius:16px;padding:16px;z-index:25;box-shadow:0 8px 40px rgba(0,0,0,.25)}
+.insights h3{font-size:11px;text-transform:uppercase;letter-spacing:.8px;color:var(--fg-subtle);margin-bottom:12px;display:flex;align-items:center;gap:7px}
+.stat{display:flex;justify-content:space-between;align-items:center;padding:7px 0;border-top:1px solid var(--border);font-size:13px}
+.stat:first-of-type{border-top:none}
+.stat .k{color:var(--fg-muted)}
+.stat .v{font-weight:600;display:flex;align-items:center;gap:6px}
+.pill{font-size:10.5px;font-weight:600;padding:2px 8px;border-radius:999px}
+.legend{display:flex;flex-wrap:wrap;gap:6px 12px;margin-top:12px;padding-top:12px;border-top:1px solid var(--border)}
+.legend span{display:flex;align-items:center;gap:6px;font-size:11px;color:var(--fg-muted)}
+.legend i{width:9px;height:9px;border-radius:50%;display:inline-block}
+
+/* ---- detail panel ---- */
+.detail{position:absolute;top:14px;right:14px;bottom:14px;width:360px;border-radius:18px;z-index:28;display:flex;flex-direction:column;transform:translateX(396px);transition:transform .42s cubic-bezier(.22,1,.36,1);box-shadow:-12px 0 60px rgba(0,0,0,.32);overflow:hidden}
+.detail.open{transform:none}
+.detail .head{padding:18px 18px 14px;border-bottom:1px solid var(--border)}
+.detail .typeRow{display:flex;align-items:center;justify-content:space-between;margin-bottom:10px}
+.detail .typeBadge{display:flex;align-items:center;gap:8px;font-size:10.5px;font-weight:600;text-transform:uppercase;letter-spacing:.7px;color:var(--fg-subtle)}
+.detail .typeBadge .dot{width:9px;height:9px;border-radius:50%}
+.detail h2{font-family:Newsreader,serif;font-style:italic;font-weight:500;font-size:21px;line-height:1.25;letter-spacing:.2px}
+.detail .meta{font-size:12px;color:var(--fg-subtle);margin-top:6px;display:flex;gap:14px}
+.detail .body{padding:16px 18px;overflow-y:auto;flex:1}
+.detail .body::-webkit-scrollbar{width:8px}.detail .body::-webkit-scrollbar-thumb{background:var(--border-strong);border-radius:8px}
+.sec{margin-bottom:18px}
+.sec .lbl{font-size:10.5px;text-transform:uppercase;letter-spacing:.7px;color:var(--fg-subtle);margin-bottom:9px;display:flex;align-items:center;gap:7px}
+.chip{display:inline-flex;align-items:center;gap:7px;padding:6px 11px;border-radius:9px;background:var(--raised);border:1px solid var(--border);font-size:12.5px;margin:0 6px 6px 0}
+.chip .sdot{width:7px;height:7px;border-radius:50%}
+.topicRow{display:flex;align-items:flex-start;gap:10px;padding:10px;border-radius:11px;background:var(--raised);border:1px solid var(--border);margin-bottom:8px}
+.topicRow .bar{width:3px;align-self:stretch;border-radius:3px;flex:none}
+.topicRow .tname{font-size:13px;font-weight:600}
+.topicRow .tsum{font-size:12px;color:var(--fg-muted);margin-top:3px;line-height:1.5}
+.topicRow .tstat{font-size:10px;font-weight:600;text-transform:uppercase;letter-spacing:.4px;padding:2px 7px;border-radius:6px;flex:none}
+.relCard{padding:12px;border-radius:12px;background:var(--raised);border:1px solid var(--border);margin-bottom:9px;cursor:pointer;transition:.15s}
+.relCard:hover{border-color:var(--accent)}
+.relCard .top{display:flex;align-items:center;justify-content:space-between;margin-bottom:6px}
+.relCard .rtitle{font-size:13px;font-weight:600}
+.relBadge{font-size:9.5px;font-weight:600;text-transform:uppercase;letter-spacing:.4px;padding:3px 8px;border-radius:999px}
+.relCard .thread{font-size:12px;color:var(--fg-muted);line-height:1.5}
+.avatar{width:44px;height:44px;border-radius:50%;background:var(--accent-soft);color:var(--accent);display:grid;place-items:center;font-weight:600;font-size:15px}
+
+/* ---- bottom-right controls + minimap ---- */
+.controls{position:absolute;right:390px;bottom:14px;display:flex;flex-direction:column;gap:8px;z-index:25;transition:right .42s cubic-bezier(.22,1,.36,1)}
+.controls.shifted{right:14px}
+.controls .iconbtn{box-shadow:0 4px 20px rgba(0,0,0,.2)}
+.minimap{position:absolute;right:390px;top:82px;width:150px;height:104px;border-radius:12px;z-index:25;overflow:hidden;transition:right .42s cubic-bezier(.22,1,.36,1)}
+.minimap.shifted{right:14px}
+.processing{position:absolute;top:84px;left:50%;transform:translateX(-50%);z-index:26;display:flex;align-items:center;gap:9px;padding:8px 16px;border-radius:999px;font-size:12px;box-shadow:0 8px 30px rgba(0,0,0,.25)}
+.processing .spin{width:11px;height:11px;border:2px solid var(--accent);border-right-color:transparent;border-radius:50%;animation:spin .8s linear infinite}
+@keyframes spin{to{transform:rotate(360deg)}}
+.hint{position:absolute;bottom:18px;left:50%;transform:translateX(-50%);font-size:11px;color:var(--fg-subtle);z-index:20;pointer-events:none}
+</style>
+</head>
+<body>
+<h2 class="sr-only">Interactive knowledge-graph redesign prototype: a constellation of meetings, topics, people, decisions and actions with cross-meeting relationships.</h2>
+<div id="stage">
+  <canvas id="g"></canvas>
+
+  <div class="topbar glass">
+    <div class="brand">
+      <div class="mark"><i style="font-style:normal">◈</i></div>
+      <div><h1>Knowledge Graph</h1><div class="sub">Cross-meeting memory</div></div>
+    </div>
+    <label class="search">
+      <span style="color:var(--fg-subtle)">⌕</span>
+      <input id="search" placeholder="Search meetings, topics, people…" />
+      <span class="kbd">⌘K</span>
+    </label>
+    <div class="seg" id="viewSeg">
+      <button data-v="constellation" class="on">✦ Constellation</button>
+      <button data-v="detail">⌗ Detail</button>
+    </div>
+    <div class="spacer"></div>
+    <div class="count"><b id="nN">8</b> meetings · <b id="lN">14</b> links</div>
+    <div class="iconbtn" id="themeBtn" title="Toggle theme">☾</div>
+  </div>
+
+  <div class="lenses" id="lenses">
+    <div class="lens on" data-lens="all">All</div>
+    <div class="lens" data-lens="offtrack"><span class="dot" style="background:var(--s-offtrack)"></span>Off-track</div>
+    <div class="lens" data-lens="people"><span class="dot" style="background:var(--t-person)"></span>People</div>
+    <div class="lens" data-lens="decisions"><span class="dot" style="background:var(--t-decision)"></span>Decisions</div>
+    <div class="lens" data-lens="recent">Last 30 days</div>
+  </div>
+
+  <div class="processing glass" id="processing"><span class="spin"></span> Analysing 1 meeting on our servers…</div>
+
+  <div class="insights glass">
+    <h3>⊹ Insights</h3>
+    <div class="stat"><span class="k">Most connected</span><span class="v">Q3 Planning</span></div>
+    <div class="stat"><span class="k">Off-track topics</span><span class="v"><span class="pill" style="background:rgba(239,68,68,.18);color:#ef4444">3 active</span></span></div>
+    <div class="stat"><span class="k">Recurring theme</span><span class="v">Pricing</span></div>
+    <div class="stat"><span class="k">Open actions</span><span class="v">11</span></div>
+    <div class="legend">
+      <span><i style="background:var(--t-meeting)"></i>Meeting</span>
+      <span><i style="background:var(--s-ongoing)"></i>Topic</span>
+      <span><i style="background:var(--t-person)"></i>Person</span>
+      <span><i style="background:var(--t-decision)"></i>Decision</span>
+      <span><i style="background:var(--t-action)"></i>Action</span>
+    </div>
+  </div>
+
+  <canvas class="minimap glass" id="mini"></canvas>
+  <div class="controls" id="controls">
+    <div class="iconbtn" id="zin">+</div>
+    <div class="iconbtn" id="zout">−</div>
+    <div class="iconbtn" id="zfit">⤢</div>
+  </div>
+
+  <aside class="detail glass" id="detail">
+    <div class="head">
+      <div class="typeRow">
+        <div class="typeBadge"><span class="dot" id="dDot"></span><span id="dType">Meeting</span></div>
+        <div class="iconbtn" id="dClose" style="width:28px;height:28px;font-size:14px">✕</div>
+      </div>
+      <h2 id="dTitle">Q3 Planning</h2>
+      <div class="meta" id="dMeta"></div>
+    </div>
+    <div class="body" id="dBody"></div>
+  </aside>
+
+  <div class="hint">Drag to pan · scroll to zoom · click a node to inspect · drag a node to pin</div>
+</div>
+
+<script>
+const TAU=Math.PI*2;
+const S={resolved:'--s-resolved','off-track':'--s-offtrack',ongoing:'--s-ongoing',revisited:'--s-revisited',new:'--s-new'};
+const REL={continuation:'#3b82f6',resolution:'#22c55e',escalation:'#ef4444',recurring:'#f3a738',reference:'#8b5cf6'};
+function cssv(n){return getComputedStyle(document.documentElement).getPropertyValue(n).trim();}
+
+/* ---------- sample data (mirrors the app's meeting/topic/person/decision/action model) ---------- */
+const meetings=[
+ {id:'m1',t:'Q3 Planning',date:'Jun 2',people:['Aisha','Dan','Priya'],
+   topics:[{name:'Roadmap scope',status:'ongoing',summary:'Locked the three pillars for Q3; mobile pushed to Q4.'},
+           {name:'Hiring plan',status:'off-track',summary:'Two backfills still open — blocking the platform track.'},
+           {name:'Pricing tiers',status:'revisited',summary:'Re-opened Pro Plus limits after sales feedback.'}],
+   decisions:['Mobile app moves to Q4','Freeze new infra spend until reconciliation'],
+   actions:[{task:'Draft hiring brief',owner:'Dan'},{task:'Model Pro Plus cost',owner:'Priya'}]},
+ {id:'m2',t:'Auth Redesign Sync',date:'Jun 5',people:['Dan','Leo'],
+   topics:[{name:'OAuth migration',status:'off-track',summary:'invalid_grant on sign-out still reproduces in prod.'},
+           {name:'Session model',status:'ongoing',summary:'Refresh-token rotation drafted, needs review.'}],
+   decisions:['Adopt PKCE for desktop callback'],
+   actions:[{task:'Patch stale-code handling',owner:'Leo'}]},
+ {id:'m3',t:'Pricing Strategy',date:'Jun 7',people:['Aisha','Priya','Sam'],
+   topics:[{name:'Pricing tiers',status:'ongoing',summary:'Pro / Pro Plus / Enterprise framing agreed.'},
+           {name:'Cost controls',status:'new',summary:'Per-account spend breaker proposed for launch.'},
+           {name:'Usage metering',status:'off-track',summary:'Server-side calls escape the ledger today.'}],
+   decisions:['Friendly limits, hidden credits','Auto-degrade premium → standard on overage'],
+   actions:[{task:'Build reconciliation harness',owner:'Sam'},{task:'Define fair-use caps',owner:'Aisha'}]},
+ {id:'m4',t:'Onboarding Review',date:'Jun 9',people:['Priya','Leo'],
+   topics:[{name:'First-run flow',status:'resolved',summary:'Cut three steps; activation up in test.'},
+           {name:'Knowledge graph',status:'ongoing',summary:'Should preprocess server-side, not on tab open.'}],
+   decisions:['Preprocess KG on meeting completion'],
+   actions:[{task:'Spec background sweep',owner:'Leo'}]},
+ {id:'m5',t:'Infra Cost Audit',date:'Jun 11',people:['Sam','Dan'],
+   topics:[{name:'Cost controls',status:'ongoing',summary:'Token + audio metering gaps catalogued.'},
+           {name:'Knowledge graph',status:'revisited',summary:'Reasoning over 10 meetings at once was inaccurate.'}],
+   decisions:['Bound reasoning to top-K neighbours'],
+   actions:[{task:'Move KG extraction to cron',owner:'Sam'}]},
+ {id:'m6',t:'Design Critique',date:'Jun 12',people:['Aisha','Mara'],
+   topics:[{name:'Graph UI',status:'new',summary:'Wants a powerful, premium constellation view.'},
+           {name:'First-run flow',status:'resolved',summary:'Signed off on the trimmed onboarding.'}],
+   decisions:['Adopt warm-amber constellation aesthetic'],
+   actions:[{task:'Prototype graph redesign',owner:'Mara'}]},
+ {id:'m7',t:'Launch Readiness',date:'Jun 13',people:['Aisha','Dan','Sam','Priya'],
+   topics:[{name:'Pricing tiers',status:'resolved',summary:'Tiers finalised with fair-use + overage lane.'},
+           {name:'Hiring plan',status:'off-track',summary:'Still one critical backfill open.'},
+           {name:'Usage metering',status:'revisited',summary:'Native paths still need instrumenting.'}],
+   decisions:['Gate launch on metering coverage'],
+   actions:[{task:'Instrument native calls',owner:'Sam'}]},
+ {id:'m8',t:'Weekly Sync',date:'Jun 14',people:['Dan','Leo','Priya'],
+   topics:[{name:'OAuth migration',status:'resolved',summary:'Sign-out error fixed; clean messaging shipped.'},
+           {name:'Knowledge graph',status:'ongoing',summary:'Turbopuffer ANN linking live and verified.'}],
+   decisions:['Enable instant fast-path trigger'],
+   actions:[{task:'Test server render flag',owner:'Priya'}]},
+];
+const rels=[
+ ['m1','m3','recurring','Pricing tiers carried from planning into a dedicated strategy session'],
+ ['m3','m7','resolution','Pricing tiers finalised after the strategy session'],
+ ['m2','m8','resolution','The OAuth sign-out error was fixed by the weekly sync'],
+ ['m4','m5','continuation','Knowledge-graph preprocessing continued into the cost audit'],
+ ['m5','m8','continuation','KG reasoning approach matured into the live ANN linking'],
+ ['m3','m5','reference','Cost controls referenced across pricing and infra'],
+ ['m1','m7','escalation','Hiring plan stayed off-track from planning to launch readiness'],
+ ['m6','m8','reference','Graph redesign discussion references the live KG work'],
+];
+
+/* ---------- build node/link graph ---------- */
+let nodes=[],links=[],byId={};
+function build(){
+ nodes=[];links=[];byId={};
+ const tIndex={}, pIndex={};
+ meetings.forEach((m,i)=>{
+   const a=(i/meetings.length)*TAU, R=230;
+   const mn={id:m.id,type:'meeting',label:m.t,data:m,x:Math.cos(a)*R+(Math.random()*40-20),y:Math.sin(a)*R+(Math.random()*40-20),vx:0,vy:0,r:15};
+   nodes.push(mn);byId[m.id]=mn;
+   m.topics.forEach(tp=>{
+     const key='t_'+tp.name.toLowerCase();
+     if(!tIndex[key]){const tn={id:key,type:'topic',label:tp.name,data:{...tp,statuses:[tp.status]},x:mn.x+(Math.random()*80-40),y:mn.y+(Math.random()*80-40),vx:0,vy:0,r:8};nodes.push(tn);byId[key]=tn;tIndex[key]=tn;}
+     else tIndex[key].data.statuses.push(tp.status);
+     links.push({s:m.id,t:key,kind:'mt'});
+   });
+   m.people.forEach(p=>{
+     const key='p_'+p;
+     if(!pIndex[key]){const pn={id:key,type:'person',label:p,data:{name:p,meetings:[m.t]},x:mn.x+(Math.random()*70-35),y:mn.y+(Math.random()*70-35),vx:0,vy:0,r:6};nodes.push(pn);byId[key]=pn;pIndex[key]=pn;}
+     else pIndex[key].data.meetings.push(m.t);
+     links.push({s:m.id,t:key,kind:'mp'});
+   });
+   m.decisions.forEach((d,di)=>{const id='d_'+m.id+di;const dn={id,type:'decision',label:d,data:{decision:d,meeting:m.t},x:mn.x+(Math.random()*60-30),y:mn.y+(Math.random()*60-30),vx:0,vy:0,r:6};nodes.push(dn);byId[id]=dn;links.push({s:m.id,t:id,kind:'md'});});
+   m.actions.forEach((ac,ai)=>{const id='a_'+m.id+ai;const an={id,type:'action',label:ac.task,data:{...ac,meeting:m.t},x:mn.x+(Math.random()*60-30),y:mn.y+(Math.random()*60-30),vx:0,vy:0,r:5};nodes.push(an);byId[id]=an;links.push({s:m.id,t:id,kind:'ma'});});
+ });
+ rels.forEach(([a,b,kind,thread])=>links.push({s:a,t:b,kind:'rel',rel:kind,thread}));
+ document.getElementById('nN').textContent=meetings.length;
+ document.getElementById('lN').textContent=rels.length;
+}
+build();
+
+/* ---------- node colour ---------- */
+function topicColor(n){const st=n.data.statuses||[n.data.status];const order=['off-track','revisited','ongoing','new','resolved'];for(const o of order)if(st.includes(o))return cssv(S[o]);return cssv('--s-new');}
+function nodeColor(n){if(n.type==='meeting')return cssv('--t-meeting');if(n.type==='topic')return topicColor(n);if(n.type==='person')return cssv('--t-person');if(n.type==='decision')return cssv('--t-decision');return cssv('--t-action');}
+
+/* ---------- canvas + camera ---------- */
+const cv=document.getElementById('g'),ctx=cv.getContext('2d');
+const mini=document.getElementById('mini'),mctx=mini.getContext('2d');
+let W,H,DPR=Math.min(devicePixelRatio||1,2);
+let cam={x:0,y:0,z:1};
+function resize(){W=innerWidth;H=innerHeight;cv.width=W*DPR;cv.height=H*DPR;cv.style.width=W+'px';cv.style.height=H+'px';ctx.setTransform(DPR,0,0,DPR,0,0);mini.width=150*DPR;mini.height=104*DPR;mctx.setTransform(DPR,0,0,DPR,0,0);}
+addEventListener('resize',resize);resize();
+function toScreen(n){return{x:(n.x-cam.x)*cam.z+W/2,y:(n.y-cam.y)*cam.z+H/2};}
+function toWorld(sx,sy){return{x:(sx-W/2)/cam.z+cam.x,y:(sy-H/2)/cam.z+cam.y};}
+
+/* ---------- force sim ---------- */
+function sim(){
+ for(const n of nodes){if(n.pin)continue;
+   for(const o of nodes){if(o===n)continue;const dx=n.x-o.x,dy=n.y-o.y;let d2=dx*dx+dy*dy;if(d2<1)d2=1;const f=2600/d2;n.vx+=dx*f/Math.sqrt(d2);n.vy+=dy*f/Math.sqrt(d2);}
+   n.vx+=(-n.x)*0.0016;n.vy+=(-n.y)*0.0016;
+ }
+ for(const l of links){const a=byId[l.s],b=byId[l.t];if(!a||!b)continue;const dx=b.x-a.x,dy=b.y-a.y;const d=Math.sqrt(dx*dx+dy*dy)||1;const target=l.kind==='rel'?260:(l.kind==='mt'?78:60);const f=(d-target)*0.014;const ux=dx/d,uy=dy/d;if(!a.pin){a.vx+=ux*f;a.vy+=uy*f;}if(!b.pin){b.vx-=ux*f;b.vy-=uy*f;}}
+ for(const n of nodes){if(n.pin){n.x=n.fx;n.y=n.fy;continue;}n.vx*=0.86;n.vy*=0.86;n.x+=n.vx;n.y+=n.vy;}
+}
+
+/* ---------- state ---------- */
+let hover=null,selected=null,lens='all',view='constellation',t=0;
+const recentSet=new Set(['m5','m6','m7','m8']);
+function dimmed(n){
+ if(view==='constellation'&&n.type!=='meeting')return true;
+ if(lens==='offtrack'){const off=n.type==='topic'&&(n.data.statuses||[]).includes('off-track');const near=n.type==='meeting'&&n.data.topics.some(tp=>tp.status==='off-track');if(!off&&!near&&n.type!=='meeting')return true;if(n.type==='meeting'&&!near)return true;}
+ if(lens==='people'&&!(n.type==='person'||n.type==='meeting'))return true;
+ if(lens==='decisions'&&!(n.type==='decision'||n.type==='meeting'))return true;
+ if(lens==='recent'&&n.type==='meeting'&&!recentSet.has(n.id))return true;
+ if(hover){const nb=neighbors(hover);if(n!==hover&&!nb.has(n.id))return true;}
+ return false;
+}
+function neighbors(n){const s=new Set();links.forEach(l=>{if(l.s===n.id)s.add(l.t);if(l.t===n.id)s.add(l.s);});return s;}
+
+/* ---------- render ---------- */
+function draw(){
+ t+=1;sim();
+ ctx.clearRect(0,0,W,H);
+ // vignette grid
+ const gs=46*cam.z;if(gs>14){ctx.strokeStyle=cssv('--grid');ctx.lineWidth=1;const ox=(W/2-cam.x*cam.z)%gs,oy=(H/2-cam.y*cam.z)%gs;ctx.beginPath();for(let x=ox;x<W;x+=gs){ctx.moveTo(x,0);ctx.lineTo(x,H);}for(let y=oy;y<H;y+=gs){ctx.moveTo(0,y);ctx.lineTo(W,y);}ctx.stroke();}
+ // links
+ for(const l of links){const a=byId[l.s],b=byId[l.t];if(!a||!b)continue;
+   if(view==='constellation'&&l.kind!=='rel')continue;
+   const A=toScreen(a),B=toScreen(b);const dim=dimmed(a)&&dimmed(b);
+   if(l.kind==='rel'){const c=REL[l.rel];ctx.strokeStyle=c+(dim?'22':'cc');ctx.lineWidth=dim?1:2;ctx.setLineDash([]);ctx.beginPath();ctx.moveTo(A.x,A.y);ctx.lineTo(B.x,B.y);ctx.stroke();
+     if(!dim){const prog=((t*0.6)%60)/60;for(let k=0;k<2;k++){const p=(prog+k*0.5)%1;const px=A.x+(B.x-A.x)*p,py=A.y+(B.y-A.y)*p;ctx.fillStyle=c;ctx.globalAlpha=Math.sin(p*Math.PI);ctx.beginPath();ctx.arc(px,py,2.4,0,TAU);ctx.fill();ctx.globalAlpha=1;}}
+   }else{ctx.strokeStyle=cssv('--border-strong');ctx.globalAlpha=dim?0.12:0.5;ctx.lineWidth=1;ctx.setLineDash([2,4]);ctx.beginPath();ctx.moveTo(A.x,A.y);ctx.lineTo(B.x,B.y);ctx.stroke();ctx.globalAlpha=1;ctx.setLineDash([]);}
+ }
+ // nodes
+ for(const n of nodes){if(view==='constellation'&&n.type!=='meeting')continue;
+   const P=toScreen(n),r=n.r*cam.z,col=nodeColor(n),dim=dimmed(n),sel=selected===n,hov=hover===n;
+   ctx.globalAlpha=dim?0.22:1;
+   // glow
+   if(!dim){const g=ctx.createRadialGradient(P.x,P.y,0,P.x,P.y,r*(n.type==='meeting'?3.4:2.4));g.addColorStop(0,col+(n.type==='meeting'?'66':'40'));g.addColorStop(1,col+'00');ctx.fillStyle=g;ctx.beginPath();ctx.arc(P.x,P.y,r*(n.type==='meeting'?3.4:2.4),0,TAU);ctx.fill();}
+   // selection / hover ring
+   if(sel||hov){ctx.strokeStyle=cssv('--accent');ctx.globalAlpha=sel?0.9:0.5;ctx.lineWidth=2;ctx.beginPath();ctx.arc(P.x,P.y,r+6,0,TAU);ctx.stroke();ctx.globalAlpha=dim?0.22:1;}
+   // body
+   ctx.beginPath();ctx.arc(P.x,P.y,r,0,TAU);ctx.fillStyle=col;ctx.fill();
+   if(n.type==='meeting'){ctx.lineWidth=2;ctx.strokeStyle=cssv('--canvas');ctx.stroke();ctx.fillStyle=cssv('--canvas');ctx.beginPath();ctx.arc(P.x,P.y,r*0.34,0,TAU);ctx.fill();}
+   // label
+   const showLbl=sel||hov||n.type==='meeting'&&cam.z>0.62||n.type==='topic'&&cam.z>1.25;
+   if(showLbl&&!dim){ctx.font=(n.type==='meeting'?'600 ':'500 ')+(n.type==='meeting'?13:11)+'px Inter';const tw=ctx.measureText(n.label).width;const lx=P.x,ly=P.y+r+(n.type==='meeting'?16:12);ctx.fillStyle=cssv('--panel');ctx.globalAlpha=0.8;roundRect(lx-tw/2-7,ly-10,tw+14,18,6);ctx.fill();ctx.globalAlpha=1;ctx.fillStyle=cssv('--fg');ctx.textAlign='center';ctx.textBaseline='middle';ctx.fillText(n.label,lx,ly);}
+   ctx.globalAlpha=1;
+ }
+ ctx.textAlign='left';ctx.textBaseline='alphabetic';
+ drawMini();
+ requestAnimationFrame(draw);
+}
+function roundRect(x,y,w,h,r){ctx.beginPath();ctx.moveTo(x+r,y);ctx.arcTo(x+w,y,x+w,y+h,r);ctx.arcTo(x+w,y+h,x,y+h,r);ctx.arcTo(x,y+h,x,y,r);ctx.arcTo(x,y,x+w,y,r);ctx.closePath();}
+function drawMini(){mctx.clearRect(0,0,150,104);let minx=1e9,miny=1e9,maxx=-1e9,maxy=-1e9;for(const n of nodes){minx=Math.min(minx,n.x);miny=Math.min(miny,n.y);maxx=Math.max(maxx,n.x);maxy=Math.max(maxy,n.y);}const sc=Math.min(140/(maxx-minx+1),94/(maxy-miny+1));const ox=5-minx*sc,oy=5-miny*sc;for(const n of nodes){if(n.type!=='meeting'&&view==='constellation')continue;mctx.fillStyle=nodeColor(n);mctx.globalAlpha=0.9;mctx.beginPath();mctx.arc(n.x*sc+ox,n.y*sc+oy,n.type==='meeting'?2.6:1.4,0,TAU);mctx.fill();}mctx.globalAlpha=1;const tl=toWorld(0,0),br=toWorld(W,H);mctx.strokeStyle=cssv('--accent');mctx.lineWidth=1;mctx.strokeRect(tl.x*sc+ox,tl.y*sc+oy,(br.x-tl.x)*sc,(br.y-tl.y)*sc);}
+draw();
+
+/* ---------- interaction ---------- */
+function pick(sx,sy){let best=null,bd=1e9;for(const n of nodes){if(view==='constellation'&&n.type!=='meeting')continue;const P=toScreen(n);const d=Math.hypot(P.x-sx,P.y-sy);if(d<n.r*cam.z+8&&d<bd){bd=d;best=n;}}return best;}
+let drag=null,pan=null,moved=false;
+cv.addEventListener('mousemove',e=>{const sx=e.clientX,sy=e.clientY;if(drag){const w=toWorld(sx,sy);drag.fx=drag.x=w.x;drag.fy=drag.y=w.y;drag.pin=true;moved=true;return;}if(pan){cam.x-=(sx-pan.x)/cam.z;cam.y-=(sy-pan.y)/cam.z;pan={x:sx,y:sy};moved=true;return;}const n=pick(sx,sy);hover=n;cv.style.cursor=n?'pointer':'grab';});
+cv.addEventListener('mousedown',e=>{moved=false;const n=pick(e.clientX,e.clientY);if(n){drag=n;}else{pan={x:e.clientX,y:e.clientY};cv.style.cursor='grabbing';}});
+addEventListener('mouseup',e=>{if(drag&&!moved)select(drag);else if(pan&&!moved&&!pick(e.clientX,e.clientY))select(null);drag=null;pan=null;cv.style.cursor='grab';});
+cv.addEventListener('wheel',e=>{e.preventDefault();const f=e.deltaY<0?1.12:1/1.12;const w=toWorld(e.clientX,e.clientY);cam.z=Math.max(0.3,Math.min(6,cam.z*f));const w2=toWorld(e.clientX,e.clientY);cam.x+=w.x-w2.x;cam.y+=w.y-w2.y;},{passive:false});
+document.getElementById('zin').onclick=()=>cam.z=Math.min(6,cam.z*1.3);
+document.getElementById('zout').onclick=()=>cam.z=Math.max(0.3,cam.z/1.3);
+document.getElementById('zfit').onclick=fit;
+function fit(){let minx=1e9,miny=1e9,maxx=-1e9,maxy=-1e9;for(const n of nodes){if(view==='constellation'&&n.type!=='meeting')continue;minx=Math.min(minx,n.x);miny=Math.min(miny,n.y);maxx=Math.max(maxx,n.x);maxy=Math.max(maxy,n.y);}cam.x=(minx+maxx)/2;cam.y=(miny+maxy)/2;cam.z=Math.min(W/(maxx-minx+160),H/(maxy-miny+160));}
+setTimeout(fit,400);
+
+/* ---------- selection + detail ---------- */
+const detail=document.getElementById('detail'),controls=document.getElementById('controls'),miniEl=document.getElementById('mini');
+function select(n){selected=n;if(!n){detail.classList.remove('open');controls.classList.add('shifted');miniEl.classList.add('shifted');return;}
+ detail.classList.add('open');controls.classList.remove('shifted');miniEl.classList.remove('shifted');
+ const w=toWorld(W/2,H/2);cam.x+=(n.x-w.x)*0.6;cam.y+=(n.y-w.y)*0.6;renderDetail(n);}
+controls.classList.add('shifted');miniEl.classList.add('shifted');
+document.getElementById('dClose').onclick=()=>select(null);
+function statusPill(st){const c=cssv(S[st]||'--s-new');return `<span class="tstat" style="background:${c}22;color:${c}">${st}</span>`;}
+function renderDetail(n){
+ document.getElementById('dDot').style.background=nodeColor(n);
+ document.getElementById('dType').textContent=n.type;
+ document.getElementById('dTitle').textContent=n.label;
+ const meta=document.getElementById('dMeta'),body=document.getElementById('dBody');meta.innerHTML='';body.innerHTML='';
+ if(n.type==='meeting'){const m=n.data;
+   meta.innerHTML=`<span>⌚ ${m.date}</span><span>◷ ${m.topics.length} topics</span><span>⊹ ${m.people.length} people</span>`;
+   body.innerHTML=`
+   <div class="sec"><div class="lbl">Topics</div>${m.topics.map(tp=>{const c=cssv(S[tp.status]||'--s-new');return `<div class="topicRow"><span class="bar" style="background:${c}"></span><div style="flex:1"><div style="display:flex;justify-content:space-between;gap:8px"><span class="tname">${tp.name}</span>${statusPill(tp.status)}</div><div class="tsum">${tp.summary}</div></div></div>`}).join('')}</div>
+   <div class="sec"><div class="lbl">People</div>${m.people.map(p=>`<span class="chip"><span style="width:18px;height:18px;border-radius:50%;background:var(--accent-soft);color:var(--accent);display:grid;place-items:center;font-size:9px;font-weight:600">${p[0]}</span>${p}</span>`).join('')}</div>
+   <div class="sec"><div class="lbl">Decisions</div>${m.decisions.map(d=>`<div class="chip" style="display:flex;width:100%;margin-bottom:6px"><span class="sdot" style="background:var(--t-decision)"></span>${d}</div>`).join('')}</div>
+   <div class="sec"><div class="lbl">Action items</div>${m.actions.map(a=>`<div class="topicRow"><span class="bar" style="background:var(--t-action)"></span><div><div class="tname">${a.task}</div><div class="tsum">Owner · ${a.owner}</div></div></div>`).join('')}</div>
+   <div class="sec"><div class="lbl">Connected meetings</div>${rels.filter(r=>r[0]===m.id||r[1]===m.id).map(r=>{const other=byId[r[0]===m.id?r[1]:r[0]];const c=REL[r[2]];return `<div class="relCard" onclick="window.__sel('${other.id}')"><div class="top"><span class="rtitle">${other.label}</span><span class="relBadge" style="background:${c}22;color:${c}">${r[2]}</span></div><div class="thread">${r[3]}</div></div>`}).join('')||'<div class="tsum">No links yet.</div>'}</div>`;
+ }else if(n.type==='topic'){const st=n.data.statuses||[n.data.status];
+   meta.innerHTML=`<span>appears in ${st.length} meeting${st.length>1?'s':''}</span>`;
+   body.innerHTML=`<div class="sec">${statusPill(st[st.length-1])}<p class="tsum" style="margin-top:10px">${n.data.summary}</p></div>
+   <div class="sec"><div class="lbl">Status evolution</div>${st.map((s,i)=>`<div class="topicRow"><span class="bar" style="background:${cssv(S[s]||'--s-new')}"></span><div><div class="tname" style="font-size:12px">Mention ${i+1}</div>${statusPill(s)}</div></div>`).join('')}</div>`;
+ }else if(n.type==='person'){
+   meta.innerHTML=`<span>in ${n.data.meetings.length} meetings</span>`;
+   body.innerHTML=`<div class="sec" style="display:flex;align-items:center;gap:12px"><div class="avatar">${n.data.name[0]}</div><div><div class="tname">${n.data.name}</div><div class="tsum">${n.data.meetings.length} meetings</div></div></div><div class="sec"><div class="lbl">Present in</div>${[...new Set(n.data.meetings)].map(mt=>`<div class="chip" style="display:flex;width:100%;margin-bottom:6px"><span class="sdot" style="background:var(--t-meeting)"></span>${mt}</div>`).join('')}</div>`;
+ }else if(n.type==='decision'){meta.innerHTML=`<span>${n.data.meeting}</span>`;body.innerHTML=`<div class="sec"><p class="tsum" style="font-size:14px;color:var(--fg)">${n.data.decision}</p></div><div class="sec"><div class="lbl">From meeting</div><div class="chip"><span class="sdot" style="background:var(--t-meeting)"></span>${n.data.meeting}</div></div>`;}
+ else{meta.innerHTML=`<span>${n.data.meeting}</span>`;body.innerHTML=`<div class="sec"><p class="tsum" style="font-size:14px;color:var(--fg)">${n.data.task}</p></div><div class="sec"><div class="lbl">Owner</div><div class="chip"><span style="width:18px;height:18px;border-radius:50%;background:var(--accent-soft);color:var(--accent);display:grid;place-items:center;font-size:9px;font-weight:600">${n.data.owner[0]}</span>${n.data.owner}</div></div>`;}
+}
+window.__sel=id=>select(byId[id]);
+
+/* ---------- lenses + view + theme + search ---------- */
+document.getElementById('lenses').addEventListener('click',e=>{const el=e.target.closest('.lens');if(!el)return;document.querySelectorAll('.lens').forEach(x=>x.classList.remove('on'));el.classList.add('on');lens=el.dataset.lens;});
+document.getElementById('viewSeg').addEventListener('click',e=>{const b=e.target.closest('button');if(!b)return;document.querySelectorAll('#viewSeg button').forEach(x=>x.classList.remove('on'));b.classList.add('on');view=b.dataset.v;setTimeout(fit,50);});
+document.getElementById('themeBtn').onclick=()=>{const r=document.documentElement;const d=r.getAttribute('data-theme')==='dark';r.setAttribute('data-theme',d?'light':'dark');document.getElementById('themeBtn').textContent=d?'☀':'☾';};
+const search=document.getElementById('search');
+addEventListener('keydown',e=>{if((e.metaKey||e.ctrlKey)&&e.key==='k'){e.preventDefault();search.focus();}});
+search.addEventListener('input',()=>{const q=search.value.toLowerCase().trim();if(!q)return;const hit=nodes.find(n=>n.label.toLowerCase().includes(q)&&(view==='detail'||n.type==='meeting'));if(hit){select(hit);cam.z=1.4;}});
+setTimeout(()=>document.getElementById('processing').style.display='none',4200);
+</script>
+</body>
+</html>

@@ -1,5 +1,6 @@
 import { fetch as tauriFetch } from '@tauri-apps/plugin-http';
 import { getIdToken } from './awsAuthService';
+import { MODELS } from '../config/models';
 
 /**
  * Client-side AI proxy wrapper.
@@ -90,6 +91,41 @@ export async function transcribeAudioBlob(blob: Blob): Promise<string> {
   return (data.text || '').trim();
 }
 
+/** Is the server-side chat agent enabled? (Off by default — opt in after deploy.) */
+export function isServerChatEnabled(): boolean {
+  return import.meta.env.VITE_SERVER_CHAT === '1';
+}
+
+export interface ServerChatResult {
+  answer: string;
+  meetings: Array<{ id: string; title: string; date: string }>;
+  scope?: string;
+  dateLabel?: string;
+}
+
+/**
+ * Call the SERVER-SIDE chat agent (Tier-0 architecture): retrieval + grounded
+ * synthesis run entirely in the Lambda, tenant-isolated and bounded — the corpus
+ * never reaches the browser. Returns the answer + the meetings it used.
+ */
+export async function serverChat(opts: {
+  query: string;
+  scope?: 'all' | 'workspace' | 'single';
+  workspaceId?: string;
+  taskId?: string;
+  history?: Array<{ role: 'user' | 'model'; text: string }>;
+  model?: 'gemini' | 'claude';
+}): Promise<ServerChatResult> {
+  const token = await getIdToken();
+  const resp = await baseFetch(`${API_BASE}/ai/chat`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json', Authorization: token },
+    body: JSON.stringify(opts),
+  });
+  if (!resp.ok) throw new Error(`Server chat failed: ${resp.status}`);
+  return resp.json();
+}
+
 /**
  * Report a finished transcription session's audio duration to the backend so it
  * lands in Braintrust + usage metering. The realtime meeting stream goes
@@ -114,7 +150,7 @@ export async function reportTranscriptionUsage(opts: {
       body: JSON.stringify({
         mode: opts.mode,
         duration_seconds: Math.round(opts.durationSeconds),
-        model: opts.model || 'nova-3',
+        model: opts.model || MODELS.deepgram.primary,
         words: opts.words ?? 0,
         language: opts.language || (opts.mode === 'realtime' ? 'multi' : 'en'),
       }),

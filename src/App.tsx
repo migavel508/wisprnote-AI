@@ -1,4 +1,4 @@
-import React, { useState, useRef, useEffect, useCallback } from 'react';
+import React, { useState, useRef, useEffect, useCallback, useMemo } from 'react';
 import { Routes, Route, useNavigate, useLocation, useParams } from 'react-router-dom';
 import { 
   Upload, 
@@ -95,6 +95,7 @@ import {
   saveKnowledgeGraph,
   saveKnowledgeGraphBatch,
   getKnowledgeGraph,
+  getKnowledgeGraphForTask,
   KnowledgeGraphEntry,
   saveChatMessage,
   getChatHistory,
@@ -107,6 +108,7 @@ import {
   updateTaskSummary,
   updateTaskNotes,
 } from './services/awsService';
+import { buildMeetingCard, type KGLite } from './services/meetingEvidence';
 import { cacheGet, cacheSet, cacheClearUser, type CachedHistoryPayload } from './services/appCache';
 import { getContacts, type Contact } from './services/workspaceService';
 import { getSession, onAuthStateChange, signOut, getUserId, type AuthSession } from './services/awsAuthService';
@@ -171,6 +173,8 @@ import { ManualNoteEditor } from './components/ManualNotes/ManualNoteEditor';
 import { logger } from './lib/logger';
 import { readKGLedger, markKGExtracted, markKGExtractedBatch, clearKGLedger, reconcileKGLedger } from './lib/kgLedger';
 import { clearArtifactCache } from './lib/kgArtifactCache';
+import { mergePeopleWithAttendees } from './lib/peopleResolve';
+import { MODELS } from './config/models';
 import { clearAllEmbedCaches } from './lib/knowledgeGraph.utils';
 import { loadUserLedgerState, resetUserLedgers } from './services/awsLedgerService';
 
@@ -640,6 +644,21 @@ export default function App() {
   
   // Knowledge Graph State
   const [kgData, setKgData] = useState<any[]>([]);
+  // People in the graph come from the transcript (which can mis-hear names). Fold
+  // in each meeting's authoritative attendee mapping — correct spelling, and
+  // misspelled extracted names collapse into the real attendee. See peopleResolve.
+  const kgDataWithAttendees = useMemo(() => {
+    const attendeesByTask = new Map<string, string[]>();
+    for (const t of history) {
+      if (t.id && Array.isArray(t.attendees) && t.attendees.length) attendeesByTask.set(t.id, t.attendees);
+    }
+    if (attendeesByTask.size === 0) return kgData;
+    return kgData.map((m: any) => {
+      const att = attendeesByTask.get(m.meetingId);
+      if (!att) return m;
+      return { ...m, attendees: att, people: mergePeopleWithAttendees(m.people, att) };
+    });
+  }, [kgData, history]);
   const [isLoadingKG, setIsLoadingKG] = useState(false);
   const [kgProgress, setKgProgress] = useState({ current: 0, total: 0 });
   const [isExtractingNewKG, setIsExtractingNewKG] = useState(false); // Track background extraction
@@ -1826,7 +1845,7 @@ export default function App() {
           void reportTranscriptionUsage({
             mode: 'realtime',
             durationSeconds: recordingTime,
-            model: 'nova-3',
+            model: MODELS.deepgram.primary,
             language: 'multi',
             words: transcriptToUse.split(/\s+/).filter(Boolean).length,
           });
@@ -2018,7 +2037,7 @@ export default function App() {
           .catch(err => log.error('kg_background_extraction_failed', { error: err instanceof Error ? err : undefined }))
           .finally(() => setIsExtractingNewKG(false));
 
-        indexMeetingTranscription(savedTask.id, savedTask.filename, savedTask.transcription!)
+        indexMeetingTranscription(savedTask.id, savedTask.filename, savedTask.transcription!, { createdAt: savedTask.created_at, attendees: savedTask.attendees })
           .then(() => log.info('turbopuffer_indexing_complete_realtime'))
           .catch(err => log.warn('turbopuffer_indexing_failed', { error: err instanceof Error ? err : undefined }));
       }
@@ -3034,12 +3053,28 @@ export default function App() {
         };
         updateStep('analyze', 'done');
 
+        // Prepend a structured header (date / attendees / action items /
+        // decisions / off-track topics) so single-meeting answers never drop
+        // who/when/what — parity with the multi-meeting evidence cards.
+        let kgLite: KGLite | null = null;
+        try {
+          const kg = await getKnowledgeGraphForTask(selectedTask!.id!);
+          if (kg) kgLite = { topics: kg.topics, decisions: kg.decisions, action_items: kg.action_items, people: kg.people };
+        } catch { /* non-fatal — header still carries date/attendees */ }
+        const meetingHeader = buildMeetingCard({
+          title: selectedTask!.filename || 'Untitled',
+          createdAt: selectedTask!.created_at,
+          attendees: selectedTask!.attendees,
+          kg: kgLite,
+          content: '',
+        });
+
         updateStep('respond', 'running');
         response = await chatWithNotes(
           {
             transcription: '',
             title: selectedTask!.filename || '',
-            preparedContext: retrievalPlan.context,
+            preparedContext: `${meetingHeader}\n\n${retrievalPlan.context}`,
             retrievalMeta: {
               scope: retrievalPlan.scope,
               confidence: retrievalPlan.confidence,
@@ -3098,18 +3133,39 @@ export default function App() {
 
         const turbopufferSearchFn = async (
           query: string,
-          filters?: { recent_days?: number },
+          filters?: { recent_days?: number; start_ms?: number; end_ms?: number; off_track?: boolean },
           limit?: number,
         ) => {
-          const hasDateFilter = !!(filters?.recent_days && filters.recent_days > 0);
+          // Deterministic absolute window (from the parsed query) takes precedence
+          // over the model's relative recent_days, so "this month / last 3 days /
+          // a specific date" filter reliably.
+          const hasAbsRange = typeof filters?.start_ms === 'number' && typeof filters?.end_ms === 'number';
+          const hasDateFilter = hasAbsRange || !!(filters?.recent_days && filters.recent_days > 0);
           let docsToSearch = allMeetings;
-          if (hasDateFilter) {
-            const cutoff = Date.now() - filters!.recent_days! * 24 * 60 * 60 * 1000;
+          if (hasAbsRange) {
+            docsToSearch = allMeetings.filter(m => {
+              const date = dateMap.get(m.meetingId);
+              if (!date) return false;
+              const t = new Date(date).getTime();
+              return t >= filters!.start_ms! && t <= filters!.end_ms!;
+            });
+          } else if (filters?.recent_days && filters.recent_days > 0) {
+            const cutoff = Date.now() - filters.recent_days * 24 * 60 * 60 * 1000;
             docsToSearch = allMeetings.filter(m => {
               const date = dateMap.get(m.meetingId);
               if (!date) return false;
               return new Date(date).getTime() >= cutoff;
             });
+          }
+          // Off-track intent → restrict to meetings whose knowledge graph flags an
+          // off-track/blocked topic.
+          if (filters?.off_track) {
+            const kg = await loadKG();
+            const OFF = new Set(['off-track', 'off track', 'blocked', 'stalled', 'at-risk', 'at risk']);
+            const offIds = new Set(
+              kg.filter(e => (e.topics ?? []).some(t => t.status && OFF.has(t.status.toLowerCase()))).map(e => e.task_id),
+            );
+            if (offIds.size) docsToSearch = docsToSearch.filter(m => offIds.has(m.meetingId));
           }
 
           // Floor at 8 so semantically-related meetings beyond the LLM's stated limit
@@ -3250,6 +3306,26 @@ export default function App() {
             .filter(m => m.summary?.trim())
             .map(m => `- ${m.title}: ${(m.summary || '').slice(0, 300)}`);
 
+          // Structured facts per candidate (date + attendees + KG action items /
+          // decisions / topic status) so the answer never drops who/when/what,
+          // even when transcript chunks miss them.
+          const kgForCards = await loadKG();
+          const kgById = new Map(kgForCards.map(e => [e.task_id, e]));
+          const attendeesMap = new Map(history.map(h => [h.id ?? '', (h.attendees ?? []) as string[]]));
+          const structuredBlocks = candidateDocs.map((m, i) => {
+            const dateStr = dateMap.get(m.meetingId);
+            const dateLabel = dateStr
+              ? new Date(dateStr).toLocaleDateString('en-US', { weekday: 'short', month: 'short', day: 'numeric', year: 'numeric' })
+              : 'unknown date';
+            const att = attendeesMap.get(m.meetingId) ?? [];
+            const kg = kgById.get(m.meetingId);
+            return [
+              `${i + 1}. ${m.title} — ${dateLabel}`,
+              att.length ? `Attendees: ${att.join(', ')}` : '',
+              kg ? formatKGEntry(kg) : '',
+            ].filter(Boolean).join('\n');
+          });
+
           const evidenceText = allEvidence
             .sort((a, b) => b.score - a.score)
             .slice(0, 20)
@@ -3259,6 +3335,9 @@ export default function App() {
           const contextText = [
             `=== COVERAGE ===\nSearched ${candidateDocs.length} of ${docsToSearch.length} meetings (Turbopuffer semantic + BM25 hybrid over transcript chunks)`,
             `=== SELECTED MEETINGS ===\n${candidateDocs.map((m, i) => `${i + 1}. ${m.title}`).join('\n')}`,
+            structuredBlocks.length
+              ? `=== STRUCTURED FACTS (date, attendees, action items, decisions, topic status — authoritative for who/when/what) ===\n${structuredBlocks.join('\n\n')}`
+              : '',
             summaryBlocks.length
               ? `=== AI-GENERATED MEETING SUMMARIES (may contain errors — treat as hints only, not ground truth) ===\n${summaryBlocks.join('\n')}`
               : '',
@@ -3389,9 +3468,6 @@ export default function App() {
             last_seen: c.last_seen,
           }));
 
-          const cutoffByDays = (days: number) => Date.now() - days * 24 * 60 * 60 * 1000;
-          const within30 = cutoffByDays(30);
-
           const meetingIdUnion = new Set<string>();
           for (const c of matchedContacts) for (const id of c.task_ids) meetingIdUnion.add(id);
           for (const id of kgMentions) meetingIdUnion.add(id);
@@ -3416,14 +3492,16 @@ export default function App() {
             })
             .filter(m => !!m.title);
 
-          const last30 = allMeetingsForQuery
-            .filter(m => m.dateStr && new Date(m.dateStr).getTime() >= within30)
+          // Full history (no 30-day cap): build deep evidence for the person's
+          // most recent meetings (capped for token budget); the rest are listed
+          // as titles. This fixes "you said X wasn't in any meetings" when the
+          // person only appears in older meetings.
+          const EVIDENCE_CAP = 15;
+          const byRecency = allMeetingsForQuery
+            .slice()
             .sort((a, b) => (b.dateStr ?? '').localeCompare(a.dateStr ?? ''));
-
-          const olderMeetings = allMeetingsForQuery
-            .filter(m => !last30.some(x => x.id === m.id))
-            .sort((a, b) => (b.dateStr ?? '').localeCompare(a.dateStr ?? ''))
-            .slice(0, 10);
+          const last30 = byRecency.slice(0, EVIDENCE_CAP);
+          const olderMeetings = byRecency.slice(EVIDENCE_CAP, EVIDENCE_CAP + 30);
 
           const surfacedMeetings = last30.map(m => ({
             meetingId: m.id,
@@ -3507,8 +3585,8 @@ export default function App() {
             matchedContacts.length
               ? `People-directory matches (${matchedContacts.length}):\n${contactHeaders.join('\n')}`
               : `No exact People-directory match — fell back to Knowledge Graph mentions across meetings.`,
-            `=== EVIDENCE: ${last30.length} meeting${last30.length !== 1 ? 's' : ''} in the last 30 days (union of attended + mentioned) ===`,
-            last30.length ? evidenceBlocks.join('\n\n') : '(no meetings in the last 30 days)',
+            `=== EVIDENCE: ${last30.length} most-recent meeting${last30.length !== 1 ? 's' : ''} across full history (union of attended + mentioned) ===`,
+            last30.length ? evidenceBlocks.join('\n\n') : '(no meetings found for this person)',
             olderMeetings.length
               ? `=== OLDER MEETINGS (titles only) ===\n${olderRows.join('\n')}`
               : '',
@@ -4426,7 +4504,7 @@ export default function App() {
           .catch(err => log.error('kg_background_extraction_failed', { error: err instanceof Error ? err : undefined }))
           .finally(() => setIsExtractingNewKG(false));
 
-        indexMeetingTranscription(savedTask.id, savedTask.filename, savedTask.transcription!)
+        indexMeetingTranscription(savedTask.id, savedTask.filename, savedTask.transcription!, { createdAt: savedTask.created_at, attendees: savedTask.attendees })
           .then(() => log.info('turbopuffer_indexing_complete_upload'))
           .catch(err => log.warn('turbopuffer_indexing_failed', { error: err instanceof Error ? err : undefined }));
       }
@@ -4868,7 +4946,7 @@ export default function App() {
 
             {currentView === 'knowledge' && (
               <KnowledgePage
-                kgData={kgData}
+                kgData={kgDataWithAttendees}
                 isLoadingKG={isLoadingKG}
                 kgProgress={kgProgress}
                 isExtractingNewKG={isExtractingNewKG}

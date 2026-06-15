@@ -51,6 +51,15 @@
   --color-app-accent: #f3a738;
   --color-app-accent-hover: #e8991f;
   --color-app-accent-fg: #1c1a17;
+  /* Knowledge-graph brand green (#819C1F) palette — light mode.
+     kg-accent = brand fill, kg-accent-soft = creamy light-green tint surface,
+     kg-glow = neon/glow on the graph canvas. */
+  --color-kg-accent: #819c1f;
+  --color-kg-accent-strong: #6f871a;
+  --color-kg-accent-fg: #ffffff;
+  --color-kg-accent-soft: #eef3dd;
+  --color-kg-accent-border: rgba(129, 156, 31, 0.42);
+  --color-kg-glow: #8fae28;
 }
 
 @layer theme {
@@ -94,6 +103,13 @@
     --color-app-accent: #f3a738;
     --color-app-accent-hover: #ffb74d;
     --color-app-accent-fg: #1c1a17;
+    /* KG green — brightened so it pops on the dark constellation canvas. */
+    --color-kg-accent: #a6c64a;
+    --color-kg-accent-strong: #b9d96a;
+    --color-kg-accent-fg: #16210b;
+    --color-kg-accent-soft: rgba(166, 198, 74, 0.16);
+    --color-kg-accent-border: rgba(166, 198, 74, 0.45);
+    --color-kg-glow: #b9d96a;
   }
 }
 

@@ -1,4 +1,4 @@
-import { initLogger, traced, flush, type Span } from 'braintrust';
+import { initLogger, traced, flush, setMaskingFunction, type Span } from 'braintrust';
 import { getSecrets } from './secrets';
 
 /**
@@ -15,13 +15,27 @@ import { getSecrets } from './secrets';
  */
 
 const PROJECT = process.env.BRAINTRUST_PROJECT || 'wisprnote-ai';
-// Log full request/response bodies (meeting content) to Braintrust. Set
-// BRAINTRUST_LOG_CONTENT=0 to log metadata only (model/latency/tokens/status).
-const LOG_CONTENT = (process.env.BRAINTRUST_LOG_CONTENT ?? '1') !== '0';
+// PRIVACY-SAFE DEFAULT: log metadata only (model/latency/tokens/status), NOT
+// meeting content. Logging full transcripts to a third party by default is a
+// GDPR/CCPA liability at scale. Opt INTO content logging with
+// BRAINTRUST_LOG_CONTENT=1 (and even then, PII is masked — see maskPII below).
+const LOG_CONTENT = (process.env.BRAINTRUST_LOG_CONTENT ?? '0') === '1';
 const MAX_FIELD = 100_000; // cap any single logged field (~100 KB)
 
 let initStarted = false;
 let enabled = false;
+
+/** Redact common PII (emails, phone numbers, SSNs, long digit runs) from any
+ *  string logged to Braintrust — defence-in-depth even when content logging is on. */
+function maskPII(value: unknown): unknown {
+  if (typeof value === 'string') {
+    return value
+      .replace(/[A-Za-z0-9._%+-]+@[A-Za-z0-9.-]+\.[A-Za-z]{2,}/g, '[email]')
+      .replace(/\b(?:\+?\d[\d\s().-]{7,}\d)\b/g, '[phone]')
+      .replace(/\b\d{3}-\d{2}-\d{4}\b/g, '[ssn]');
+  }
+  return value;
+}
 
 /** Initialise the Braintrust logger once per warm container. */
 async function ensureBraintrust(): Promise<boolean> {
@@ -31,6 +45,7 @@ async function ensureBraintrust(): Promise<boolean> {
     const secrets = await getSecrets();
     if (!secrets.BRAINTRUST_API_KEY) return (enabled = false);
     initLogger({ projectName: PROJECT, apiKey: secrets.BRAINTRUST_API_KEY });
+    try { setMaskingFunction(maskPII); } catch { /* older SDK — best effort */ }
     enabled = true;
   } catch (e) {
     console.error('Braintrust init failed (tracing disabled):', e);

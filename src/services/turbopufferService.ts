@@ -47,10 +47,20 @@ export interface ChunkForIndexing {
   vector: number[];
 }
 
+export interface ChunkMeta {
+  /** Meeting date (ISO) → stored as epoch ms for vector-layer date filtering. */
+  createdAt?: string;
+  /** Attendee names → enables person filtering at the vector layer. */
+  attendees?: string[];
+  /** Owning workspace (for workspace-scoped vector queries). */
+  workspaceId?: string;
+}
+
 export async function upsertMeetingChunks(
   meetingId: string,
   meetingTitle: string,
   chunks: ChunkForIndexing[],
+  meta?: ChunkMeta,
 ): Promise<void> {
   if (!chunks.length) return;
   const ns = getNamespace();
@@ -62,6 +72,9 @@ export async function upsertMeetingChunks(
   } catch {
     // namespace may not exist yet
   }
+
+  const createdMs = meta?.createdAt ? new Date(meta.createdAt).getTime() : undefined;
+  const attendeesStr = meta?.attendees?.length ? meta.attendees.join(', ') : undefined;
 
   // Each upserted row carries its full embedding vector (~3072 dims → tens of KB
   // of JSON). Turbopuffer writes are proxied through the authed Lambda, which has
@@ -79,6 +92,9 @@ export async function upsertMeetingChunks(
         meeting_title: meetingTitle,
         speakers: chunk.speakers.join(', '),
         chunk_index: chunk.chunkIndex,
+        ...(createdMs !== undefined ? { created_ms: createdMs } : {}),
+        ...(attendeesStr ? { attendees: attendeesStr } : {}),
+        ...(meta?.workspaceId ? { workspace_id: meta.workspaceId } : {}),
       })),
       distance_metric: 'cosine_distance',
       schema: {
@@ -87,6 +103,11 @@ export async function upsertMeetingChunks(
         meeting_title: { type: 'string' as const, filterable: false },
         speakers: { type: 'string' as const, filterable: false },
         chunk_index: { type: 'int' as const },
+        // New filterable attributes (populated on re-index) → vector-layer date /
+        // person / workspace filtering once the corpus is backfilled.
+        created_ms: { type: 'int' as const },
+        attendees: { type: 'string' as const, full_text_search: true },
+        workspace_id: { type: 'string' as const },
       },
     });
   }
@@ -212,6 +233,25 @@ export async function queryHybrid(
   });
 }
 
+/**
+ * Hybrid search constrained to a fixed set of meeting IDs — used by the
+ * workspace-scoped chat so semantic search can only return chunks from notes
+ * that belong to the workspace (and its folders). We over-fetch then post-filter
+ * to the allowed meeting set (avoids needing a Turbopuffer multi-value filter).
+ */
+export async function queryHybridScoped(
+  queryVector: number[],
+  queryText: string,
+  topK: number,
+  allowedMeetingIds: Set<string>,
+): Promise<HybridResult[]> {
+  if (allowedMeetingIds.size === 0) return [];
+  // Over-fetch so enough in-scope chunks survive the filter.
+  const wide = Math.min(Math.max(topK * 6, 30), 100);
+  const all = await queryHybrid(queryVector, queryText, wide);
+  return all.filter((r) => allowedMeetingIds.has(r.meetingId)).slice(0, topK);
+}
+
 // ─── Embedding helper ────────────────────────────────────────────────────────
 
 export async function embedQuery(text: string): Promise<number[]> {
@@ -230,6 +270,7 @@ export async function indexMeetingTranscription(
   meetingId: string,
   meetingTitle: string,
   transcription: string,
+  meta?: ChunkMeta,
 ): Promise<void> {
   if (!isTurbopufferConfigured() || !transcription.trim()) return;
 
@@ -259,7 +300,7 @@ export async function indexMeetingTranscription(
     })
     .filter((c): c is ChunkForIndexing => c !== null);
 
-  await upsertMeetingChunks(meetingId, meetingTitle, chunksForIndexing);
+  await upsertMeetingChunks(meetingId, meetingTitle, chunksForIndexing, meta);
   markTurbopufferIndexed(meetingId);
 }
 
