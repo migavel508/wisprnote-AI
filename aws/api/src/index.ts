@@ -9,6 +9,22 @@ import { handleAI } from './ai';
 import { handlePaddleWebhook, handleBilling, getUserPlan } from './billing';
 import { planLimits, planLabel } from './plans';
 import { ensureUsageSchema, getMeetingUsage, getBatchHoursUsage } from './usage';
+import { runKgSweep, runPipelineForMeeting } from './kgSweep';
+import { resetLinkState } from './kgLink';
+import { reindexMeetingVectors, ensureKgGraphSchema } from './kgEmbed';
+import { kickMeetingPipeline } from './kgTrigger';
+import { runConnectorSync } from './connectors/sync';
+import { ensureConnectorSchema } from './connectors/schema';
+import { deleteToken, storeToken } from './trust/broker';
+import { MCP_SERVERS, getMcpServer } from './mcp/registry';
+import { beginMcpOAuth, completeMcpOAuth, type OAuthInflight } from './mcp/oauth';
+import './connectors/registry'; // registers the no-op connector
+import './connectors/jira';      // registers the Jira (Atlassian MCP) connector
+
+// Desktop deep-link the OAuth provider redirects back to (validated client-side,
+// like the Google sign-in callback). If a provider's DCR rejects custom schemes,
+// switch this to a hosted https forwarder.
+const CONNECTOR_REDIRECT_URI = 'wisprnote://connector-callback';
 
 const S3_BUCKET = process.env.S3_BUCKET || '';
 const S3_REGION = process.env.AWS_REGION || 'us-east-1';
@@ -186,6 +202,87 @@ export const handler = async (event: APIGatewayProxyEvent): Promise<APIGatewayPr
     return { statusCode: 200, body: 'warm' } as APIGatewayProxyResult;
   }
 
+  // Background knowledge-graph sweep (EventBridge scheduled). Extracts the KG
+  // for any meetings that don't have one yet — no auth/HTTP, runs server-side
+  // regardless of whether a desktop app is open. See kgSweep.ts.
+  if ((event as any).__job === 'kg-sweep') {
+    try {
+      const r = await runKgSweep();
+      return { statusCode: 200, body: JSON.stringify(r) } as APIGatewayProxyResult;
+    } catch (err: any) {
+      console.error('kg_sweep_failed', JSON.stringify({ message: err?.message, code: err?.code, detail: err?.detail }));
+      return { statusCode: 500, body: 'kg-sweep-error' } as APIGatewayProxyResult;
+    }
+  }
+
+  // Maintenance: clear link state so every meeting re-links on the next sweeps
+  // (used after a model/prompt change). Background-only — not reachable via HTTP.
+  if ((event as any).__job === 'kg-relink') {
+    try {
+      const r = await resetLinkState();
+      return { statusCode: 200, body: JSON.stringify(r) } as APIGatewayProxyResult;
+    } catch (err: any) {
+      console.error('kg_relink_failed', JSON.stringify({ message: err?.message, code: err?.code }));
+      return { statusCode: 500, body: 'kg-relink-error' } as APIGatewayProxyResult;
+    }
+  }
+
+  // Fast-path: process ONE meeting's full pipeline (extract→embed→link) right
+  // after it's saved. Async self-invoke from the task-save path. Background-only.
+  if ((event as any).__job === 'kg-pipe-one') {
+    const { userId: u, taskId: t } = event as any;
+    try {
+      const r = await runPipelineForMeeting(u, t);
+      return { statusCode: 200, body: JSON.stringify(r) } as APIGatewayProxyResult;
+    } catch (err: any) {
+      console.error('kg_pipe_one_failed', JSON.stringify({ taskId: t, message: err?.message, code: err?.code }));
+      return { statusCode: 500, body: 'kg-pipe-one-error' } as APIGatewayProxyResult;
+    }
+  }
+
+  // Maintenance: pipeline stats (counts). Background-only — not reachable via HTTP.
+  if ((event as any).__job === 'kg-stats') {
+    try {
+      const edges = await queryOne(`SELECT
+          count(*) FILTER (WHERE similarity IS NOT NULL)::int AS similarity_edges,
+          count(*) FILTER (WHERE relationship_type IS NOT NULL)::int AS relationship_edges,
+          count(DISTINCT from_task)::int AS meetings_with_edges
+        FROM kg_edges`);
+      const linked = await queryOne(`SELECT count(*)::int AS c FROM kg_link_state`);
+      const emb = await queryOne(`SELECT count(*) FILTER (WHERE kind='meeting')::int AS meetings, count(*)::int AS total FROM kg_embeddings`);
+      return { statusCode: 200, body: JSON.stringify({ edges, linked, embeddings: emb }) } as APIGatewayProxyResult;
+    } catch (err: any) {
+      return { statusCode: 500, body: JSON.stringify({ error: err?.message }) } as APIGatewayProxyResult;
+    }
+  }
+
+  // Maintenance: backfill the Turbopuffer ANN index from Postgres meeting vectors
+  // (initial backfill + gap repair). Background-only — not reachable via HTTP.
+  if ((event as any).__job === 'kg-reindex-vectors') {
+    try {
+      const r = await reindexMeetingVectors();
+      return { statusCode: 200, body: JSON.stringify(r) } as APIGatewayProxyResult;
+    } catch (err: any) {
+      console.error('kg_reindex_failed', JSON.stringify({ message: err?.message, code: err?.code }));
+      return { statusCode: 500, body: 'kg-reindex-error' } as APIGatewayProxyResult;
+    }
+  }
+
+  // Connector sync (EventBridge). Drains connected credentials into knowledge_item
+  // (the connector-side twin of kg-sweep). Gated off until connectors are enabled.
+  if ((event as any).__job === 'connector-sync') {
+    if (process.env.CONNECTORS_ENABLED !== '1') {
+      return { statusCode: 200, body: JSON.stringify({ disabled: true }) } as APIGatewayProxyResult;
+    }
+    try {
+      const r = await runConnectorSync();
+      return { statusCode: 200, body: JSON.stringify(r) } as APIGatewayProxyResult;
+    } catch (err: any) {
+      console.error('connector_sync_failed', JSON.stringify({ message: err?.message, code: err?.code, detail: err?.detail }));
+      return { statusCode: 500, body: 'connector-sync-error' } as APIGatewayProxyResult;
+    }
+  }
+
   if (event.httpMethod === 'OPTIONS') return corsPreflightResponse();
 
   const path = event.path.replace(/^\/+|\/+$/g, '');
@@ -220,9 +317,10 @@ export const handler = async (event: APIGatewayProxyEvent): Promise<APIGatewayPr
       case 'storage':    return await handleStorage(method, segments, userId, event);
       case 'workspaces': return await handleWorkspaces(method, segments, userId, event);
       case 'folders':    return await handleFolders(method, segments, userId, event);
+      case 'connectors': return await handleConnectors(method, segments, userId, event);
       case 'contacts':   return await handleContacts(method, userId);
       case 'bootstrap':  return await handleBootstrap(userId);
-      case 'billing':    return await handleBilling(method, segments, userId);
+      case 'billing':    return await handleBilling(method, segments, userId, getUserEmail());
       case 'ai':         return await handleAI(method, segments, userId, event);
       default:           return notFound();
     }
@@ -259,7 +357,7 @@ async function handleTasks(method: string, segments: string[], userId: string, e
     // Free: 5 meetings total · Pro: 20/month + 5 batch hrs · Pro Plus: ∞ meetings
     // + 15 batch hrs · Enterprise: unlimited. Enforced here so it can't be
     // bypassed by the client.
-    const plan = await getUserPlan(userId);
+    const plan = await getUserPlan(userId, getUserEmail());
     const lim = planLimits(plan);
 
     if (lim.meetings !== null) {
@@ -297,6 +395,14 @@ async function handleTasks(method: string, segments: string[], userId: string, e
        VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13) RETURNING *`,
       [userId, body.filename, body.transcription, body.summary, body.notes, body.audio_url, body.status, body.duration || 0, body.prompt, body.personal_note, body.visualization_image, JSON.stringify(body.attendees ?? []), source]
     );
+    // Fast-path: kick this meeting's KG pipeline immediately (async self-invoke,
+    // best-effort) so the graph is ready before the user ever opens it. The cron
+    // sweep is the safety net. Gated by KG_FASTPATH=1 (enable only after the
+    // self-invoke IAM permission is in place) so there are no failed calls until
+    // then. Only when there's a real transcription to process.
+    if (process.env.KG_FASTPATH === '1' && row?.id && typeof body.transcription === 'string' && body.transcription.trim().length >= 50) {
+      await kickMeetingPipeline(userId, row.id);
+    }
     return created(row);
   }
 
@@ -447,6 +553,66 @@ async function handleNotes(method: string, segments: string[], userId: string, e
   return notFound();
 }
 
+// ─── CONNECTORS ─────────────────────────────────────────────────────────────
+// Per-user external-tool connections (MCP-based). GET returns connection status
+// for the UI; DELETE disconnects. OAuth connect (oauth-url/exchange) lands in UI-1.
+async function handleConnectors(method: string, segments: string[], userId: string, event: APIGatewayProxyEvent): Promise<APIGatewayProxyResult> {
+  if (process.env.CONNECTORS_ENABLED !== '1') return ok({ enabled: false, connectors: [] });
+  await ensureConnectorSchema();
+  const id = segments[1];
+
+  if (method === 'GET' && !id) {
+    const creds = await query<{ source: string; account: string | null }>(
+      `SELECT source, account FROM connector_credentials WHERE user_id=$1`, [userId],
+    );
+    const byId = new Map(creds.map((c) => [c.source, c]));
+    const connectors = Object.values(MCP_SERVERS).map((s) => ({
+      id: s.id,
+      connected: byId.has(s.id),
+      account: byId.get(s.id)?.account ?? null,
+      status: s.status,
+    }));
+    return ok({ enabled: true, connectors });
+  }
+
+  if (method === 'DELETE' && id) {
+    await deleteToken(userId, id);
+    return noContent();
+  }
+
+  // POST /connectors/{id}/oauth-url → discover + DCR + build the PKCE authorize URL.
+  if (method === 'POST' && id && segments[2] === 'oauth-url') {
+    const server = getMcpServer(id);
+    if (!server || !server.url) return badRequest('connector has no MCP endpoint');
+    const { authorizeUrl, inflight } = await beginMcpOAuth(server, CONNECTOR_REDIRECT_URI);
+    await query(
+      `INSERT INTO oauth_state (state, user_id, source, inflight) VALUES ($1,$2,$3,$4)
+       ON CONFLICT (state) DO UPDATE SET inflight=EXCLUDED.inflight, created_at=NOW()`,
+      [inflight.state, userId, id, JSON.stringify(inflight)],
+    );
+    return ok({ url: authorizeUrl });
+  }
+
+  // POST /connectors/{id}/exchange { code, state } → token → broker.
+  if (method === 'POST' && id && segments[2] === 'exchange') {
+    const body = parseBody(event);
+    const code = String(body.code || '');
+    const state = String(body.state || '');
+    if (!code || !state) return badRequest('missing code/state');
+    const row = await queryOne<{ inflight: OAuthInflight }>(
+      `SELECT inflight FROM oauth_state WHERE state=$1 AND user_id=$2 AND source=$3`,
+      [state, userId, id],
+    );
+    if (!row) return badRequest('unknown or expired oauth state');
+    const token = await completeMcpOAuth(row.inflight, code);
+    await storeToken(userId, id, token.raw, null, row.inflight.scope ? row.inflight.scope.split(' ') : null);
+    await query(`DELETE FROM oauth_state WHERE state=$1`, [state]);
+    return ok({ connected: true });
+  }
+
+  return notFound();
+}
+
 // ─── KNOWLEDGE GRAPH ────────────────────────────────────────────────────────
 
 async function handleKnowledgeGraph(method: string, segments: string[], userId: string, event: APIGatewayProxyEvent): Promise<APIGatewayProxyResult> {
@@ -472,6 +638,68 @@ async function handleKnowledgeGraph(method: string, segments: string[], userId: 
     return Array.isArray(body) ? ok(results) : ok(results[0]);
   }
 
+  // Precomputed cross-meeting edges (Stage C output) + processing status, so the
+  // client renders instantly without running its own embedding/relationship pass.
+  //
+  // Scoping (all optional — no params = the full graph, backward-compatible):
+  //   ?workspace=<id>   only meetings in that workspace
+  //   ?since=<ms>&until=<ms>   meeting-date window (epoch ms)
+  //   ?limit=<n>        cap to the N most-recent meetings (for large corpora)
+  // When scoped, edges are returned only between in-scope meetings (no dangling
+  // edges), and `meetings` lists the in-scope task_ids so the client can match nodes.
+  if (method === 'GET' && segments[1] === 'edges') {
+    await ensureKgGraphSchema();
+    const q = event.queryStringParameters || {};
+    const workspace = (q.workspace || '').trim() || null;
+    const sinceMs = q.since && /^\d+$/.test(q.since) ? Number(q.since) : null;
+    const untilMs = q.until && /^\d+$/.test(q.until) ? Number(q.until) : null;
+    const limit = q.limit && /^\d+$/.test(q.limit) ? Math.min(Number(q.limit), 5000) : null;
+    const scoped = !!(workspace || sinceMs || untilMs || limit);
+
+    const edgeCols = `from_task, to_task, similarity, relationship_type, shared_thread, confidence`;
+
+    if (!scoped) {
+      const edges = await query(`SELECT ${edgeCols} FROM kg_edges WHERE user_id=$1`, [userId]);
+      const processing = await query<{ task_id: string }>(
+        `SELECT kg.task_id FROM knowledge_graph kg
+           LEFT JOIN kg_link_state s ON s.user_id=kg.user_id AND s.task_id=kg.task_id
+          WHERE kg.user_id=$1 AND s.task_id IS NULL`,
+        [userId],
+      );
+      return ok({ edges, processing: processing.map((p) => p.task_id) });
+    }
+
+    // Resolve the in-scope meeting set (most-recent first, by meeting date).
+    const conds = ['kg.user_id = $1'];
+    const params: any[] = [userId];
+    let joins = ' JOIN task_history th ON th.id = kg.task_id AND th.user_id = kg.user_id';
+    if (workspace) { joins += ' JOIN task_workspaces tw ON tw.task_id = kg.task_id'; params.push(workspace); conds.push(`tw.workspace_id = $${params.length}`); }
+    if (sinceMs) { params.push(sinceMs); conds.push(`th.created_at >= to_timestamp($${params.length}/1000.0)`); }
+    if (untilMs) { params.push(untilMs); conds.push(`th.created_at <= to_timestamp($${params.length}/1000.0)`); }
+    const lim = limit ?? 2000; // validated integer; safe to inline
+    const setRows = await query<{ task_id: string }>(
+      `SELECT kg.task_id FROM knowledge_graph kg${joins}
+        WHERE ${conds.join(' AND ')}
+        ORDER BY th.created_at DESC LIMIT ${lim}`,
+      params,
+    );
+    const ids = setRows.map((r) => r.task_id);
+    if (ids.length === 0) return ok({ edges: [], processing: [], meetings: [] });
+
+    const edges = await query(
+      `SELECT ${edgeCols} FROM kg_edges
+        WHERE user_id=$1 AND from_task = ANY($2::uuid[]) AND to_task = ANY($2::uuid[])`,
+      [userId, ids],
+    );
+    const processing = await query<{ task_id: string }>(
+      `SELECT kg.task_id FROM knowledge_graph kg
+         LEFT JOIN kg_link_state s ON s.user_id=kg.user_id AND s.task_id=kg.task_id
+        WHERE kg.user_id=$1 AND s.task_id IS NULL AND kg.task_id = ANY($2::uuid[])`,
+      [userId, ids],
+    );
+    return ok({ edges, processing: processing.map((p) => p.task_id), meetings: ids });
+  }
+
   if (method === 'GET' && taskId) {
     const row = await queryOne('SELECT * FROM knowledge_graph WHERE task_id=$1 AND user_id=$2', [taskId, userId]);
     return row ? ok(row) : notFound();
@@ -492,8 +720,19 @@ async function handleKnowledgeGraph(method: string, segments: string[], userId: 
 
 // ─── CHAT ───────────────────────────────────────────────────────────────────
 
+// Lazily add the workspace_id column (per warm container) so workspace-scoped
+// chat threads can be tagged + filtered without a separate migration step.
+let _chatSchemaReady: Promise<void> | null = null;
+function ensureChatSchema(): Promise<void> {
+  if (!_chatSchemaReady) {
+    _chatSchemaReady = query('ALTER TABLE chat_history ADD COLUMN IF NOT EXISTS workspace_id TEXT').then(() => {});
+  }
+  return _chatSchemaReady;
+}
+
 async function handleChat(method: string, userId: string, event: APIGatewayProxyEvent): Promise<APIGatewayProxyResult> {
   const qs = event.queryStringParameters || {};
+  await ensureChatSchema();
 
   if (method === 'POST') {
     const body = parseBody(event);
@@ -501,11 +740,11 @@ async function handleChat(method: string, userId: string, event: APIGatewayProxy
     const results: any[] = [];
     for (const m of messages) {
       const row = await queryOne(
-        `INSERT INTO chat_history (user_id, task_id, role, text, image, thread_id, citations, retrieval_meta, agent_status, agent_plan)
-         VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10) RETURNING *`,
+        `INSERT INTO chat_history (user_id, task_id, role, text, image, thread_id, citations, retrieval_meta, agent_status, agent_plan, workspace_id)
+         VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11) RETURNING *`,
         [userId, m.task_id || null, m.role, m.text, m.image || null, m.thread_id || null,
          JSON.stringify(m.citations || []), JSON.stringify(m.retrieval_meta || {}),
-         m.agent_status || null, JSON.stringify(m.agent_plan || [])]
+         m.agent_status || null, JSON.stringify(m.agent_plan || []), m.workspace_id || null]
       );
       results.push(row);
     }
@@ -516,6 +755,12 @@ async function handleChat(method: string, userId: string, event: APIGatewayProxy
     // Durable thread list derived from chat_history — so the chat history is
     // reliable even if the client's localStorage thread index is lost.
     if (qs.threads) {
+      // A workspace's chat threads are scoped to that workspace; the GLOBAL chat
+      // list excludes them (workspace_id IS NULL) so the two never mix.
+      const scope = qs.workspaceId
+        ? 'ch.workspace_id = $2'
+        : 'ch.workspace_id IS NULL';
+      const params = qs.workspaceId ? [userId, qs.workspaceId] : [userId];
       const rows = await query(
         `SELECT ch.thread_id,
                 ch.task_id,
@@ -526,11 +771,11 @@ async function handleChat(method: string, userId: string, event: APIGatewayProxy
                 th.filename AS task_title
          FROM chat_history ch
          LEFT JOIN task_history th ON th.id = ch.task_id
-         WHERE ch.user_id = $1 AND ch.thread_id IS NOT NULL AND ch.thread_id <> ''
+         WHERE ch.user_id = $1 AND ${scope} AND ch.thread_id IS NOT NULL AND ch.thread_id <> ''
          GROUP BY ch.thread_id, ch.task_id, th.filename
          ORDER BY MAX(ch.created_at) DESC
          LIMIT 300`,
-        [userId],
+        params,
       );
       return ok(rows);
     }
@@ -806,6 +1051,7 @@ async function handleStorage(method: string, segments: string[], userId: string,
 // dramatically faster first paint on slow networks, and cheaper (fewer invokes).
 async function handleBootstrap(userId: string): Promise<APIGatewayProxyResult> {
   const pageSize = 24;
+  await ensureChatSchema(); // workspace_id column referenced below
   const [taskRows, taskTotal, workspaces, folders, taskWorkspaces, taskFolders, threads, ledger, userPlan] = await Promise.all([
     query('SELECT id, created_at, filename, summary, status, duration, attendees FROM task_history WHERE user_id=$1 ORDER BY created_at DESC LIMIT $2', [userId, pageSize]),
     queryCount('SELECT COUNT(*) FROM task_history WHERE user_id=$1', [userId]),
@@ -821,14 +1067,14 @@ async function handleBootstrap(userId: string): Promise<APIGatewayProxyResult> {
               th.filename AS task_title
        FROM chat_history ch
        LEFT JOIN task_history th ON th.id = ch.task_id
-       WHERE ch.user_id=$1 AND ch.thread_id IS NOT NULL
+       WHERE ch.user_id=$1 AND ch.workspace_id IS NULL AND ch.thread_id IS NOT NULL
        GROUP BY ch.thread_id, ch.task_id, th.filename
        ORDER BY MAX(ch.created_at) DESC
        LIMIT 200`,
       [userId],
     ),
     queryOne('SELECT * FROM user_ledger_state WHERE user_id=$1', [userId]),
-    getUserPlan(userId),
+    getUserPlan(userId, getUserEmail()),
   ]);
   const [meeting, batch] = await Promise.all([
     getMeetingUsage(userId, userPlan),

@@ -1,5 +1,6 @@
 import { logger } from './logger';
 import { aiProxyFetch } from '../services/aiProxyService';
+import { MODELS, chain } from '../config/models';
 import { loadEmbedCacheFromIDB, saveEmbedCacheToIDB, clearEmbedCacheIDB } from './kgEmbedCache';
 
 const log = logger.scope('KnowledgeGraph');
@@ -22,6 +23,9 @@ export interface MeetingRecord {
     relatedTopic?: string;
   }>;
   people: string[];
+  /** Authoritative attendee names mapped to the meeting (correct spelling). Used
+      to mark which people nodes are confirmed attendees vs merely mentioned. */
+  attendees?: string[];
   actionItems: Array<{
     task: string;
     owner: string;
@@ -86,9 +90,9 @@ const EDGE_MIN_SCORE = 0.5;
 const TOP_K_EDGES = 5;
 const TEMPORAL_SPLIT_DAYS = 90;
 
-const EMBED_MODEL = 'gemini-embedding-001';
-const EMBED_FALLBACKS = ['gemini-embedding-001', 'text-embedding-004'];
-const EXTRACT_MODEL = 'gemini-3-flash-preview';
+const EMBED_MODEL = MODELS.embeddings.primary;
+const EMBED_FALLBACKS = chain(MODELS.embeddings);
+const EXTRACT_MODEL = MODELS.relationshipExtract.primary;
 
 // ─── AI Provider Helpers ─────────────────────────────────────────────────────
 type AIProvider = 'gemini' | 'openrouter';
@@ -115,11 +119,11 @@ function toOpenRouterModel(model: string): string {
 function getOpenRouterEmbedModel(): string {
   return env.VITE_OPENROUTER_EMBED_MODEL ||
     processEnv.VITE_OPENROUTER_EMBED_MODEL ||
-    'google/gemini-embedding-001';
+    MODELS.embeddings.or!.primary;
 }
 
 /** 3072-dim only — must match existing `lumina-meetings` index (Google pipeline). Do not add smaller models. */
-const OR_EMBED_FALLBACKS = ['openai/text-embedding-3-large'];
+const OR_EMBED_FALLBACKS = MODELS.embeddings.or!.fallbacks!;
 
 function getLsEmbedKey(): string {
   if (getProvider() === 'openrouter') {
@@ -1147,28 +1151,33 @@ export function buildGraphData(
       }
     });
 
-    // People nodes
+    // People nodes — distinguish confirmed attendees from people merely mentioned.
+    const attNorm = new Set(
+      (meeting.attendees || []).map(a => a.toLowerCase().trim().replace(/\s+/g, ' '))
+    );
     (meeting.people || []).forEach(person => {
       if (!person) return;
       const personId = `person_${person.toLowerCase().replace(/\s+/g, '_')}`;
-      if (!nodes.find(n => n.id === personId)) {
+      const isAttendeeHere = attNorm.has(person.toLowerCase().trim().replace(/\s+/g, ' '));
+      const existingNode = nodes.find(n => n.id === personId);
+      if (!existingNode) {
         nodes.push({
           id: personId,
           label: person,
           type: 'person',
-          data: { name: person, meetings: [meeting.meetingTitle] },
+          // isAttendee aggregates across meetings: true if a confirmed attendee
+          // anywhere; only stays false if every appearance was a mere mention.
+          data: { name: person, meetings: [meeting.meetingTitle], isAttendee: isAttendeeHere },
           color: '#06b6d4',
           size: 12,
         });
-      } else {
-        const existingNode = nodes.find(n => n.id === personId);
-        if (existingNode?.data) {
-          existingNode.data.meetings = [
-            ...(existingNode.data.meetings || []),
-            meeting.meetingTitle,
-          ];
-          existingNode.size = Math.min(existingNode.size + 2, 20);
-        }
+      } else if (existingNode.data) {
+        existingNode.data.meetings = [
+          ...(existingNode.data.meetings || []),
+          meeting.meetingTitle,
+        ];
+        existingNode.size = Math.min(existingNode.size + 2, 20);
+        if (isAttendeeHere) existingNode.data.isAttendee = true;
       }
       links.push({ source: meetingNodeId, target: personId, type: 'meeting-person' });
     });

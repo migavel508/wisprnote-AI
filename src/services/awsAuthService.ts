@@ -412,6 +412,26 @@ export async function getGoogleOAuthUrl(redirectUri: string): Promise<string> {
   return `${cognitoHostedUiOrigin()}/oauth2/authorize?${params.toString()}`;
 }
 
+/** A clean, user-safe failure during the OAuth token exchange. */
+export class OAuthError extends Error {
+  constructor(message = "Couldn't complete Google sign-in. Please try again.") {
+    super(message);
+    this.name = 'OAuthError';
+  }
+}
+
+/**
+ * The authorization code was already used or expired (`invalid_grant`). This is
+ * the expected case when a stale ?code= callback is re-processed (e.g. a reload
+ * after sign-out) — callers should ignore it silently, not show an error.
+ */
+export class OAuthStaleCodeError extends OAuthError {
+  constructor() {
+    super('This sign-in link has already been used.');
+    this.name = 'OAuthStaleCodeError';
+  }
+}
+
 export async function exchangeCodeForSession(code: string, redirectUri: string): Promise<AuthSession> {
   const tokenEndpoint = `${cognitoHostedUiOrigin()}/oauth2/token`;
 
@@ -445,8 +465,19 @@ export async function exchangeCodeForSession(code: string, redirectUri: string):
 
   if (!resp.ok) {
     const text = await resp.text();
+    // Keep the raw provider payload in logs only — never surface it to users.
     log.error('oauth_token_exchange_failed', { status: resp.status, body: text.slice(0, 500) });
-    throw new Error(`Token exchange failed: ${text}`);
+
+    // `invalid_grant` means the authorization code was already consumed or has
+    // expired — this is the expected, benign case when a stale ?code= callback
+    // is re-processed (e.g. a reload after sign-out). Flag it so callers can
+    // ignore it silently instead of showing an error.
+    let code = '';
+    try { code = (JSON.parse(text)?.error as string) || ''; } catch { /* not JSON */ }
+    if (code === 'invalid_grant') {
+      throw new OAuthStaleCodeError();
+    }
+    throw new OAuthError();
   }
 
   const tokens = (await resp.json()) as {

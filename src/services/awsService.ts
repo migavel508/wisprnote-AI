@@ -340,6 +340,34 @@ export async function saveKnowledgeGraphBatch(entries: KnowledgeGraphEntry[]): P
   return apiRequest<KnowledgeGraphEntry[]>('POST', '/knowledge-graph', entries);
 }
 
+export interface ServerKgEdge {
+  from_task: string;
+  to_task: string;
+  similarity?: number | null;
+  relationship_type?: string | null;
+  shared_thread?: string | null;
+  confidence?: string | null;
+}
+
+export interface ServerKgEdgesResponse {
+  edges: ServerKgEdge[];
+  /** task_ids of meetings whose server-side KG pipeline hasn't finished yet. */
+  processing: string[];
+}
+
+/**
+ * Precomputed cross-meeting edges (server Stage C output) + processing status.
+ * Lets the client render the graph instantly without running its own embedding /
+ * relationship pipeline. Returns null on any failure so callers fall back.
+ */
+export async function getKnowledgeGraphEdges(): Promise<ServerKgEdgesResponse | null> {
+  try {
+    return await apiRequest<ServerKgEdgesResponse>('GET', '/knowledge-graph/edges');
+  } catch {
+    return null;
+  }
+}
+
 export async function getKnowledgeGraph(): Promise<KnowledgeGraphEntry[]> {
   return apiRequest<KnowledgeGraphEntry[]>('GET', '/knowledge-graph');
 }
@@ -409,6 +437,9 @@ export interface ChatMessage {
     }>;
     plan_steps?: string[];
   }>;
+  /** Set for workspace-scoped chat so its threads are kept separate from the
+   *  global AI Chat (and from other workspaces). */
+  workspace_id?: string;
 }
 
 export async function saveChatMessage(message: ChatMessage): Promise<ChatMessage> {
@@ -437,9 +468,15 @@ export interface ChatThreadRow {
   task_title: string | null;
 }
 
-/** Durable thread index derived server-side from chat_history. */
+/** Durable thread index derived server-side from chat_history (global chat —
+ *  excludes workspace-scoped threads). */
 export async function getChatThreads(): Promise<ChatThreadRow[]> {
   return apiRequest<ChatThreadRow[]>('GET', `/chat?threads=1`);
+}
+
+/** Durable thread index for a single workspace's scoped chat. */
+export async function getWorkspaceChatThreads(workspaceId: string): Promise<ChatThreadRow[]> {
+  return apiRequest<ChatThreadRow[]>('GET', `/chat?threads=1&workspaceId=${encodeURIComponent(workspaceId)}`);
 }
 
 export async function deleteChatHistory(taskId: string): Promise<void> {

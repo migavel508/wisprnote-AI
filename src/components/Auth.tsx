@@ -6,6 +6,8 @@ import {
   getGoogleOAuthUrl,
   exchangeCodeForSession,
   getWebOAuthRedirectUri,
+  OAuthError,
+  OAuthStaleCodeError,
 } from '../services/awsAuthService';
 import { motion, AnimatePresence } from 'motion/react';
 import { Mail, Lock, Loader2, ArrowRight, AlertCircle, CheckCircle2 } from 'lucide-react';
@@ -66,7 +68,11 @@ export default function Auth() {
         setMessage(null);
       } catch (e: any) {
         consumedOAuthCodes.delete(code);
-        if (!cancelled) setError(e?.message || 'Google sign-in failed');
+        // A stale/already-used code (e.g. a reload after sign-out) is benign —
+        // swallow it silently and just leave the user on the sign-in screen.
+        if (!cancelled && !(e instanceof OAuthStaleCodeError)) {
+          setError(e instanceof OAuthError ? e.message : "Couldn't complete Google sign-in. Please try again.");
+        }
       } finally {
         if (!cancelled) {
           setLoading(false);
@@ -105,7 +111,10 @@ export default function Auth() {
         await exchangeCodeForSession(code, desktopOAuthRedirect);
         setMessage(null);
       } catch (e: any) {
-        setError(e?.message || 'Google sign-in callback failed');
+        // A stale/already-used code (e.g. re-delivered deep link) is benign.
+        if (!(e instanceof OAuthStaleCodeError)) {
+          setError(e instanceof OAuthError ? e.message : "Couldn't complete Google sign-in. Please try again.");
+        }
       } finally {
         setLoading(false);
       }

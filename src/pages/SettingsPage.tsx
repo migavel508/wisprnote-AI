@@ -17,6 +17,7 @@ import {
 import type { AuthSession } from '../services/awsAuthService';
 import PreferencesTab from './settings/PreferencesTab';
 import BillingTab from './settings/BillingTab';
+import ConnectionsTab from './settings/ConnectionsTab';
 import { formatDisplayName, formatDisplayInitials } from '../lib/displayName';
 
 export type SettingsTab =
@@ -207,6 +208,8 @@ export default function SettingsPage({ session, onClose, onSignOut }: SettingsPa
             <PreferencesTab />
           ) : tab === 'billing' ? (
             <BillingTab session={session} />
+          ) : tab === 'connectors' ? (
+            <ConnectionsTab />
           ) : (
             <ComingSoon title={TAB_TITLES[tab]} />
           )}
