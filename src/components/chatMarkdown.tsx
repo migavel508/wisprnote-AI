@@ -43,4 +43,24 @@ export const assistantMarkdownComponents = {
       : <code className="rounded bg-zinc-100 dark:bg-zinc-800 px-1 py-0.5 text-[12px] text-zinc-800 dark:text-zinc-200">{children}</code>;
   },
   hr: () => <hr className="my-3 border-zinc-200 dark:border-zinc-700" />,
+  a: ({ children, href }: { children?: React.ReactNode; href?: string }) => (
+    <a
+      href={href}
+      // Open in the system browser. Inside Tauri the shell opener handles external
+      // URLs; falling back to a normal new tab on web.
+      onClick={(e) => {
+        if (!href) return;
+        const isTauri = typeof window !== 'undefined' && !!(window as any).__TAURI_INTERNALS__;
+        if (isTauri) {
+          e.preventDefault();
+          import('@tauri-apps/plugin-shell').then(({ open }) => open(href)).catch(() => { window.open(href, '_blank'); });
+        }
+      }}
+      target="_blank"
+      rel="noreferrer noopener"
+      className="text-app-accent font-medium hover:underline underline-offset-2 break-words"
+    >
+      {children}
+    </a>
+  ),
 };

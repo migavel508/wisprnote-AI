@@ -1,6 +1,6 @@
-import { useState, useEffect, useMemo } from 'react';
-import { Search, Users, Briefcase, Mail, Calendar, Loader2, ChevronRight } from 'lucide-react';
-import { getContacts, type Contact } from '../services/workspaceService';
+import { useState, useEffect, useMemo, useCallback } from 'react';
+import { Search, Users, Briefcase, Mail, Calendar, Loader2, ChevronRight, Pencil, Check, X } from 'lucide-react';
+import { getContacts, setContactEmail, type Contact } from '../services/workspaceService';
 import type { TaskHistory } from '../services/awsService';
 import { getUserId } from '../services/awsAuthService';
 import { cacheGetFresh, cacheSet } from '../services/appCache';
@@ -36,14 +36,32 @@ interface ContactCardProps {
   contact: Contact;
   allTasks: TaskHistory[];
   onSelectTask: (task: TaskHistory) => void;
+  onSetEmail: (name: string, email: string) => Promise<void>;
 }
 
-function ContactCard({ contact, allTasks, onSelectTask }: ContactCardProps) {
+function ContactCard({ contact, allTasks, onSelectTask, onSetEmail }: ContactCardProps) {
   const [expanded, setExpanded] = useState(false);
+  const [editingEmail, setEditingEmail] = useState(false);
+  const [emailDraft, setEmailDraft] = useState('');
+  const [savingEmail, setSavingEmail] = useState(false);
   const relatedTasks = useMemo(
     () => allTasks.filter(t => contact.task_ids.includes(t.id!)),
     [allTasks, contact.task_ids]
   );
+
+  const startEditEmail = () => { setEmailDraft(contact.email ?? ''); setEditingEmail(true); };
+  const saveEmail = async () => {
+    const next = emailDraft.trim();
+    setSavingEmail(true);
+    try {
+      await onSetEmail(contact.name, next);
+      setEditingEmail(false);
+    } catch {
+      /* leave the editor open so the user can retry */
+    } finally {
+      setSavingEmail(false);
+    }
+  };
 
   return (
     <div className="bg-app-status-bg border border-app-border rounded-2xl overflow-hidden transition-all hover:border-app-fg-subtle">
@@ -89,6 +107,47 @@ function ContactCard({ contact, allTasks, onSelectTask }: ContactCardProps) {
 
       {expanded && (
         <div className="border-t border-app-border px-4 pb-4 pt-3">
+          {/* Email — editable; powers Jira assignee resolution (name → email → accountId) */}
+          <div className="flex items-center gap-2 mb-3">
+            <span className="text-[10px] font-mono font-medium text-app-fg-label uppercase tracking-[0.1em]">Email</span>
+            {editingEmail ? (
+              <div className="flex items-center gap-1.5 flex-1">
+                <input
+                  type="email"
+                  autoFocus
+                  value={emailDraft}
+                  onChange={e => setEmailDraft(e.target.value)}
+                  onKeyDown={e => { if (e.key === 'Enter') saveEmail(); if (e.key === 'Escape') setEditingEmail(false); }}
+                  placeholder="name@company.com"
+                  className="flex-1 min-w-0 text-[12px] bg-app-panel border border-app-border rounded-lg px-2.5 py-1.5 text-app-fg outline-none focus:border-app-accent"
+                />
+                <button
+                  onClick={saveEmail}
+                  disabled={savingEmail}
+                  className="p-1.5 rounded-lg bg-app-accent text-app-accent-fg disabled:opacity-50 flex-shrink-0"
+                  title="Save"
+                >
+                  {savingEmail ? <Loader2 size={12} className="animate-spin" /> : <Check size={12} />}
+                </button>
+                <button
+                  onClick={() => setEditingEmail(false)}
+                  className="p-1.5 rounded-lg bg-app-panel border border-app-border text-app-fg-subtle hover:text-app-fg flex-shrink-0"
+                  title="Cancel"
+                >
+                  <X size={12} />
+                </button>
+              </div>
+            ) : (
+              <button
+                onClick={startEditEmail}
+                className="flex items-center gap-1.5 text-[12px] text-app-fg-subtle hover:text-app-fg group"
+              >
+                <Mail size={11} />
+                <span>{contact.email || 'Add email'}</span>
+                <Pencil size={10} className="opacity-0 group-hover:opacity-100 transition-opacity" />
+              </button>
+            )}
+          </div>
           <p className="text-[10px] font-mono font-medium text-app-fg-label uppercase tracking-[0.1em] mb-2">
             Appeared in {relatedTasks.length} meeting{relatedTasks.length !== 1 ? 's' : ''}
           </p>
@@ -134,6 +193,13 @@ export default function PeoplePage({ allTasks, onSelectTask }: PeoplePageProps) 
   const [apiContacts, setApiContacts] = useState<Contact[]>([]);
   const [loading, setLoading] = useState(true);
   const [search, setSearch] = useState('');
+  // Local optimistic email edits, keyed by lowercase name (persisted via POST /contacts).
+  const [emailOverrides, setEmailOverrides] = useState<Record<string, string>>({});
+
+  const handleSetEmail = useCallback(async (name: string, email: string) => {
+    await setContactEmail(name, email);
+    setEmailOverrides(prev => ({ ...prev, [name.toLowerCase()]: email }));
+  }, []);
 
   useEffect(() => {
     let cancelled = false;
@@ -209,8 +275,13 @@ export default function PeoplePage({ allTasks, onSelectTask }: PeoplePageProps) 
       }
     }
 
-    return Array.from(merged.values()).sort((a, b) => b.meeting_count - a.meeting_count);
-  }, [apiContacts, allTasks]);
+    return Array.from(merged.values())
+      .map(c => {
+        const ov = emailOverrides[c.name.toLowerCase()];
+        return ov !== undefined ? { ...c, email: ov || null } : c;
+      })
+      .sort((a, b) => b.meeting_count - a.meeting_count);
+  }, [apiContacts, allTasks, emailOverrides]);
 
   const filtered = useMemo(() => {
     if (!search.trim()) return contacts;
@@ -278,10 +349,11 @@ export default function PeoplePage({ allTasks, onSelectTask }: PeoplePageProps) 
             <div className="space-y-2">
               {filtered.map(c => (
                 <ContactCard
-                  key={`${c.name}-${c.email}`}
+                  key={c.name}
                   contact={c}
                   allTasks={allTasks}
                   onSelectTask={onSelectTask}
+                  onSetEmail={handleSetEmail}
                 />
               ))}
             </div>

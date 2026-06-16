@@ -14,12 +14,21 @@ import { resetLinkState } from './kgLink';
 import { reindexMeetingVectors, ensureKgGraphSchema } from './kgEmbed';
 import { kickMeetingPipeline } from './kgTrigger';
 import { runConnectorSync } from './connectors/sync';
-import { ensureConnectorSchema } from './connectors/schema';
+import { ensureConnectorSchema, ACCOUNT_SCOPE } from './connectors/schema';
 import { deleteToken, storeToken } from './trust/broker';
 import { MCP_SERVERS, getMcpServer } from './mcp/registry';
+import { jiraMeta, executeJiraAction, type JiraActionProposal } from './connectors/jira/actions';
+import { runJiraAgentSweep } from './connectors/jira/agent';
+import { listPendingProposals, resolveProposal } from './connectors/proposals';
+import { listAudit, getAudit, markRolledBack } from './connectors/jira/audit';
+import { getBrainEdges } from './connectors/brainEdges';
+import { executeMcpWrite } from './mcp/write';
+import { mcpListTools } from './mcp/client';
 import { beginMcpOAuth, completeMcpOAuth, type OAuthInflight } from './mcp/oauth';
 import './connectors/registry'; // registers the no-op connector
 import './connectors/jira';      // registers the Jira (Atlassian MCP) connector
+import './connectors/github';    // registers the GitHub (remote MCP) connector
+import { ensurePeopleSchema, upsertPerson } from './people';
 
 // Desktop deep-link the OAuth provider redirects back to (validated client-side,
 // like the Google sign-in callback). If a provider's DCR rejects custom schemes,
@@ -276,10 +285,42 @@ export const handler = async (event: APIGatewayProxyEvent): Promise<APIGatewayPr
     }
     try {
       const r = await runConnectorSync();
-      return { statusCode: 200, body: JSON.stringify(r) } as APIGatewayProxyResult;
+      // Living brain: ingest meetings into knowledge_item (so they're first-class brain
+      // nodes), then embed all new/changed items into the unified index. Bounded; best-effort.
+      let ingested = 0; let embedded = 0;
+      try { const { ingestMeetings } = await import('./connectors/meetingIngest'); ingested = (await ingestMeetings()).ingested; } catch (e: any) { console.error('meeting_ingest_failed', e?.message); }
+      try { const { embedKnowledgeItems } = await import('./connectors/embed'); embedded = (await embedKnowledgeItems(96)).embedded; } catch (e: any) { console.error('brain_embed_failed', e?.message); }
+      return { statusCode: 200, body: JSON.stringify({ ...r, ingested, embedded }) } as APIGatewayProxyResult;
     } catch (err: any) {
       console.error('connector_sync_failed', JSON.stringify({ message: err?.message, code: err?.code, detail: err?.detail }));
       return { statusCode: 500, body: 'connector-sync-error' } as APIGatewayProxyResult;
+    }
+  }
+
+  // Brain-link sweep (EventBridge). Computes cross-source associations into brain_edge.
+  if ((event as any).__job === 'brain-link') {
+    if (process.env.CONNECTORS_ENABLED !== '1') return { statusCode: 200, body: JSON.stringify({ disabled: true }) } as APIGatewayProxyResult;
+    try {
+      const { runBrainLink } = await import('./connectors/brainLink');
+      return { statusCode: 200, body: JSON.stringify(await runBrainLink()) } as APIGatewayProxyResult;
+    } catch (err: any) {
+      console.error('brain_link_failed', JSON.stringify({ message: err?.message }));
+      return { statusCode: 500, body: 'brain-link-error' } as APIGatewayProxyResult;
+    }
+  }
+
+  // Autonomous Jira agent sweep (EventBridge). PROPOSE-ONLY: writes editable proposals
+  // into the action_proposal ledger for human review — never touches Jira directly.
+  if ((event as any).__job === 'jira-agent-sweep') {
+    if (process.env.CONNECTORS_ENABLED !== '1') {
+      return { statusCode: 200, body: JSON.stringify({ disabled: true }) } as APIGatewayProxyResult;
+    }
+    try {
+      const r = await runJiraAgentSweep();
+      return { statusCode: 200, body: JSON.stringify(r) } as APIGatewayProxyResult;
+    } catch (err: any) {
+      console.error('jira_agent_sweep_failed', JSON.stringify({ message: err?.message }));
+      return { statusCode: 500, body: 'jira-agent-sweep-error' } as APIGatewayProxyResult;
     }
   }
 
@@ -318,7 +359,9 @@ export const handler = async (event: APIGatewayProxyEvent): Promise<APIGatewayPr
       case 'workspaces': return await handleWorkspaces(method, segments, userId, event);
       case 'folders':    return await handleFolders(method, segments, userId, event);
       case 'connectors': return await handleConnectors(method, segments, userId, event);
-      case 'contacts':   return await handleContacts(method, userId);
+      case 'proposals':  return await handleProposals(method, segments, userId, event);
+      case 'brain':      return await handleBrain(method, segments, userId, event);
+      case 'contacts':   return await handleContacts(method, userId, event);
       case 'bootstrap':  return await handleBootstrap(userId);
       case 'billing':    return await handleBilling(method, segments, userId, getUserEmail());
       case 'ai':         return await handleAI(method, segments, userId, event);
@@ -560,10 +603,14 @@ async function handleConnectors(method: string, segments: string[], userId: stri
   if (process.env.CONNECTORS_ENABLED !== '1') return ok({ enabled: false, connectors: [] });
   await ensureConnectorSchema();
   const id = segments[1];
+  // Connections are workspace-scoped. The client passes the active workspace via
+  // ?workspace= (GET/DELETE) or body.workspace (oauth-url); ACCOUNT_SCOPE if absent.
+  const qsWorkspace = event.queryStringParameters?.workspace || ACCOUNT_SCOPE;
 
   if (method === 'GET' && !id) {
     const creds = await query<{ source: string; account: string | null }>(
-      `SELECT source, account FROM connector_credentials WHERE user_id=$1`, [userId],
+      `SELECT source, account FROM connector_credentials WHERE user_id=$1 AND workspace_id=$2`,
+      [userId, qsWorkspace],
     );
     const byId = new Map(creds.map((c) => [c.source, c]));
     const connectors = Object.values(MCP_SERVERS).map((s) => ({
@@ -572,42 +619,156 @@ async function handleConnectors(method: string, segments: string[], userId: stri
       account: byId.get(s.id)?.account ?? null,
       status: s.status,
     }));
-    return ok({ enabled: true, connectors });
+    return ok({ enabled: true, workspace: qsWorkspace, connectors });
   }
 
   if (method === 'DELETE' && id) {
-    await deleteToken(userId, id);
+    await deleteToken(userId, id, qsWorkspace);
     return noContent();
   }
 
-  // POST /connectors/{id}/oauth-url → discover + DCR + build the PKCE authorize URL.
+  // GET /connectors/jira/meta?workspace= → projects + issue types for the action card.
+  if (method === 'GET' && id === 'jira' && segments[2] === 'meta') {
+    const meta = await jiraMeta(userId, qsWorkspace);
+    return ok(meta);
+  }
+
+  // POST /connectors/jira/action?workspace= { ...proposal } → execute ONE approved write.
+  // Human-in-the-loop: the client only calls this after the user confirms the card.
+  if (method === 'POST' && id === 'jira' && segments[2] === 'action') {
+    const proposal = parseBody(event) as JiraActionProposal;
+    if (!proposal?.operation) return badRequest('operation required');
+    const result = await executeJiraAction(userId, qsWorkspace, proposal);
+    return ok(result);
+  }
+
+  // POST /connectors/mcp-write?workspace= { connector, tool, args } → execute ONE approved
+  // generic write (Confluence/worklog/links/Compass/…). HITL: only after card approval.
+  if (method === 'POST' && id === 'mcp-write') {
+    const body = parseBody(event);
+    const tool = String(body.tool || '');
+    if (!tool) return badRequest('tool required');
+    const result = await executeMcpWrite(userId, qsWorkspace, String(body.connector || 'jira'), tool, body.args || {});
+    return ok(result);
+  }
+
+  // GET /connectors/jira/audit?workspace= → recent executed actions (audit ledger).
+  if (method === 'GET' && id === 'jira' && segments[2] === 'audit') {
+    const rows = await listAudit(userId, qsWorkspace);
+    return ok({ audit: rows });
+  }
+
+  // POST /connectors/jira/audit/{id}/rollback → undo a recorded action via its inverse.
+  if (method === 'POST' && id === 'jira' && segments[2] === 'audit' && segments[3] && segments[4] === 'rollback') {
+    const row = await getAudit(userId, segments[3]);
+    if (!row) return notFound();
+    if (row.status === 'rolled_back') return ok({ ok: false, message: 'Already rolled back.' });
+    if (!row.rollback) return ok({ ok: false, message: 'This action can’t be undone automatically.' });
+    const result = await executeJiraAction(userId, row.workspace_id, row.rollback, { audit: false });
+    if (result.ok) await markRolledBack(userId, segments[3], result);
+    return ok(result);
+  }
+
+  // POST /connectors/{id}/pat?workspace= { token } → connect via a Personal Access Token
+  // (for MCP servers whose OAuth lacks DCR, e.g. GitHub). Validated against the live server.
+  if (method === 'POST' && id && segments[2] === 'pat') {
+    const server = getMcpServer(id);
+    if (!server?.url) return badRequest('connector has no MCP endpoint');
+    const token = String(parseBody(event).token || '').trim();
+    if (!token) return badRequest('token required');
+    try {
+      await mcpListTools(server, token);   // verify the token actually authenticates
+    } catch (e: any) {
+      return ok({ connected: false, error: `Token was rejected by ${id}. Check the token and its scopes.`, detail: String(e?.message || '').slice(0, 160) });
+    }
+    await storeToken(userId, id, { access_token: token }, null, server.scopes ?? null, qsWorkspace);
+    return ok({ connected: true });
+  }
+
+  // POST /connectors/{id}/oauth-url { workspace } → discover + DCR + PKCE authorize URL.
   if (method === 'POST' && id && segments[2] === 'oauth-url') {
     const server = getMcpServer(id);
     if (!server || !server.url) return badRequest('connector has no MCP endpoint');
+    const workspaceId = String(parseBody(event).workspace || ACCOUNT_SCOPE);
     const { authorizeUrl, inflight } = await beginMcpOAuth(server, CONNECTOR_REDIRECT_URI);
     await query(
-      `INSERT INTO oauth_state (state, user_id, source, inflight) VALUES ($1,$2,$3,$4)
-       ON CONFLICT (state) DO UPDATE SET inflight=EXCLUDED.inflight, created_at=NOW()`,
-      [inflight.state, userId, id, JSON.stringify(inflight)],
+      `INSERT INTO oauth_state (state, user_id, source, workspace_id, inflight) VALUES ($1,$2,$3,$4,$5)
+       ON CONFLICT (state) DO UPDATE SET inflight=EXCLUDED.inflight, workspace_id=EXCLUDED.workspace_id, created_at=NOW()`,
+      [inflight.state, userId, id, workspaceId, JSON.stringify(inflight)],
     );
     return ok({ url: authorizeUrl });
   }
 
-  // POST /connectors/{id}/exchange { code, state } → token → broker.
+  // POST /connectors/{id}/exchange { code, state } → token → broker (in the workspace
+  // recorded at oauth-url time, so the connection lands where the user started it).
   if (method === 'POST' && id && segments[2] === 'exchange') {
     const body = parseBody(event);
     const code = String(body.code || '');
     const state = String(body.state || '');
     if (!code || !state) return badRequest('missing code/state');
-    const row = await queryOne<{ inflight: OAuthInflight }>(
-      `SELECT inflight FROM oauth_state WHERE state=$1 AND user_id=$2 AND source=$3`,
+    const row = await queryOne<{ inflight: OAuthInflight; workspace_id: string }>(
+      `SELECT inflight, workspace_id FROM oauth_state WHERE state=$1 AND user_id=$2 AND source=$3`,
       [state, userId, id],
     );
     if (!row) return badRequest('unknown or expired oauth state');
     const token = await completeMcpOAuth(row.inflight, code);
-    await storeToken(userId, id, token.raw, null, row.inflight.scope ? row.inflight.scope.split(' ') : null);
+    await storeToken(
+      userId, id, token.raw, null,
+      row.inflight.scope ? row.inflight.scope.split(' ') : null,
+      row.workspace_id || ACCOUNT_SCOPE,
+    );
     await query(`DELETE FROM oauth_state WHERE state=$1`, [state]);
     return ok({ connected: true });
+  }
+
+  return notFound();
+}
+
+// ─── BRAIN (cross-source association graph) ──────────────────────────────────
+async function handleBrain(method: string, segments: string[], userId: string, event: APIGatewayProxyEvent): Promise<APIGatewayProxyResult> {
+  if (process.env.CONNECTORS_ENABLED !== '1') return ok({ enabled: false, edges: [] });
+  if (method === 'GET' && segments[1] === 'edges') {
+    const ws = event.queryStringParameters?.workspace;
+    if (!ws) return badRequest('workspace required');
+    return ok({ enabled: true, edges: await getBrainEdges(userId, ws) });
+  }
+  // GET /brain/graph?workspace= → nodes (items + meetings) + edges, for the brain map.
+  if (method === 'GET' && segments[1] === 'graph') {
+    const ws = event.queryStringParameters?.workspace;
+    if (!ws) return badRequest('workspace required');
+    const edges = await getBrainEdges(userId, ws, 1500);
+    // Meetings are now knowledge_item rows (source='meeting'), so this single query covers
+    // every brain node — meetings, Jira, GitHub — and matches the brain_edge endpoints.
+    const items = await query<any>(
+      `SELECT id, source, type, title, source_id, links FROM knowledge_item WHERE user_id=$1 AND workspace_id=$2 LIMIT 2000`,
+      [userId, ws],
+    ).catch(() => []);
+    const nodes = items.map((i: any) => ({ id: `item:${i.id}`, kind: 'item', source: i.source, type: i.type, title: i.title || i.source_id, url: i.links?.url ?? null }));
+    return ok({ enabled: true, nodes, edges });
+  }
+  return notFound();
+}
+
+// ─── ACTION PROPOSALS (autonomous agent → HITL queue) ────────────────────────
+// The agent writes proposals; the UI lists pending ones and resolves them after the
+// human approves (executed) or dismisses. Approval execution itself goes through the
+// Jira action route — this only records the outcome in the ledger.
+async function handleProposals(method: string, segments: string[], userId: string, event: APIGatewayProxyEvent): Promise<APIGatewayProxyResult> {
+  if (process.env.CONNECTORS_ENABLED !== '1') return ok({ enabled: false, proposals: [] });
+  const id = segments[1];
+
+  if (method === 'GET' && !id) {
+    const ws = event.queryStringParameters?.workspace;
+    if (!ws) return badRequest('workspace required');
+    const proposals = await listPendingProposals(userId, ws);
+    return ok({ enabled: true, proposals });
+  }
+
+  if (method === 'POST' && id && segments[2] === 'resolve') {
+    const body = parseBody(event);
+    const status = body.status === 'executed' ? 'executed' : 'dismissed';
+    await resolveProposal(userId, id, status, body.result);
+    return ok({ ok: true });
   }
 
   return notFound();
@@ -1375,16 +1536,29 @@ async function handleFolders(method: string, segments: string[], userId: string,
 
 // ─── CONTACTS ────────────────────────────────────────────────────────────────
 
-async function handleContacts(_method: string, userId: string): Promise<APIGatewayProxyResult> {
+async function handleContacts(method: string, userId: string, event: APIGatewayProxyEvent): Promise<APIGatewayProxyResult> {
+  await ensurePeopleSchema();
+
+  // Set/edit a person's email (and optionally cached Jira accountId) by name.
+  if (method === 'POST') {
+    const body = parseBody(event);
+    const name = String(body.name || '').trim();
+    if (!name) return badRequest('name required');
+    await upsertPerson(userId, name, body.email ?? null, body.jira_account_id ?? null);
+    return ok({ ok: true });
+  }
+
+  // GET — meeting-derived people, with email filled from the people directory.
   const rows = await query(
     `SELECT
-       name,
-       MAX(role)    AS role,
-       MAX(email)   AS email,
-       MAX(company) AS company,
-       COUNT(DISTINCT task_id)::int AS meeting_count,
-       MAX(last_seen) AS last_seen,
-       array_agg(DISTINCT task_id::text) AS task_ids
+       combined.name AS name,
+       MAX(combined.role)    AS role,
+       COALESCE(MAX(combined.email), MAX(pd.email)) AS email,
+       MAX(pd.jira_account_id) AS jira_account_id,
+       MAX(combined.company) AS company,
+       COUNT(DISTINCT combined.task_id)::int AS meeting_count,
+       MAX(combined.last_seen) AS last_seen,
+       array_agg(DISTINCT combined.task_id::text) AS task_ids
      FROM (
        -- from knowledge graph (AI-extracted people with rich metadata)
        SELECT
@@ -1412,8 +1586,10 @@ async function handleContacts(_method: string, userId: string): Promise<APIGatew
        WHERE t.user_id=$1
          AND a.value IS NOT NULL AND a.value != ''
      ) combined
-     GROUP BY name
-     ORDER BY meeting_count DESC, name ASC`,
+     LEFT JOIN people_directory pd
+       ON pd.user_id=$1 AND lower(btrim(pd.name)) = lower(btrim(combined.name))
+     GROUP BY combined.name
+     ORDER BY meeting_count DESC, combined.name ASC`,
     [userId]
   );
   return ok(rows);

@@ -152,7 +152,12 @@ export interface Contact {
   meeting_count: number;
   last_seen: string;
   task_ids: string[];
+  jira_account_id?: string | null;
 }
+
+/** Set/edit a person's email in the people directory (powers Jira assignee resolution). */
+export const setContactEmail = (name: string, email: string): Promise<{ ok: boolean }> =>
+  apiRequest('POST', '/contacts', { name, email });
 
 async function apiRequest<T = any>(method: string, path: string, body?: any): Promise<T> {
   const token = await getIdToken();

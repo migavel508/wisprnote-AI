@@ -101,6 +101,12 @@ export interface ServerChatResult {
   meetings: Array<{ id: string; title: string; date: string }>;
   scope?: string;
   dateLabel?: string;
+  sources?: string[];
+  // Present when the message was an action request: an editable Jira proposal (HITL).
+  proposal?: import('./jiraActionService').JiraActionProposal;
+  jiraMeta?: import('./jiraActionService').JiraMeta;
+  // Generic write proposals from the MCP agent (Confluence, worklog, links, …) — HITL.
+  mcpProposals?: import('./jiraActionService').McpWriteProposal[];
 }
 
 /**

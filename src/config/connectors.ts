@@ -26,6 +26,10 @@ export interface ConnectorDef {
   icon: LucideIcon;
   /** Human-readable summary of what we read / can do — shown on the card. */
   scopes: string[];
+  /** Connect method: 'oauth' (DCR+PKCE, default) or 'pat' (paste a token, e.g. GitHub). */
+  connect?: 'oauth' | 'pat';
+  /** For PAT connectors: where to create the token. */
+  patUrl?: string;
 }
 
 export const CONNECTOR_CATEGORIES = ['Work tools', 'Google Workspace', 'Dev & AI'] as const;
@@ -38,8 +42,9 @@ export const CONNECTORS: ConnectorDef[] = [
     scopes: ['Read issues & comments', 'Create / update issues'],
   },
   {
-    id: 'github', name: 'GitHub', category: 'Work tools', access: 'Read + Write', status: 'soon',
+    id: 'github', name: 'GitHub', category: 'Work tools', access: 'Read + Write', status: 'live',
     via: 'mcp', docs: 'https://github.com/github/github-mcp-server', icon: Github,
+    connect: 'pat', patUrl: 'https://github.com/settings/personal-access-tokens',
     description: 'Bring PRs, issues and discussions into context; open issues straight from a decision.',
     scopes: ['Read issues & PRs', 'Create issues & comments'],
   },
