@@ -73,6 +73,22 @@ export async function disconnectConnector(id: string, workspaceId?: string): Pro
   await authed(`/connectors/${id}${qs}`, { method: 'DELETE' });
 }
 
+// ── Project mapping: scope a workspace's brain to its exact Jira project + GitHub repos ──
+export interface ProjectMapping { jiraProject: string | null; githubRepos: string[] }
+
+export async function getProjectMapping(workspaceId: string): Promise<ProjectMapping> {
+  try {
+    const r = await authed(`/connectors/routing?workspace=${encodeURIComponent(workspaceId)}`, { method: 'GET' });
+    if (!r.ok) return { jiraProject: null, githubRepos: [] };
+    return await r.json();
+  } catch { return { jiraProject: null, githubRepos: [] }; }
+}
+
+/** Set the Jira project or the GitHub repos a workspace maps to. */
+export async function setProjectMapping(workspaceId: string, m: { source: 'jira' | 'github'; projectKey?: string; repos?: string[] }): Promise<void> {
+  await authed(`/connectors/routing?workspace=${encodeURIComponent(workspaceId)}`, { method: 'POST', body: JSON.stringify(m) }).catch(() => {});
+}
+
 /** Connect a PAT-based connector (e.g. GitHub) by storing a validated token server-side. */
 export async function setConnectorToken(id: string, token: string, workspaceId?: string): Promise<{ connected: boolean; error?: string }> {
   const qs = workspaceId ? `?workspace=${encodeURIComponent(workspaceId)}` : '';

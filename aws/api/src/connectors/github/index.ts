@@ -2,6 +2,7 @@ import { registerConnector, type KnowledgeItemInput } from '../registry';
 import { getToken } from '../../trust/broker';
 import { getMcpServer } from '../../mcp/registry';
 import { mcpCallTool } from '../../mcp/client';
+import { getGithubRepos } from '../routing';
 
 /**
  * GitHub connector — adapter over the official GitHub remote MCP. Each `sync` pulls the
@@ -36,12 +37,17 @@ registerConnector({
 
     const items: KnowledgeItemInput[] = [];
     let maxUpdated = cursor || '';
+    // PROJECT MAPPING: if the workspace is mapped to specific repos, scope the search to
+    // THOSE repos only (so the workspace's brain holds just its project). Otherwise fall
+    // back to everything the user is involved in.
+    const repos = await getGithubRepos(userId, scope).catch(() => []);
+    const repoQual = repos.length ? repos.map((r) => `repo:${r}`).join(' ') + ' ' : '';
     // search_issues / search_pull_requests share the GitHub search shape; involves:@me
     // covers authored + assigned + mentioned + review-requested.
     for (const [tool, isPrTool] of [['search_issues', false], ['search_pull_requests', true]] as const) {
       try {
         const r = await mcpCallTool(server, token, tool, {
-          query: 'involves:@me', sort: 'updated', order: 'desc', perPage: PER_PAGE,
+          query: `${repoQual}involves:@me`, sort: 'updated', order: 'desc', perPage: PER_PAGE,
         });
         const parsed = parseText(r);
         const arr: any[] = Array.isArray(parsed?.items) ? parsed.items : Array.isArray(parsed) ? parsed : [];
