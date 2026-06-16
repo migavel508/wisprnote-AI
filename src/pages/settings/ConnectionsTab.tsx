@@ -1,10 +1,11 @@
 import { useCallback, useEffect, useState } from 'react';
-import { Loader2, Check } from 'lucide-react';
+import { Loader2, Check, X, ExternalLink } from 'lucide-react';
 import { CONNECTORS, CONNECTOR_CATEGORIES, type ConnectorDef } from '../../config/connectors';
 import {
-  isConnectorsEnabled, listConnectors, getConnectorOAuthUrl, disconnectConnector,
+  isConnectorsEnabled, listConnectors, getConnectorOAuthUrl, disconnectConnector, setConnectorToken,
   type ConnectorStatus,
 } from '../../services/connectorService';
+import { getWorkspaces, type Workspace } from '../../services/workspaceService';
 import { useConnectorOAuth, setPendingConnector } from './useConnectorOAuth';
 
 /**
@@ -81,15 +82,36 @@ function ConnectorCard({
   );
 }
 
-export default function ConnectionsTab() {
+interface ConnectionsTabProps {
+  /** When set, connections are scoped to this workspace and the picker is hidden
+   *  (used by the workspace-level "Integrations" entry). */
+  fixedWorkspaceId?: string;
+  /** Drop the page chrome (title/padding) so it fits inside a modal. */
+  embedded?: boolean;
+}
+
+export default function ConnectionsTab({ fixedWorkspaceId, embedded }: ConnectionsTabProps = {}) {
   const [statusById, setStatusById] = useState<Record<string, ConnectorStatus>>({});
   const [busyId, setBusyId] = useState<string | null>(null);
+  // Connections are workspace-scoped: pick which workspace to connect tools for.
+  const [workspaces, setWorkspaces] = useState<Workspace[]>([]);
+  const [pickedWorkspaceId, setPickedWorkspaceId] = useState<string | null>(null);
+  // A fixed workspace (from the workspace page) overrides the in-tab picker.
+  const workspaceId = fixedWorkspaceId ?? pickedWorkspaceId;
+  const showPicker = !fixedWorkspaceId;
+
+  useEffect(() => {
+    if (!isConnectorsEnabled() || fixedWorkspaceId) return;
+    void getWorkspaces()
+      .then((ws) => { setWorkspaces(ws); setPickedWorkspaceId((prev) => prev ?? ws[0]?.id ?? null); })
+      .catch(() => { /* leave empty — falls back to account-level scope */ });
+  }, [fixedWorkspaceId]);
 
   const refresh = useCallback(async () => {
     if (!isConnectorsEnabled()) return;
-    const { connectors } = await listConnectors();
+    const { connectors } = await listConnectors(workspaceId ?? undefined);
     setStatusById(Object.fromEntries(connectors.map((c) => [c.id, c])));
-  }, []);
+  }, [workspaceId]);
 
   useEffect(() => { void refresh(); }, [refresh]);
 
@@ -101,11 +123,19 @@ export default function ConnectionsTab() {
   }, [refresh]);
   useConnectorOAuth(onOAuthDone);
 
+  // PAT-connect modal state (for connectors whose OAuth lacks DCR, e.g. GitHub).
+  const [patFor, setPatFor] = useState<ConnectorDef | null>(null);
+  const [patToken, setPatToken] = useState('');
+  const [patBusy, setPatBusy] = useState(false);
+  const [patError, setPatError] = useState<string | null>(null);
+
   const onConnect = useCallback(async (id: string) => {
+    const def = CONNECTORS.find((c) => c.id === id);
+    if (def?.connect === 'pat') { setPatError(null); setPatToken(''); setPatFor(def); return; }
     setBusyId(id);
     try {
       setPendingConnector(id);
-      const url = await getConnectorOAuthUrl(id);
+      const url = await getConnectorOAuthUrl(id, workspaceId ?? undefined);
       if (isTauri) {
         const { open } = await import('@tauri-apps/plugin-shell');
         await open(url);
@@ -117,20 +147,49 @@ export default function ConnectionsTab() {
       setBusyId(null);
       console.error('connector_oauth_url_failed', e);
     }
-  }, []);
+  }, [workspaceId]);
+
+  const submitPat = useCallback(async () => {
+    if (!patFor || !patToken.trim()) return;
+    setPatBusy(true); setPatError(null);
+    const res = await setConnectorToken(patFor.id, patToken.trim(), workspaceId ?? undefined).catch(() => ({ connected: false, error: 'Network error.' }));
+    setPatBusy(false);
+    if (res.connected) { setPatFor(null); setPatToken(''); void refresh(); }
+    else setPatError(res.error || 'Token was rejected.');
+  }, [patFor, patToken, workspaceId, refresh]);
 
   const onDisconnect = useCallback(async (id: string) => {
     setBusyId(id);
-    try { await disconnectConnector(id); await refresh(); } finally { setBusyId(null); }
-  }, [refresh]);
+    try { await disconnectConnector(id, workspaceId ?? undefined); await refresh(); } finally { setBusyId(null); }
+  }, [refresh, workspaceId]);
 
   return (
-    <div className="max-w-[820px] mx-auto px-8 pb-16">
-      <h1 className="text-[28px] font-serif text-app-fg tracking-[-0.02em] pt-2 mb-1">Connectors</h1>
-      <p className="text-[13px] text-app-fg-subtle mb-8 max-w-[560px] leading-relaxed">
+    <div className={embedded ? '' : 'max-w-[820px] mx-auto px-8 pb-16'}>
+      {!embedded && (
+        <h1 className="text-[28px] font-serif text-app-fg tracking-[-0.02em] pt-2 mb-1">Connectors</h1>
+      )}
+      <p className="text-[13px] text-app-fg-subtle mb-6 max-w-[560px] leading-relaxed">
         Connect the tools your team already uses, so Wisprnote can pull in context and act
         across them. Each tool connects securely through its MCP server.
       </p>
+
+      {isConnectorsEnabled() && showPicker && workspaces.length > 0 && (
+        <div className="mb-8 flex items-center gap-3 flex-wrap">
+          <label className="text-[11px] font-medium text-app-fg-muted">Workspace</label>
+          <select
+            value={pickedWorkspaceId ?? ''}
+            onChange={(e) => setPickedWorkspaceId(e.target.value || null)}
+            className="text-[12.5px] bg-app-panel border border-app-border rounded-lg px-3 py-1.5 text-app-fg outline-none focus:border-app-accent"
+          >
+            {workspaces.map((w) => (
+              <option key={w.id} value={w.id}>{w.emoji ? `${w.emoji} ` : ''}{w.name}</option>
+            ))}
+          </select>
+          <span className="text-[11px] text-app-fg-subtle">
+            Connections are scoped to this workspace — connect a different account per company.
+          </span>
+        </div>
+      )}
 
       <div className="space-y-9">
         {CONNECTOR_CATEGORIES.map((cat) => {
@@ -155,6 +214,40 @@ export default function ConnectionsTab() {
           );
         })}
       </div>
+
+      {patFor && (
+        <div className="fixed inset-0 z-[9999] flex items-center justify-center bg-black/30 backdrop-blur-sm" onClick={() => !patBusy && setPatFor(null)}>
+          <div className="bg-app-canvas rounded-2xl border border-app-divider shadow-xl w-[440px] max-w-[92vw] p-5" onClick={(e) => e.stopPropagation()}>
+            <div className="flex items-center justify-between mb-1">
+              <h3 className="text-[15px] font-semibold text-app-fg">Connect {patFor.name}</h3>
+              <button onClick={() => !patBusy && setPatFor(null)} className="w-7 h-7 flex items-center justify-center rounded-md text-app-fg-subtle hover:bg-app-nav-hover-bg hover:text-app-fg"><X size={15} /></button>
+            </div>
+            <p className="text-[12px] text-app-fg-subtle leading-relaxed mb-3">
+              {patFor.name} connects with a personal access token (its MCP server doesn’t support
+              one-click registration yet). Paste a token with the scopes you want the brain to use.
+              {patFor.patUrl && (
+                <> <a href={patFor.patUrl} target="_blank" rel="noreferrer" className="text-app-accent hover:underline inline-flex items-center gap-0.5">Create a token <ExternalLink size={10} /></a>.</>
+              )}
+            </p>
+            <input
+              type="password"
+              autoFocus
+              value={patToken}
+              onChange={(e) => setPatToken(e.target.value)}
+              onKeyDown={(e) => { if (e.key === 'Enter') void submitPat(); }}
+              placeholder="Paste token (e.g. github_pat_…)"
+              className="w-full text-[12.5px] bg-app-panel border border-app-border rounded-lg px-3 py-2 text-app-fg outline-none focus:border-app-accent"
+            />
+            {patError && <p className="mt-2 text-[11.5px] text-red-500">{patError}</p>}
+            <div className="flex justify-end gap-2 mt-4">
+              <button onClick={() => setPatFor(null)} disabled={patBusy} className="px-3 py-1.5 rounded-lg text-[12.5px] text-app-fg hover:bg-app-nav-hover-bg disabled:opacity-50">Cancel</button>
+              <button onClick={submitPat} disabled={patBusy || !patToken.trim()} className="px-3.5 py-1.5 rounded-lg text-[12.5px] font-semibold bg-app-accent text-app-accent-fg hover:bg-app-accent-hover disabled:opacity-50 flex items-center gap-1.5">
+                {patBusy ? <Loader2 size={13} className="animate-spin" /> : <Check size={13} strokeWidth={2.5} />} Connect
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
     </div>
   );
 }

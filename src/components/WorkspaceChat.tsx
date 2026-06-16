@@ -10,6 +10,9 @@ import { embedQuery, queryHybridScoped } from '../services/turbopufferService';
 import { buildMeetingCard, hasOffTrackTopic } from '../services/meetingEvidence';
 import { saveChatMessage, getWorkspaceChatThreads, getChatHistoryByThread, type ChatThreadRow } from '../services/awsService';
 import { serverChat, isServerChatEnabled } from '../services/aiProxyService';
+import JiraActionCard from './JiraActionCard';
+import McpActionCard from './McpActionCard';
+import type { JiraActionProposal, JiraMeta, McpWriteProposal } from '../services/jiraActionService';
 
 type SearchFilters = { recent_days?: number; start_ms?: number; end_ms?: number; off_track?: boolean };
 
@@ -17,7 +20,7 @@ type SearchFilters = { recent_days?: number; start_ms?: number; end_ms?: number;
 const card = (m: SearchableMeeting, content: string) =>
   buildMeetingCard({ title: m.title, createdAt: m.createdAt, attendees: m.attendees, kg: m.kg, content });
 
-interface Msg { role: 'user' | 'model'; text: string }
+interface Msg { role: 'user' | 'model'; text: string; proposal?: JiraActionProposal; jiraMeta?: JiraMeta; mcpProposals?: McpWriteProposal[] }
 
 // Workspace-oriented quick prompts (the reference's recipe chips).
 const RECIPES: { label: string; prompt: string }[] = [
@@ -181,6 +184,9 @@ export default function WorkspaceChat({
     const history = messages.map((m) => ({ role: m.role, parts: [{ text: m.text }] }));
     try {
       let answer: string;
+      let proposal: JiraActionProposal | undefined;
+      let jMeta: JiraMeta | undefined;
+      let mcpProps: McpWriteProposal[] | undefined;
       if (isServerChatEnabled()) {
         // SERVER-SIDE agent: retrieval + synthesis run in the Lambda, tenant-
         // isolated and bounded (the corpus never leaves the server).
@@ -193,6 +199,9 @@ export default function WorkspaceChat({
           model: activeModel.provider === 'anthropic' ? 'claude' : 'gemini',
         });
         answer = res.answer;
+        proposal = res.proposal;
+        jMeta = res.jiraMeta;
+        mcpProps = res.mcpProposals;
       } else {
         // Client-side fallback: scoped semantic search (structured cards) over
         // ONLY this workspace's meetings; retrieval reflected live in the UI.
@@ -203,7 +212,7 @@ export default function WorkspaceChat({
           onToolCallDone: (s) => setSteps((prev) => upsertStep(prev, s)),
         });
       }
-      setMessages((prev) => [...prev, { role: 'model', text: answer }]);
+      setMessages((prev) => [...prev, { role: 'model', text: answer, proposal, jiraMeta: jMeta, mcpProposals: mcpProps }]);
       void saveChatMessage({ role: 'model', text: answer, thread_id: tid, workspace_id: workspaceId }).catch(() => {});
       // Refresh the durable thread list so this conversation appears in History.
       getWorkspaceChatThreads(workspaceId).then(setThreads).catch(() => {});
@@ -263,6 +272,12 @@ export default function WorkspaceChat({
                   </div>
                   <div className="pl-[34px] min-w-0">
                     <Markdown remarkPlugins={[remarkGfm]} components={assistantMarkdownComponents as any}>{m.text}</Markdown>
+                    {m.proposal && (
+                      <JiraActionCard proposal={m.proposal} meta={m.jiraMeta} workspaceId={workspaceId} />
+                    )}
+                    {m.mcpProposals?.map((mp, idx) => (
+                      <McpActionCard key={idx} proposal={mp} workspaceId={workspaceId} />
+                    ))}
                   </div>
                 </div>
               </div>

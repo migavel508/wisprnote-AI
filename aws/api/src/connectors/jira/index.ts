@@ -22,9 +22,10 @@ function textOf(v: unknown): string {
 
 registerConnector({
   id: 'jira',
-  async sync(userId, _scope, cursor) {
+  async sync(userId, scope, cursor) {
     const server = getMcpServer('jira');
-    const cred = await getToken(userId, 'jira');
+    // `scope` is the workspace_id — fetch the token connected in THIS workspace.
+    const cred = await getToken(userId, 'jira', scope);
     const accessToken = (cred?.token as any)?.access_token;
     if (!server?.url || !accessToken) return { items: [], nextCursor: null };
 

@@ -28,6 +28,8 @@ export interface McpServer {
   docs: string;
   status: McpStatus;
   notes?: string;
+  headers?: Record<string, string>;   // static extra headers sent on every MCP request
+  connect?: 'oauth' | 'pat';          // how the client connects (default 'oauth' via DCR+PKCE)
 }
 
 export const MCP_SERVERS: Record<string, McpServer> = {
@@ -38,7 +40,11 @@ export const MCP_SERVERS: Record<string, McpServer> = {
     scopes: ['repo', 'read:issue', 'write:issue', 'read:discussion'],
     docs: 'https://github.com/github/github-mcp-server',
     status: 'ga',
-    notes: 'Official remote GitHub MCP (GA Sep 2025), OAuth 2.1 + PKCE. Self-host alt: github/github-mcp-server (docker, PAT).',
+    notes: 'Official remote GitHub MCP (GA Sep 2025). Its OAuth does NOT advertise DCR, so our generic DCR flow cannot auto-register — we connect via a fine-grained PAT (Bearer) instead. X-MCP-Toolsets selects which toolsets load.',
+    // GitHub remote MCP OAuth lacks Dynamic Client Registration → connect with a PAT.
+    connect: 'pat',
+    // Enable the toolsets our brain uses; the server gates further by the token's scopes.
+    headers: { 'X-MCP-Toolsets': 'repos,issues,pull_requests,actions,discussions,users,orgs,notifications' },
   },
   jira: {
     id: 'jira', label: 'Jira (Atlassian Rovo)',

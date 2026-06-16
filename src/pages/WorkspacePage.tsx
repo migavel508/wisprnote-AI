@@ -22,6 +22,13 @@ import WorkspaceChat from '../components/WorkspaceChat';
 import type { SearchableMeeting } from '../services/geminiService';
 import type { KGLite } from '../services/meetingEvidence';
 import CreateFolderModal, { type FolderDraft } from '../components/CreateFolderModal';
+import ConnectionsTab from './settings/ConnectionsTab';
+import { isConnectorsEnabled } from '../services/connectorService';
+import JiraActionCard from '../components/JiraActionCard';
+import BrainMapModal from '../components/BrainMapModal';
+import { listProposals, resolveProposal, type ProposalRow } from '../services/proposalService';
+import { getJiraMeta, type JiraMeta } from '../services/jiraActionService';
+import { Sparkles, BrainCircuit } from 'lucide-react';
 
 // ── helpers ───────────────────────────────────────────────────────────────────
 
@@ -350,7 +357,13 @@ export default function WorkspacePage({ allTasks, onSelectTask }: WorkspacePageP
   const [editingDesc, setEditingDesc] = useState(false);
   const [headerMenuOpen, setHeaderMenuOpen] = useState(false);
   const [showCreateFolder, setShowCreateFolder] = useState(false);
+  const [showIntegrations, setShowIntegrations] = useState(false);
   const [renameTarget, setRenameTarget] = useState<{ type: 'ws' | 'folder'; id: string; name: string } | null>(null);
+  // Autonomous agent → HITL proposal queue (Suggested actions).
+  const [showProposals, setShowProposals] = useState(false);
+  const [showBrainMap, setShowBrainMap] = useState(false);
+  const [proposals, setProposals] = useState<ProposalRow[]>([]);
+  const [jiraMeta, setJiraMeta] = useState<JiraMeta | undefined>(undefined);
   const [addMeetingOpen, setAddMeetingOpen] = useState(false);
   const [addSearch, setAddSearch] = useState('');
   const [addingTaskId, setAddingTaskId] = useState<string | null>(null);
@@ -380,6 +393,21 @@ export default function WorkspacePage({ allTasks, onSelectTask }: WorkspacePageP
     ? (foldersByWs[activeWs.id] || []).find(f => f.id === selection.folderId) || null
     : null;
   const isPrivate = isDefaultWorkspace(activeWs);
+
+  // Load the agent's pending proposals (+ Jira meta for the cards) for team workspaces.
+  const activeWsId = activeWs?.id ?? null;
+  useEffect(() => {
+    if (!activeWsId || isPrivate || !isConnectorsEnabled()) { setProposals([]); return; }
+    let cancelled = false;
+    void listProposals(activeWsId).then((p) => { if (!cancelled) setProposals(p); }).catch(() => {});
+    void getJiraMeta(activeWsId).then((m) => { if (!cancelled) setJiraMeta(m); }).catch(() => {});
+    return () => { cancelled = true; };
+  }, [activeWsId, isPrivate]);
+
+  const onProposalResolved = (id: string, status: 'executed' | 'dismissed', result?: unknown) => {
+    setProposals((prev) => prev.filter((x) => x.id !== id));
+    void resolveProposal(id, status, result);
+  };
 
   // Hydrate description for current context
   useEffect(() => {
@@ -652,8 +680,30 @@ export default function WorkspacePage({ allTasks, onSelectTask }: WorkspacePageP
         </div>
 
         <div className="flex items-center gap-1.5">
+          {!isPrivate && !activeFolder && proposals.length > 0 && (
+            <button
+              onClick={() => setShowProposals(true)}
+              className="flex items-center gap-1.5 px-2.5 py-1 rounded-md text-[12px] text-app-accent hover:bg-app-accent/10 transition-colors"
+              title="Actions the agent suggests from your meetings"
+            >
+              <Sparkles size={12} strokeWidth={1.7} /> Suggested actions
+              <span className="ml-0.5 min-w-[16px] h-4 px-1 rounded-full bg-app-accent text-app-accent-fg text-[10px] font-semibold flex items-center justify-center">{proposals.length}</span>
+            </button>
+          )}
           {!isPrivate && !activeFolder && (
-            <button className="flex items-center gap-1.5 px-2.5 py-1 rounded-md text-[12px] text-app-fg-subtle hover:bg-app-nav-hover-bg hover:text-app-fg transition-colors">
+            <button
+              onClick={() => setShowBrainMap(true)}
+              className="flex items-center gap-1.5 px-2.5 py-1 rounded-md text-[12px] text-app-fg-subtle hover:bg-app-nav-hover-bg hover:text-app-fg transition-colors"
+              title="See meetings, Jira and GitHub linked as one graph"
+            >
+              <BrainCircuit size={12} strokeWidth={1.7} /> Brain map
+            </button>
+          )}
+          {!isPrivate && !activeFolder && (
+            <button
+              onClick={() => setShowIntegrations(true)}
+              className="flex items-center gap-1.5 px-2.5 py-1 rounded-md text-[12px] text-app-fg-subtle hover:bg-app-nav-hover-bg hover:text-app-fg transition-colors"
+            >
               <Cable size={12} strokeWidth={1.7} /> Integrations
             </button>
           )}
@@ -938,6 +988,83 @@ export default function WorkspacePage({ allTasks, onSelectTask }: WorkspacePageP
       )}
 
       {/* Rename modal */}
+      {showBrainMap && (
+        <BrainMapModal workspaceId={activeWs.id} workspaceName={activeWs.name} onClose={() => setShowBrainMap(false)} />
+      )}
+
+      {showProposals && (
+        <div className="fixed inset-0 z-[9999] flex items-center justify-center bg-black/30 backdrop-blur-sm" onClick={() => setShowProposals(false)}>
+          <div className="bg-app-canvas rounded-2xl border border-app-divider shadow-xl w-[640px] max-w-[92vw] max-h-[85vh] flex flex-col overflow-hidden" onClick={e => e.stopPropagation()}>
+            <div className="flex items-center justify-between px-6 py-4 border-b border-app-divider flex-shrink-0">
+              <div className="flex items-center gap-2 min-w-0">
+                <Sparkles size={15} strokeWidth={1.7} className="text-app-accent flex-shrink-0" />
+                <h3 className="text-[15px] font-semibold text-app-fg truncate">Suggested actions · {activeWs.name}</h3>
+              </div>
+              <button
+                onClick={() => setShowProposals(false)}
+                className="w-7 h-7 flex items-center justify-center rounded-md text-app-fg-subtle hover:bg-app-nav-hover-bg hover:text-app-fg transition-colors"
+                title="Close"
+              >
+                <X size={15} strokeWidth={1.7} />
+              </button>
+            </div>
+            <div className="flex-1 overflow-y-auto px-6 py-4">
+              <p className="text-[12px] text-app-fg-subtle leading-relaxed mb-3">
+                Drawn from this workspace’s meetings. Nothing is written to Jira until you approve —
+                review, edit, and approve or dismiss each one.
+              </p>
+              {proposals.length === 0 ? (
+                <p className="text-[13px] text-app-fg-subtle py-8 text-center">No suggestions right now.</p>
+              ) : (
+                <div className="space-y-3">
+                  {proposals.map((pr) => (
+                    <JiraActionCard
+                      key={pr.id}
+                      proposal={pr.proposal}
+                      meta={jiraMeta}
+                      workspaceId={activeWs.id}
+                      rationale={pr.rationale}
+                      sourceTitle={pr.source_title}
+                      onResolved={(status, result) => onProposalResolved(pr.id, status, result)}
+                    />
+                  ))}
+                </div>
+              )}
+            </div>
+          </div>
+        </div>
+      )}
+
+      {showIntegrations && (
+        <div className="fixed inset-0 z-[9999] flex items-center justify-center bg-black/30 backdrop-blur-sm" onClick={() => setShowIntegrations(false)}>
+          <div className="bg-app-canvas rounded-2xl border border-app-divider shadow-xl w-[720px] max-w-[92vw] max-h-[85vh] flex flex-col overflow-hidden" onClick={e => e.stopPropagation()}>
+            <div className="flex items-center justify-between px-6 py-4 border-b border-app-divider flex-shrink-0">
+              <div className="flex items-center gap-2 min-w-0">
+                <Cable size={15} strokeWidth={1.7} className="text-app-fg-subtle flex-shrink-0" />
+                <h3 className="text-[15px] font-semibold text-app-fg truncate">Integrations · {activeWs.name}</h3>
+              </div>
+              <button
+                onClick={() => setShowIntegrations(false)}
+                className="w-7 h-7 flex items-center justify-center rounded-md text-app-fg-subtle hover:bg-app-nav-hover-bg hover:text-app-fg transition-colors"
+                title="Close"
+              >
+                <X size={15} strokeWidth={1.7} />
+              </button>
+            </div>
+            <div className="flex-1 overflow-y-auto px-6 py-5">
+              {isConnectorsEnabled() ? (
+                <ConnectionsTab fixedWorkspaceId={activeWs.id} embedded />
+              ) : (
+                <p className="text-[13px] text-app-fg-subtle leading-relaxed">
+                  Connectors aren’t enabled in this build yet. Once enabled, you’ll connect tools
+                  like Jira here — scoped to <span className="text-app-fg font-medium">{activeWs.name}</span>.
+                </p>
+              )}
+            </div>
+          </div>
+        </div>
+      )}
+
       {renameTarget && (
         <div className="fixed inset-0 z-[9999] flex items-center justify-center bg-black/30 backdrop-blur-sm" onClick={() => setRenameTarget(null)}>
           <div className="bg-app-canvas rounded-2xl border border-app-divider shadow-xl w-[360px] p-5" onClick={e => e.stopPropagation()}>

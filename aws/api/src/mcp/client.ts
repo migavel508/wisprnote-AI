@@ -30,7 +30,7 @@ async function parseRpc(resp: Response): Promise<JsonRpcResult> {
   try { return JSON.parse(text); } catch { return {}; }
 }
 
-async function rpc(url: string, token: string, sessionId: string | null, id: number, method: string, params: unknown): Promise<{ body: JsonRpcResult; sessionId: string | null }> {
+async function rpc(url: string, token: string, sessionId: string | null, id: number, method: string, params: unknown, extra?: Record<string, string>): Promise<{ body: JsonRpcResult; sessionId: string | null }> {
   const ctrl = new AbortController();
   const timer = setTimeout(() => ctrl.abort(), TIMEOUT_MS);
   try {
@@ -41,6 +41,7 @@ async function rpc(url: string, token: string, sessionId: string | null, id: num
         Accept: 'application/json, text/event-stream',
         Authorization: `Bearer ${token}`,
         'MCP-Protocol-Version': PROTOCOL_VERSION,
+        ...(extra || {}),
         ...(sessionId ? { 'Mcp-Session-Id': sessionId } : {}),
       },
       body: JSON.stringify({ jsonrpc: '2.0', id, method, params }),
@@ -53,7 +54,7 @@ async function rpc(url: string, token: string, sessionId: string | null, id: num
   }
 }
 
-async function notify(url: string, token: string, sessionId: string | null, method: string): Promise<void> {
+async function notify(url: string, token: string, sessionId: string | null, method: string, extra?: Record<string, string>): Promise<void> {
   try {
     await fetch(url, {
       method: 'POST',
@@ -62,6 +63,7 @@ async function notify(url: string, token: string, sessionId: string | null, meth
         Accept: 'application/json, text/event-stream',
         Authorization: `Bearer ${token}`,
         'MCP-Protocol-Version': PROTOCOL_VERSION,
+        ...(extra || {}),
         ...(sessionId ? { 'Mcp-Session-Id': sessionId } : {}),
       },
       body: JSON.stringify({ jsonrpc: '2.0', method, params: {} }),
@@ -70,22 +72,22 @@ async function notify(url: string, token: string, sessionId: string | null, meth
 }
 
 /** Open a session: initialize handshake. Returns the session id (if any). */
-async function openSession(url: string, token: string): Promise<string | null> {
+async function openSession(url: string, token: string, extra?: Record<string, string>): Promise<string | null> {
   const { body, sessionId } = await rpc(url, token, null, 1, 'initialize', {
     protocolVersion: PROTOCOL_VERSION,
     capabilities: {},
     clientInfo: { name: 'wisprnote', version: '1.0' },
-  });
+  }, extra);
   if (body.error) throw new Error(`MCP initialize failed: ${body.error.message}`);
-  await notify(url, token, sessionId, 'notifications/initialized');
+  await notify(url, token, sessionId, 'notifications/initialized', extra);
   return sessionId;
 }
 
 /** List the tools a server exposes. */
 export async function mcpListTools(server: McpServer, token: string): Promise<any[]> {
   if (!server.url) throw new Error(`MCP server ${server.id} has no endpoint configured`);
-  const sid = await openSession(server.url, token);
-  const { body } = await rpc(server.url, token, sid, 2, 'tools/list', {});
+  const sid = await openSession(server.url, token, server.headers);
+  const { body } = await rpc(server.url, token, sid, 2, 'tools/list', {}, server.headers);
   if (body.error) throw new Error(`MCP tools/list failed: ${body.error.message}`);
   return body.result?.tools ?? [];
 }
@@ -93,8 +95,8 @@ export async function mcpListTools(server: McpServer, token: string): Promise<an
 /** Call one tool and return its result. */
 export async function mcpCallTool(server: McpServer, token: string, name: string, args: Record<string, unknown>): Promise<any> {
   if (!server.url) throw new Error(`MCP server ${server.id} has no endpoint configured`);
-  const sid = await openSession(server.url, token);
-  const { body } = await rpc(server.url, token, sid, 3, 'tools/call', { name, arguments: args });
+  const sid = await openSession(server.url, token, server.headers);
+  const { body } = await rpc(server.url, token, sid, 3, 'tools/call', { name, arguments: args }, server.headers);
   if (body.error) throw new Error(`MCP tools/call(${name}) failed: ${body.error.message}`);
   return body.result;
 }
