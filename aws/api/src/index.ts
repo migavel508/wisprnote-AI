@@ -22,6 +22,7 @@ import { runJiraAgentSweep } from './connectors/jira/agent';
 import { listPendingProposals, resolveProposal } from './connectors/proposals';
 import { listAudit, getAudit, markRolledBack } from './connectors/jira/audit';
 import { getBrainEdges } from './connectors/brainEdges';
+import { getMapping, setGithubRepos, rememberRoute } from './connectors/routing';
 import { executeMcpWrite } from './mcp/write';
 import { mcpListTools } from './mcp/client';
 import { beginMcpOAuth, completeMcpOAuth, type OAuthInflight } from './mcp/oauth';
@@ -667,6 +668,28 @@ async function handleConnectors(method: string, segments: string[], userId: stri
     const result = await executeJiraAction(userId, row.workspace_id, row.rollback, { audit: false });
     if (result.ok) await markRolledBack(userId, segments[3], result);
     return ok(result);
+  }
+
+  // GET /connectors/routing?workspace= → the workspace's project mapping (Jira project + GitHub repos).
+  if (method === 'GET' && id === 'routing') {
+    return ok(await getMapping(userId, qsWorkspace));
+  }
+  // POST /connectors/routing?workspace= { source, projectKey?, repos? } → set the mapping.
+  // For GitHub, also PRUNE off-project items so the workspace's brain holds just this project.
+  if (method === 'POST' && id === 'routing') {
+    const b = parseBody(event);
+    if (b.source === 'jira' && b.projectKey) await rememberRoute(userId, qsWorkspace, String(b.projectKey), 'jira', true);
+    if (b.source === 'github') {
+      const repos = Array.isArray(b.repos) ? b.repos.map((r: any) => String(r).trim()).filter(Boolean) : [];
+      await setGithubRepos(userId, qsWorkspace, repos);
+      if (repos.length) {
+        await query(
+          `DELETE FROM knowledge_item WHERE user_id=$1 AND workspace_id=$2 AND source='github' AND split_part(source_id,'#',1) <> ALL($3)`,
+          [userId, qsWorkspace, repos],
+        ).catch(() => {});
+      }
+    }
+    return ok({ ok: true, mapping: await getMapping(userId, qsWorkspace) });
   }
 
   // POST /connectors/{id}/pat?workspace= { token } → connect via a Personal Access Token

@@ -3,8 +3,10 @@ import { Loader2, Check, X, ExternalLink } from 'lucide-react';
 import { CONNECTORS, CONNECTOR_CATEGORIES, type ConnectorDef } from '../../config/connectors';
 import {
   isConnectorsEnabled, listConnectors, getConnectorOAuthUrl, disconnectConnector, setConnectorToken,
+  getProjectMapping, setProjectMapping,
   type ConnectorStatus,
 } from '../../services/connectorService';
+import { getJiraMeta } from '../../services/jiraActionService';
 import { getWorkspaces, type Workspace } from '../../services/workspaceService';
 import { useConnectorOAuth, setPendingConnector } from './useConnectorOAuth';
 
@@ -115,6 +117,35 @@ export default function ConnectionsTab({ fixedWorkspaceId, embedded }: Connectio
 
   useEffect(() => { void refresh(); }, [refresh]);
 
+  // Project mapping: scope this workspace's brain to its exact Jira project + GitHub repos.
+  const [jiraProject, setJiraProject] = useState('');
+  const [repoText, setRepoText] = useState('');
+  const [jiraProjects, setJiraProjects] = useState<Array<{ key: string; name: string }>>([]);
+  const [savingMap, setSavingMap] = useState(false);
+  const [mapSaved, setMapSaved] = useState(false);
+
+  useEffect(() => {
+    if (!isConnectorsEnabled() || !workspaceId) return;
+    let cancelled = false;
+    void getProjectMapping(workspaceId).then((m) => {
+      if (cancelled) return;
+      setJiraProject(m.jiraProject || '');
+      setRepoText((m.githubRepos || []).join(', '));
+    });
+    void getJiraMeta(workspaceId).then((m) => { if (!cancelled && m.connected) setJiraProjects(m.projects); }).catch(() => {});
+    return () => { cancelled = true; };
+  }, [workspaceId]);
+
+  const saveMapping = useCallback(async () => {
+    if (!workspaceId) return;
+    setSavingMap(true); setMapSaved(false);
+    if (jiraProject) await setProjectMapping(workspaceId, { source: 'jira', projectKey: jiraProject });
+    const repos = repoText.split(',').map((s) => s.trim()).filter(Boolean);
+    await setProjectMapping(workspaceId, { source: 'github', repos });
+    setSavingMap(false); setMapSaved(true);
+    setTimeout(() => setMapSaved(false), 2500);
+  }, [workspaceId, jiraProject, repoText]);
+
   // Finish the OAuth round-trip when the deep-link callback fires.
   const onOAuthDone = useCallback((id: string, ok: boolean) => {
     setBusyId(null);
@@ -188,6 +219,42 @@ export default function ConnectionsTab({ fixedWorkspaceId, embedded }: Connectio
           <span className="text-[11px] text-app-fg-subtle">
             Connections are scoped to this workspace — connect a different account per company.
           </span>
+        </div>
+      )}
+
+      {isConnectorsEnabled() && workspaceId && (statusById['jira']?.connected || statusById['github']?.connected) && (
+        <div className="mb-8 rounded-xl border border-app-border bg-app-panel p-4">
+          <div className="text-[12.5px] font-semibold text-app-fg mb-1">Project mapping</div>
+          <p className="text-[11.5px] text-app-fg-subtle leading-relaxed mb-3">
+            Tell the brain which project this workspace IS, so it links the right meetings, tickets and repos —
+            and ignores everything else. Without this, the brain pulls in every repo you touch.
+          </p>
+          <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
+            {statusById['jira']?.connected && (
+              <div>
+                <span className="text-[10px] font-mono font-medium text-app-fg-label uppercase tracking-[0.1em] mb-1 block">Jira project</span>
+                <select value={jiraProject} onChange={(e) => setJiraProject(e.target.value)}
+                  className="w-full text-[12.5px] bg-app-canvas border border-app-border rounded-lg px-2.5 py-1.5 text-app-fg outline-none focus:border-app-accent">
+                  <option value="">— none —</option>
+                  {jiraProjects.map((p) => <option key={p.key} value={p.key}>{p.key} · {p.name}</option>)}
+                </select>
+              </div>
+            )}
+            {statusById['github']?.connected && (
+              <div>
+                <span className="text-[10px] font-mono font-medium text-app-fg-label uppercase tracking-[0.1em] mb-1 block">GitHub repos</span>
+                <input value={repoText} onChange={(e) => setRepoText(e.target.value)} placeholder="owner/repo, owner/repo2"
+                  className="w-full text-[12.5px] bg-app-canvas border border-app-border rounded-lg px-2.5 py-1.5 text-app-fg outline-none focus:border-app-accent placeholder:text-app-fg-subtle" />
+              </div>
+            )}
+          </div>
+          <div className="flex items-center gap-2 mt-3">
+            <button onClick={saveMapping} disabled={savingMap}
+              className="px-3 py-1.5 rounded-lg text-[12px] font-semibold bg-app-accent text-app-accent-fg hover:bg-app-accent-hover disabled:opacity-60 flex items-center gap-1.5">
+              {savingMap ? <Loader2 size={12} className="animate-spin" /> : <Check size={12} strokeWidth={2.5} />} Save mapping
+            </button>
+            {mapSaved && <span className="text-[11.5px] text-app-fg-subtle">Saved — the next sync scopes this workspace to it.</span>}
+          </div>
         </div>
       )}
 

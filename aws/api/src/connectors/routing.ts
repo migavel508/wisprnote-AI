@@ -20,12 +20,16 @@ export function ensureRoutingSchema(): Promise<void> {
           user_id UUID NOT NULL,
           workspace_id UUID NOT NULL,
           source TEXT NOT NULL DEFAULT 'jira',
-          project_key TEXT NOT NULL,
+          project_key TEXT,                 -- jira: project key; null for repo-mapped sources
+          repos TEXT[],                     -- github: mapped repos (owner/name)
           confirmed BOOLEAN NOT NULL DEFAULT FALSE,
           updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
           PRIMARY KEY (user_id, workspace_id, source)
         )
       `);
+      // Migrate older installs (project_key NOT NULL + no repos column).
+      await query(`ALTER TABLE connector_routing ALTER COLUMN project_key DROP NOT NULL`).catch(() => {});
+      await query(`ALTER TABLE connector_routing ADD COLUMN IF NOT EXISTS repos TEXT[]`).catch(() => {});
     })().catch((e) => { ready = null; throw e; });
   }
   return ready;
@@ -39,6 +43,39 @@ export async function getRoute(userId: string, workspaceId: string, source = 'ji
     [userId, workspaceId, source],
   );
   return r?.project_key ?? null;
+}
+
+/** The full project mapping for a workspace: Jira project + GitHub repos. */
+export async function getMapping(userId: string, workspaceId: string): Promise<{ jiraProject: string | null; githubRepos: string[] }> {
+  await ensureRoutingSchema();
+  const rows = await queryOne<{ jira: string | null; repos: string[] | null }>(
+    `SELECT MAX(project_key) FILTER (WHERE source='jira') AS jira,
+            (ARRAY_AGG(repos) FILTER (WHERE source='github'))[1] AS repos
+       FROM connector_routing WHERE user_id=$1 AND workspace_id=$2`,
+    [userId, workspaceId],
+  );
+  return { jiraProject: rows?.jira ?? null, githubRepos: rows?.repos ?? [] };
+}
+
+/** The GitHub repos a workspace is scoped to (empty = all the user is involved in). */
+export async function getGithubRepos(userId: string, workspaceId: string): Promise<string[]> {
+  await ensureRoutingSchema();
+  const r = await queryOne<{ repos: string[] | null }>(
+    `SELECT repos FROM connector_routing WHERE user_id=$1 AND workspace_id=$2 AND source='github'`,
+    [userId, workspaceId],
+  );
+  return r?.repos ?? [];
+}
+
+/** Set the workspace's GitHub repo mapping (owner/name list). */
+export async function setGithubRepos(userId: string, workspaceId: string, repos: string[]): Promise<void> {
+  await ensureRoutingSchema();
+  await query(
+    `INSERT INTO connector_routing (user_id, workspace_id, source, repos, confirmed)
+     VALUES ($1,$2,'github',$3,TRUE)
+     ON CONFLICT (user_id, workspace_id, source) DO UPDATE SET repos=EXCLUDED.repos, confirmed=TRUE, updated_at=NOW()`,
+    [userId, workspaceId, repos],
+  );
 }
 
 /** Remember a project for a workspace (learned when the user approves a create). */
