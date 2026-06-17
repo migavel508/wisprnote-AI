@@ -32,6 +32,9 @@ enum DeepgramResponse {
         is_final: bool,
         #[serde(default)]
         speech_final: bool,
+        // [channel_index, total_channels] — ch0 = mic (You), ch1 = system (participants).
+        #[serde(default)]
+        channel_index: Vec<u32>,
     },
     #[serde(rename = "Metadata")]
     Metadata {
@@ -63,22 +66,6 @@ struct Alternative {
     words: Vec<Word>,
 }
 
-fn group_words_by_speaker(words: &[Word]) -> Vec<(u32, String)> {
-    let mut segments: Vec<(u32, String)> = Vec::new();
-    for word in words {
-        let speaker = word.speaker.unwrap_or(0);
-        if let Some(last) = segments.last_mut() {
-            if last.0 == speaker {
-                last.1.push(' ');
-                last.1.push_str(&word.word);
-                continue;
-            }
-        }
-        segments.push((speaker, word.word.clone()));
-    }
-    segments
-}
-
 fn percent_encode_query_value(value: &str) -> String {
     let mut encoded = String::new();
     for byte in value.as_bytes() {
@@ -93,19 +80,14 @@ fn percent_encode_query_value(value: &str) -> String {
     encoded
 }
 
-fn format_transcript_with_speakers(words: &[Word], fallback: &str) -> (Option<u32>, String) {
-    let segments = group_words_by_speaker(words);
-    if segments.is_empty() {
-        return (None, fallback.trim().to_string());
+/// Resolve a display label. ch0 = the mic = "You". ch1 = participants, where diarize tells
+/// us which remote speaker (1-based).
+fn speaker_label(channel: u32, words: &[Word]) -> String {
+    if channel == 0 {
+        return "You".to_string();
     }
-
-    let first_speaker = segments.first().map(|(speaker, _)| *speaker);
-    let text = segments
-        .into_iter()
-        .map(|(speaker, seg)| format!("Speaker {}: {}", speaker + 1, seg))
-        .collect::<Vec<_>>()
-        .join(" ");
-    (first_speaker, text)
+    let spk = words.first().and_then(|w| w.speaker).unwrap_or(0);
+    format!("Speaker {}", spk + 1)
 }
 
 pub struct DeepgramTranscriber {
@@ -113,18 +95,22 @@ pub struct DeepgramTranscriber {
     api_key: String,
     #[allow(dead_code)]
     sample_rate: u32,
-    tx: mpsc::UnboundedSender<Vec<f32>>,
+    // Option so we can DROP the audio sender on stop → Deepgram flushes its trailing
+    // FINAL results (the last words you spoke), which the recorder then drains. Without
+    // this the final utterance (still shown as faded interim) is lost.
+    tx: Option<mpsc::UnboundedSender<Vec<f32>>>,
     transcript_rx: mpsc::UnboundedReceiver<String>,
 }
 
 impl DeepgramTranscriber {
-    pub fn new(api_key: String, sample_rate: u32, keyterms: Option<Vec<String>>) -> Self {
+    pub fn new(api_key: String, sample_rate: u32, keyterms: Option<Vec<String>>, language: Option<String>) -> Self {
         let (tx, rx) = mpsc::unbounded_channel();
         let (transcript_tx, transcript_rx) = mpsc::unbounded_channel();
 
         let api_key_clone = api_key.clone();
+        let lang = language.unwrap_or_else(|| "en".to_string());
         tokio::spawn(async move {
-            if let Err(e) = Self::run_websocket(api_key_clone, sample_rate, keyterms, rx, transcript_tx).await {
+            if let Err(e) = Self::run_websocket(api_key_clone, sample_rate, keyterms, lang, rx, transcript_tx).await {
                 eprintln!("Deepgram WebSocket error: {}", e);
             }
         });
@@ -132,13 +118,22 @@ impl DeepgramTranscriber {
         Self {
             api_key,
             sample_rate,
-            tx,
+            tx: Some(tx),
             transcript_rx,
         }
     }
 
     pub fn send_audio(&self, samples: Vec<f32>) -> Result<()> {
-        self.tx.send(samples).context("Failed to send audio samples")
+        match &self.tx {
+            Some(tx) => tx.send(samples).context("Failed to send audio samples"),
+            None => Ok(()),
+        }
+    }
+
+    /// Stop sending audio → Deepgram flushes trailing FINAL results. The caller should
+    /// keep polling `try_recv_transcript` for a few seconds afterwards to drain them.
+    pub fn close_input(&mut self) {
+        self.tx.take();
     }
 
     pub fn try_recv_transcript(&mut self) -> Option<String> {
@@ -154,10 +149,11 @@ impl DeepgramTranscriber {
         api_key: String,
         sample_rate: u32,
         keyterms: Option<Vec<String>>,
+        language: String,
         mut audio_rx: mpsc::UnboundedReceiver<Vec<f32>>,
         transcript_tx: mpsc::UnboundedSender<String>,
     ) -> Result<()> {
-        let url = Self::build_url(sample_rate, keyterms);
+        let url = Self::build_url(sample_rate, keyterms, &language);
         let mut backoff_ms = 500u64;
 
         loop {
@@ -184,16 +180,18 @@ impl DeepgramTranscriber {
         Ok(())
     }
 
-    fn build_url(sample_rate: u32, keyterms: Option<Vec<String>>) -> String {
+    fn build_url(sample_rate: u32, keyterms: Option<Vec<String>>, language: &str) -> String {
         // Deepgram tuning for live meetings:
-        // - language=multi enables Nova-3 multilingual code-switching (detect_language
-        //   is not supported on streaming, so multi is the real-time path)
-        // - diarize + utterances for speaker segmentation
-        // - endpointing/utterance_end tuned for stable finalization on long calls
-        // - keyterm prompting for names/domain vocabulary
+        // - language selectable (default "en"; "multi" for code-switching).
+        // - MULTICHANNEL source labelling: ch0 = mic (You), ch1 = system (Participants). The
+        //   capture side HALF-DUPLEX gates the mic to silence whenever the system is active, so
+        //   the participant's voice (acoustic echo) never lands on ch0 — clean source labels
+        //   with no duplication, no echo canceller. diarize splits multiple remote people on ch1.
+        // - endpointing/utterance_end tuned for low-latency finalization.
+        // - keyterm prompting for names/domain vocabulary.
         let mut url = format!(
-            "{}?encoding=linear16&sample_rate={}&channels=1&model=nova-3&language=multi&interim_results=true&smart_format=true&punctuate=true&numerals=true&diarize=true&utterances=true&filler_words=false&endpointing=400&utterance_end_ms=1200&vad_events=true&no_delay=true",
-            DEEPGRAM_WS_URL, sample_rate
+            "{}?encoding=linear16&sample_rate={}&channels=2&multichannel=true&model=nova-3&language={}&interim_results=true&smart_format=true&punctuate=true&numerals=true&diarize=true&utterances=true&filler_words=false&endpointing=300&utterance_end_ms=1000&vad_events=true&no_delay=true",
+            DEEPGRAM_WS_URL, sample_rate, language
         );
         if let Some(terms) = keyterms {
             for term in terms
@@ -315,7 +313,7 @@ impl DeepgramTranscriber {
     }
 
     fn handle_text(text: &str, transcript_tx: &mpsc::UnboundedSender<String>) {
-        let Ok(DeepgramResponse::Results { channel, is_final, .. }) =
+        let Ok(DeepgramResponse::Results { channel, is_final, channel_index, .. }) =
             serde_json::from_str::<DeepgramResponse>(text)
         else {
             return;
@@ -323,19 +321,15 @@ impl DeepgramTranscriber {
         let Some(alt) = channel.alternatives.first() else {
             return;
         };
-        if alt.transcript.trim().is_empty() {
+        let transcript_text = alt.transcript.trim();
+        if transcript_text.is_empty() {
             return;
         }
         let kind = if is_final { "FINAL" } else { "INTERIM" };
-        let (speaker_hint, transcript_text) = if is_final {
-            format_transcript_with_speakers(&alt.words, &alt.transcript)
-        } else {
-            (alt.words.first().and_then(|w| w.speaker), alt.transcript.trim().to_string())
-        };
-        let speaker_tag = speaker_hint
-            .map(|s| s.to_string())
-            .unwrap_or_else(|| "U".to_string());
-        let _ = transcript_tx.send(format!("[{}:{}] {}", kind, speaker_tag, transcript_text));
+        // ch0 = mic (You), ch1 = system (participants). Protocol: "[KIND|Label] text".
+        let ch = channel_index.first().copied().unwrap_or(0);
+        let label = speaker_label(ch, &alt.words);
+        let _ = transcript_tx.send(format!("[{}|{}] {}", kind, label, transcript_text));
     }
 
     fn f32_to_i16_bytes(samples: &[f32]) -> Vec<u8> {

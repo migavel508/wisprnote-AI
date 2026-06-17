@@ -1,4 +1,5 @@
-import { ChevronDown, Lock, Radio, Power, PanelRightOpen, Palette, Sparkles, Link2, ExternalLink, Database } from 'lucide-react';
+import { useState } from 'react';
+import { ChevronDown, Lock, Radio, Power, PanelRightOpen, Palette, Sparkles, Link2, ExternalLink, Database, Mic } from 'lucide-react';
 import Toggle from '../../components/ui/Toggle';
 import { useTheme, type ThemePreference } from '../../theme/ThemeProvider';
 import { useSetting } from './useSetting';
@@ -123,6 +124,15 @@ export default function PreferencesTab() {
   const [defaultShare, setDefaultShare] = useSetting<'anyone' | 'workspace' | 'private'>('defaultLinkSharing', 'anyone');
   const [openLinksInApp, setOpenLinksInApp] = useSetting('openSharedLinksInApp', true);
   const [improveModels, setImproveModels] = useSetting('improveModels', false);
+  // Transcription language — stored as a RAW localStorage value so the recorder service
+  // (plain TS, no hook) can read it directly. Default English for best English accuracy.
+  const [transcriptionLanguage, setTranscriptionLanguageState] = useState<string>(() => {
+    try { return localStorage.getItem('transcriptionLanguage') || 'en'; } catch { return 'en'; }
+  });
+  const setTranscriptionLanguage = (v: string) => {
+    setTranscriptionLanguageState(v);
+    try { localStorage.setItem('transcriptionLanguage', v); } catch { /* ignore */ }
+  };
 
   return (
     <div className="max-w-[680px] mx-auto px-8 pb-16">
@@ -185,6 +195,30 @@ export default function PreferencesTab() {
             </div>
           </div>
         </div>
+      </Card>
+
+      <SectionHeading>Transcription</SectionHeading>
+      <Card>
+        <Row
+          icon={Mic}
+          title="Spoken language"
+          description="Pick your main language for the most accurate live transcription. Use Multilingual only if you switch languages mid-sentence."
+          iconBg="bg-emerald-50 dark:bg-emerald-900/30 text-emerald-700 dark:text-emerald-300"
+        >
+          <Select<string>
+            value={transcriptionLanguage}
+            onChange={setTranscriptionLanguage}
+            options={[
+              { value: 'en', label: 'English' },
+              { value: 'es', label: 'Spanish' },
+              { value: 'fr', label: 'French' },
+              { value: 'de', label: 'German' },
+              { value: 'hi', label: 'Hindi' },
+              { value: 'pt', label: 'Portuguese' },
+              { value: 'multi', label: 'Multilingual' },
+            ]}
+          />
+        </Row>
       </Card>
 
       <SectionHeading>Data &amp; sharing</SectionHeading>

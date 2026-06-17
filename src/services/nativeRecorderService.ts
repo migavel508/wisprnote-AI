@@ -88,8 +88,12 @@ export async function isSystemAudioRecording(): Promise<boolean> {
 // ─── Real-time Transcription — Integrated via Tauri commands + events ────────
 // No separate server needed! Audio capture + Deepgram streaming runs inside the Tauri app.
 
-export async function startRealtimeRecording(apiKey: string, keyterms: string[] = []): Promise<void> {
-  await tauriInvoke<void>('start_realtime_audio', { apiKey, keyterms });
+/** `language`: Deepgram model language — 'en' (default, best for English) or 'multi'
+ *  (multilingual code-switching) or any supported code. Persisted via the transcription
+ *  language preference; falls back to English. */
+export async function startRealtimeRecording(apiKey: string, keyterms: string[] = [], language?: string): Promise<void> {
+  const lang = (language && language.trim()) || (typeof localStorage !== 'undefined' && localStorage.getItem('transcriptionLanguage')) || 'en';
+  await tauriInvoke<void>('start_realtime_audio', { apiKey, keyterms, language: lang });
 }
 
 export async function stopRealtimeRecording(): Promise<string> {
@@ -112,25 +116,21 @@ export async function listenForTranscripts(
 
   const unlisten = await listen<string>('realtime-transcript', (event) => {
     const raw = event.payload;
-    // Format: [FINAL:speaker] text  or  [INTERIM:speaker] text
-    const match = raw.match(/^\[(FINAL|INTERIM):([^\]]+)\]\s*(.*)/);
+    // Protocol: "[FINAL|Label] text" or "[INTERIM|Label] text". Label is already resolved by
+    // the native side: "You" (your mic) or "Speaker N" (a remote participant).
+    const match = raw.match(/^\[(FINAL|INTERIM)\|([^\]]*)\]\s*(.*)/s);
     if (!match) return;
     const isFinal = match[1] === 'FINAL';
-    const speakerRaw = match[2]?.trim();
+    const label = (match[2] || '').trim();
     const clean = match[3].trim();
     if (!clean) return;
 
-    const speaker = speakerRaw && speakerRaw !== 'U' ? speakerRaw : undefined;
-    if (speaker) {
-      // User-facing speaker labels (Deepgram starts speakers at 0).
-      const speakerNum = Number(speaker);
-      const safeSpeaker = Number.isFinite(speakerNum) ? `Speaker ${speakerNum + 1}` : `Speaker ${speaker}`;
-      const alreadyLabeled = /^speaker\s+\d+:/i.test(clean);
-      const displayText = alreadyLabeled ? clean : `${safeSpeaker}: ${clean}`;
-      onTranscript(displayText, isFinal, speaker);
+    if (label) {
+      const alreadyLabeled = new RegExp(`^${label}\\s*:`, 'i').test(clean);
+      const displayText = alreadyLabeled ? clean : `${label}: ${clean}`;
+      onTranscript(displayText, isFinal, label);
       return;
     }
-
     onTranscript(clean, isFinal, undefined);
   });
 

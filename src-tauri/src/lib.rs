@@ -199,13 +199,14 @@ fn get_system_audio_size(state: tauri::State<AppState>) -> usize {
 fn start_realtime_audio(
     api_key: String,
     keyterms: Option<Vec<String>>,
+    language: Option<String>,
     app_handle: tauri::AppHandle,
     state: tauri::State<AppState>,
     detect: tauri::State<mic_detect::MicDetectState>,
 ) -> Result<(), String> {
     detect.paused.store(true, std::sync::atomic::Ordering::SeqCst);
     let mut recorder = state.realtime_recorder.lock().map_err(|e| e.to_string())?;
-    recorder.start(api_key, keyterms, app_handle)
+    recorder.start(api_key, keyterms, language, app_handle)
 }
 
 /// Stop realtime recording and return the full transcript
