@@ -26,7 +26,11 @@ function ensureEmbedColumn(): Promise<void> {
 }
 
 function itemText(r: any): string {
-  return [r.title, (r.body || '').toString().slice(0, PER_ITEM_CHARS)].filter(Boolean).join('\n').slice(0, PER_ITEM_CHARS + 200);
+  // Priority: enriched diff-summary (Tier 2, only link candidates have it) → fingerprint
+  // (Tier 1, deterministic filenames+stats — cheap, strong candidate signal) → raw body
+  // (fluff message). This lets ALL commits be matched semantically without an LLM pass.
+  const content = (r.enriched_summary || r.fingerprint || r.body || '').toString().slice(0, PER_ITEM_CHARS);
+  return [r.title, content].filter(Boolean).join('\n').slice(0, PER_ITEM_CHARS + 200);
 }
 
 /** Embed a bounded batch of new/changed knowledge_items into the brain index. */
@@ -34,11 +38,11 @@ export async function embedKnowledgeItems(cap = EMBED_CAP): Promise<{ embedded: 
   await ensureConnectorSchema();
   await ensureEmbedColumn();
   const rows = await query<any>(
-    `SELECT id, user_id, workspace_id, source, title, body
+    `SELECT id, user_id, workspace_id, source, title, body, enriched_summary, fingerprint
        FROM knowledge_item
       WHERE embedded_at IS NULL OR embedded_at < synced_at
       ORDER BY synced_at DESC LIMIT ${cap}`,
-  );
+  ).catch(() => []);
   if (!rows.length) return { embedded: 0 };
   const vectors = await embedTexts(rows.map(itemText));
   if (!vectors) return { embedded: 0 };   // transient embed failure → retry next tick

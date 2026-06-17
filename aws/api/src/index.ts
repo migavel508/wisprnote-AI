@@ -21,10 +21,10 @@ import { jiraMeta, executeJiraAction, type JiraActionProposal } from './connecto
 import { runJiraAgentSweep } from './connectors/jira/agent';
 import { listPendingProposals, resolveProposal } from './connectors/proposals';
 import { listAudit, getAudit, markRolledBack } from './connectors/jira/audit';
-import { getBrainEdges } from './connectors/brainEdges';
+import { getBrainEdges, neighboursOf } from './connectors/brainEdges';
 import { getMapping, setGithubRepos, rememberRoute } from './connectors/routing';
 import { executeMcpWrite } from './mcp/write';
-import { mcpListTools } from './mcp/client';
+import { mcpListTools, mcpCallTool } from './mcp/client';
 import { beginMcpOAuth, completeMcpOAuth, type OAuthInflight } from './mcp/oauth';
 import './connectors/registry'; // registers the no-op connector
 import './connectors/jira';      // registers the Jira (Atlassian MCP) connector
@@ -295,6 +295,24 @@ export const handler = async (event: APIGatewayProxyEvent): Promise<APIGatewayPr
     } catch (err: any) {
       console.error('connector_sync_failed', JSON.stringify({ message: err?.message, code: err?.code, detail: err?.detail }));
       return { statusCode: 500, body: 'connector-sync-error' } as APIGatewayProxyResult;
+    }
+  }
+
+  // Commit FINGERPRINT sweep (EventBridge) — Tier 1 of the cost-bounded brain pipeline.
+  // Cheap & deterministic: get_commit (a GitHub API call, $0 in LLM tokens) → filenames +
+  // stats fingerprint, so semantic candidate-matching has strong signal WITHOUT a diff→LLM
+  // pass over every commit. The expensive Tier-2 diff summary is lazy — brain-link runs it
+  // only for the handful of commits that actually become a meeting's link candidates.
+  if ((event as any).__job === 'brain-enrich') {
+    if (process.env.CONNECTORS_ENABLED !== '1') return { statusCode: 200, body: JSON.stringify({ disabled: true }) } as APIGatewayProxyResult;
+    try {
+      const { fingerprintCommits, backfillCommitSummaries } = await import('./connectors/github/enrich');
+      const fp = await fingerprintCommits(20);                 // Tier 1: cheap, all commits
+      const bf = await backfillCommitSummaries(6).catch(() => ({ enriched: 0, remaining: 0 }));   // Tier 2 drip, capped
+      return { statusCode: 200, body: JSON.stringify({ ...fp, backfill: bf }) } as APIGatewayProxyResult;
+    } catch (err: any) {
+      console.error('brain_enrich_failed', JSON.stringify({ message: err?.message }));
+      return { statusCode: 500, body: 'brain-enrich-error' } as APIGatewayProxyResult;
     }
   }
 
@@ -735,8 +753,15 @@ async function handleConnectors(method: string, segments: string[], userId: stri
     );
     if (!row) return badRequest('unknown or expired oauth state');
     const token = await completeMcpOAuth(row.inflight, code);
+    // Persist the OAuth refresh metadata + expiry WITH the token so the broker can auto-refresh
+    // it later (OAuth access tokens are short-lived; without this the connector goes dark in ~1h).
+    const stored = {
+      ...token.raw,
+      oauth_meta: { token_endpoint: row.inflight.tokenEndpoint, client_id: row.inflight.clientId, client_secret: row.inflight.clientSecret ?? null },
+      expires_at: token.expires_in ? Date.now() + (token.expires_in - 60) * 1000 : null,
+    };
     await storeToken(
-      userId, id, token.raw, null,
+      userId, id, stored, null,
       row.inflight.scope ? row.inflight.scope.split(' ') : null,
       row.workspace_id || ACCOUNT_SCOPE,
     );
@@ -755,6 +780,151 @@ async function handleBrain(method: string, segments: string[], userId: string, e
     if (!ws) return badRequest('workspace required');
     return ok({ enabled: true, edges: await getBrainEdges(userId, ws) });
   }
+
+  // POST /brain/sync?workspace= → ON-DEMAND freshness (the sync-now / open-the-app path).
+  // Bounded to fit the API-GW window: pull this workspace's latest Jira/GitHub state, ingest
+  // meetings, embed + fingerprint the new items, and form CHEAP links (no slow LLM verdicts —
+  // those refresh on the 30-min cron). New commits/tasks + status changes appear immediately.
+  if (method === 'POST' && segments[1] === 'sync') {
+    const ws = event.queryStringParameters?.workspace;
+    if (!ws) return badRequest('workspace required');
+    const out: any = { synced: 0, ingested: 0, embedded: 0, fingerprinted: 0 };
+    try {
+      const { runConnectorSync } = await import('./connectors/sync');
+      out.synced = (await runConnectorSync(ws)).processed;
+      try { const { ingestMeetings } = await import('./connectors/meetingIngest'); out.ingested = (await ingestMeetings()).ingested; } catch { /* best-effort */ }
+      try { const { fingerprintCommits } = await import('./connectors/github/enrich'); out.fingerprinted = (await fingerprintCommits(8)).fingerprinted; } catch { /* best-effort */ }
+      try { const { embedKnowledgeItems } = await import('./connectors/embed'); out.embedded = (await embedKnowledgeItems(48)).embedded; } catch { /* best-effort */ }
+      try { const { runBrainLink } = await import('./connectors/brainLink'); await runBrainLink({ workspaceId: ws, llmBudget: 0, timeBudgetMs: 8000 }); } catch { /* verdicts catch up on the cron */ }
+    } catch (err: any) {
+      console.error('brain_sync_now_failed', JSON.stringify({ message: err?.message }));
+    }
+    return ok({ enabled: true, ...out, syncedAt: new Date().toISOString() });
+  }
+
+  // GET /brain/alerts?workspace= → the leader-facing OFF-TRACK digest: code that diverged
+  // from what was decided, risky commits, and tasks stuck in progress. The "is anything wrong?"
+  // view for a CEO/lead.
+  if (method === 'GET' && segments[1] === 'alerts') {
+    const ws = event.queryStringParameters?.workspace;
+    if (!ws) return badRequest('workspace required');
+    const alerts: any[] = [];
+    // 1) Divergent work — a commit/PR went a different direction than the meeting/task intended.
+    const diverged = await query<any>(
+      `SELECT di.title impl, di.links->>'url' url, e.rationale, si.title intent
+         FROM brain_edge e JOIN knowledge_item si ON si.id::text=e.src_id JOIN knowledge_item di ON di.id::text=e.dst_id
+        WHERE e.user_id=$1 AND e.workspace_id=$2 AND e.verdict='divergent' ORDER BY e.created_at DESC LIMIT 15`,
+      [userId, ws],
+    ).catch(() => []);
+    for (const d of diverged) alerts.push({ type: 'divergent', severity: 'high', title: d.impl, detail: d.rationale || `Diverges from "${d.intent}"`, intent: d.intent, url: d.url ?? null });
+    // 2) Risky commits — the co-architect flagged an architectural risk.
+    const risky = await query<any>(
+      `SELECT title, advisory_assessment, advisory_note, links->>'url' url FROM knowledge_item
+        WHERE user_id=$1 AND workspace_id=$2 AND advisory_assessment IN ('risk','concern') ORDER BY (advisory_assessment='risk') DESC, synced_at DESC LIMIT 20`,
+      [userId, ws],
+    ).catch(() => []);
+    for (const r of risky) alerts.push({ type: r.advisory_assessment === 'risk' ? 'risk' : 'concern', severity: r.advisory_assessment === 'risk' ? 'high' : 'low', title: r.title, detail: r.advisory_note || 'Architectural attention suggested', url: r.url ?? null });
+    // 3) Stalled work — a task in progress with no update for over a week.
+    const stalled = await query<any>(
+      `SELECT title, status, occurred_at, links->>'url' url FROM knowledge_item
+        WHERE user_id=$1 AND workspace_id=$2 AND source='jira' AND status ~* 'progress|review|doing'
+          AND occurred_at < NOW() - INTERVAL '7 days' ORDER BY occurred_at ASC LIMIT 15`,
+      [userId, ws],
+    ).catch(() => []);
+    for (const s of stalled) alerts.push({ type: 'stalled', severity: 'medium', title: s.title, detail: `Stuck in "${s.status}" since ${new Date(s.occurred_at).toISOString().slice(0, 10)}`, url: s.url ?? null });
+    // 4) Untracked decisions — a meeting (>7d ago) that HAD action items / decisions but never
+    //    became a Jira task (no edge to any jira item). "Decided, but nobody is tracking it."
+    const untracked = await query<any>(
+      `SELECT ki.title, ki.occurred_at,
+              jsonb_array_length(COALESCE(kg.action_items, '[]'::jsonb)) ai,
+              jsonb_array_length(COALESCE(kg.decisions, '[]'::jsonb)) dec
+         FROM knowledge_item ki
+         JOIN knowledge_graph kg ON kg.task_id::text = ki.source_id AND kg.user_id = ki.user_id
+        WHERE ki.user_id=$1 AND ki.workspace_id=$2 AND ki.source='meeting'
+          AND ki.occurred_at < NOW() - INTERVAL '7 days'
+          AND (jsonb_array_length(COALESCE(kg.action_items, '[]'::jsonb)) > 0 OR jsonb_array_length(COALESCE(kg.decisions, '[]'::jsonb)) > 0)
+          AND NOT EXISTS (
+            SELECT 1 FROM brain_edge e JOIN knowledge_item ji ON ji.id::text = e.dst_id
+             WHERE e.user_id=ki.user_id AND e.workspace_id=ki.workspace_id AND e.src_id = ki.id::text AND ji.source='jira')
+        ORDER BY ki.occurred_at DESC LIMIT 15`,
+      [userId, ws],
+    ).catch(() => []);
+    for (const u of untracked) alerts.push({ type: 'untracked', severity: 'medium', title: u.title, detail: `Had ${u.ai} action item(s) / ${u.dec} decision(s) but no Jira task exists — decided ${new Date(u.occurred_at).toISOString().slice(0, 10)}`, url: null });
+    return ok({ enabled: true, alerts });
+  }
+
+  // GET /brain/pulse?workspace= → the who-did-what-when activity feed (recent observed events).
+  if (method === 'GET' && segments[1] === 'pulse') {
+    const ws = event.queryStringParameters?.workspace;
+    if (!ws) return badRequest('workspace required');
+    const { getEvents } = await import('./connectors/brainEvents');
+    const events = await getEvents(userId, ws, 40);
+    return ok({ enabled: true, events: events.map((e) => ({ kind: e.kind, source: e.source, sourceId: e.source_id, actor: e.actor, from: e.from_state, to: e.to_state, title: e.title, at: e.occurred_at })) });
+  }
+  // GET /brain/node?workspace=&id=item:123 → the full info card for one node: its content
+  // (for commits, the diff-grounded summary) + every reasoned connection (relation, verdict,
+  // rationale) so the brain map can show rich detail like the knowledge graph — not just a link.
+  if (method === 'GET' && segments[1] === 'node') {
+    const ws = event.queryStringParameters?.workspace;
+    const rawId = (event.queryStringParameters?.id || '').replace(/^item:/, '');
+    if (!ws || !rawId || !/^\d+$/.test(rawId)) return badRequest('workspace + numeric id required');
+    const node = await queryOne<any>(
+      `SELECT id, source, type, title, body, enriched_summary, fingerprint, people, links, source_id, occurred_at, status, advisory_assessment, advisory_note
+         FROM knowledge_item WHERE user_id=$1 AND workspace_id=$2 AND id=$3`,
+      [userId, ws, rawId],
+    ).catch(() => null);
+    if (!node) return notFound();
+    // On-demand enrichment: if you OPEN a commit that has no diff-summary yet, generate it now
+    // (one cheap Flash call) so the card always shows PROSE — never the raw fingerprint dump.
+    // Bounded by "only commits you actually look at"; cached after.
+    if (node.type === 'commit' && !node.enriched_summary) {
+      try {
+        const { enrichCommit } = await import('./connectors/github/enrich');
+        const s = await enrichCommit(userId, ws, rawId);
+        if (s) node.enriched_summary = s;
+      } catch { /* fall back to fingerprint */ }
+    }
+    // Timeline of observed changes for this item (who moved it when).
+    const events = await query<any>(
+      `SELECT kind, actor, from_state, to_state, occurred_at FROM brain_event
+         WHERE user_id=$1 AND workspace_id=$2 AND item_id=$3 ORDER BY occurred_at DESC NULLS LAST LIMIT 12`,
+      [userId, ws, rawId],
+    ).catch(() => []);
+    const edges = await neighboursOf(userId, ws, 'item', rawId, 40).catch(() => []);
+    // Resolve the OTHER end of each edge to a real item (title/source/url), keep the reasoning.
+    const otherIds = Array.from(new Set(edges.map((e) => (e.src_id === rawId ? e.dst_id : e.src_id)).filter((x) => /^\d+$/.test(x))));
+    const others = otherIds.length ? await query<any>(
+      `SELECT id, source, type, title, source_id, links FROM knowledge_item WHERE user_id=$1 AND workspace_id=$2 AND id = ANY($3::bigint[])`,
+      [userId, ws, otherIds],
+    ).catch(() => []) : [];
+    const byId = new Map(others.map((o: any) => [String(o.id), o]));
+    const connections = edges.map((e) => {
+      const outgoing = e.src_id === rawId;
+      const otherId = outgoing ? e.dst_id : e.src_id;
+      const o = byId.get(otherId);
+      if (!o) return null;
+      return {
+        id: `item:${o.id}`, title: o.title || o.source_id, source: o.source, type: o.type, url: o.links?.url ?? null,
+        relation: e.relation, origin: e.origin, direction: outgoing ? 'out' : 'in',
+        verdict: e.verdict ?? null, rationale: e.rationale ?? null,
+      };
+    }).filter(Boolean);
+    // Verdict-bearing (reasoned) connections first, then by source.
+    connections.sort((a: any, b: any) => (b.verdict ? 1 : 0) - (a.verdict ? 1 : 0));
+    return ok({
+      enabled: true,
+      node: {
+        id: `item:${node.id}`, source: node.source, type: node.type, title: node.title || node.source_id,
+        summary: node.enriched_summary || node.fingerprint || node.body || null,
+        body: node.body || null, people: node.people || null, url: node.links?.url ?? null,
+        sourceId: node.source_id, occurredAt: node.occurred_at, status: node.status ?? null,
+        advisoryAssessment: node.advisory_assessment ?? null, advisoryNote: node.advisory_note ?? null,
+      },
+      connections,
+      events: events.map((e: any) => ({ kind: e.kind, actor: e.actor, from: e.from_state, to: e.to_state, at: e.occurred_at })),
+    });
+  }
+
   // GET /brain/graph?workspace= → nodes (items + meetings) + edges, for the brain map.
   if (method === 'GET' && segments[1] === 'graph') {
     const ws = event.queryStringParameters?.workspace;
@@ -763,11 +933,23 @@ async function handleBrain(method: string, segments: string[], userId: string, e
     // Meetings are now knowledge_item rows (source='meeting'), so this single query covers
     // every brain node — meetings, Jira, GitHub — and matches the brain_edge endpoints.
     const items = await query<any>(
-      `SELECT id, source, type, title, source_id, links FROM knowledge_item WHERE user_id=$1 AND workspace_id=$2 LIMIT 2000`,
+      `SELECT id, source, type, title, source_id, links, status FROM knowledge_item WHERE user_id=$1 AND workspace_id=$2 LIMIT 2000`,
       [userId, ws],
     ).catch(() => []);
-    const nodes = items.map((i: any) => ({ id: `item:${i.id}`, kind: 'item', source: i.source, type: i.type, title: i.title || i.source_id, url: i.links?.url ?? null }));
-    return ok({ enabled: true, nodes, edges });
+    const nodes: any[] = items.map((i: any) => ({ id: `item:${i.id}`, kind: 'item', source: i.source, type: i.type, title: i.title || i.source_id, url: i.links?.url ?? null, status: i.status ?? null }));
+    // Reasoning lives ON the edge (verdict + rationale colour & explain the line — no more
+    // floating reasoning nodes). Backfill verdicts from the brain_reasoning ledger so already-
+    // judged links (computed before the edge columns existed) colour immediately.
+    const { getReasoning } = await import('./connectors/brainReasoning');
+    const reasoning = await getReasoning(userId, ws).catch(() => []);
+    const byPair = new Map<string, { verdict: string; rationale: string | null }>();
+    for (const rr of reasoning) byPair.set(`${rr.meeting_id}->${rr.impl_id}`, { verdict: rr.verdict, rationale: rr.rationale });
+    const outEdges = edges.map((e: any) => {
+      const verdict = e.verdict || byPair.get(`${e.src_id}->${e.dst_id}`)?.verdict || byPair.get(`${e.dst_id}->${e.src_id}`)?.verdict || null;
+      const rationale = e.rationale || byPair.get(`${e.src_id}->${e.dst_id}`)?.rationale || byPair.get(`${e.dst_id}->${e.src_id}`)?.rationale || null;
+      return { ...e, verdict, rationale };
+    });
+    return ok({ enabled: true, nodes, edges: outEdges });
   }
   return notFound();
 }

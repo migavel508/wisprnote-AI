@@ -48,13 +48,15 @@ export async function getRoute(userId: string, workspaceId: string, source = 'ji
 /** The full project mapping for a workspace: Jira project + GitHub repos. */
 export async function getMapping(userId: string, workspaceId: string): Promise<{ jiraProject: string | null; githubRepos: string[] }> {
   await ensureRoutingSchema();
-  const rows = await queryOne<{ jira: string | null; repos: string[] | null }>(
-    `SELECT MAX(project_key) FILTER (WHERE source='jira') AS jira,
-            (ARRAY_AGG(repos) FILTER (WHERE source='github'))[1] AS repos
-       FROM connector_routing WHERE user_id=$1 AND workspace_id=$2`,
+  const jira = await queryOne<{ project_key: string | null }>(
+    `SELECT project_key FROM connector_routing WHERE user_id=$1 AND workspace_id=$2 AND source='jira'`,
     [userId, workspaceId],
   );
-  return { jiraProject: rows?.jira ?? null, githubRepos: rows?.repos ?? [] };
+  const gh = await queryOne<{ repos: string[] | null }>(
+    `SELECT repos FROM connector_routing WHERE user_id=$1 AND workspace_id=$2 AND source='github'`,
+    [userId, workspaceId],
+  );
+  return { jiraProject: jira?.project_key ?? null, githubRepos: gh?.repos ?? [] };
 }
 
 /** The GitHub repos a workspace is scoped to (empty = all the user is involved in). */

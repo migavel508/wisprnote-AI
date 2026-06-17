@@ -4,7 +4,9 @@ import { getSecrets } from '../secrets';
 import { MODELS } from '../models/registry';
 import { ensureConnectorSchema } from './schema';
 import { ensureBrainEdgeSchema, insertEdge } from './brainEdges';
+import { insertReasoning, type Verdict } from './brainReasoning';
 import { queryNearestItems } from './brainVector';
+import { enrichCommit } from './github/enrich';
 
 /**
  * Brain-link sweep (Living-Brain Phase C). Computes cross-source associations and stores
@@ -20,63 +22,130 @@ const WORKSPACE_CAP = 25;
 const SEM_BATCH = 24;          // items semantically linked per workspace per tick
 const SEM_K = 6;
 const SEM_MIN_SIM = 0.74;
-const TIME_BUDGET_MS = 40_000;
+const TIME_BUDGET_MS = 32_000;   // stay well under the 60s Lambda cap even with LLM calls
 
 const JIRA_KEY = /\b([A-Z][A-Z0-9]+-\d+)\b/g;
-const LLM_MEETINGS_PER_TICK = 6;     // meetings LLM-linked per workspace per tick (cost bound)
-const LLM_CANDIDATES = 25;
+const LLM_INTENT_PER_TICK = 8;       // intents (meetings + Jira tasks) verdicted per workspace per tick
+const CAND_K = 6;                    // top-K candidate work items per intent (cost bound)
+const CAND_MIN_SIM = 0.35;           // candidate-gen floor — LOW on purpose: commit fingerprints
+                                     // (filenames/stats) match prose weakly, so favour recall and
+                                     // let the strict Sonnet verdict prune. CAND_K still caps cost.
 
 export interface BrainLinkResult { workspaces: number; provenance: number; reference: number; semantic: number; llm: number }
 
-/** Ask the model which tool items a meeting actually relates to (grounded, not fuzzy). */
-async function llmLinkMeeting(
-  meeting: { title: string | null; body: string | null },
-  candidates: Array<{ id: string; source: string; title: string | null }>,
-): Promise<Array<{ id: string; relation: string }>> {
-  const secrets = await getSecrets();
-  if (!secrets.GEMINI_API_KEY || !candidates.length) return [];
-  const list = candidates.map((c) => `${c.id} [${c.source}] ${c.title || ''}`).join('\n');
-  const sys = `You connect a MEETING to the tracked work items (Jira issues, GitHub PRs/issues) it actually discusses or produced. Be STRICT — only link items the meeting clearly relates to; most meetings link to 0-3 items. Output JSON only: {"links":[{"id": "<candidate id>", "relation": "discussed"|"implements"|"resulted_in"|"related"}]}. Never invent ids; use only ids from the candidate list.`;
-  const user = `MEETING:\n${meeting.title || ''}\n${(meeting.body || '').slice(0, 2500)}\n\nCANDIDATE WORK ITEMS (id [source] title):\n${list}`;
-  try {
-    const r = await fetch(`https://generativelanguage.googleapis.com/v1beta/models/${MODELS.kgExtract.primary}:generateContent?key=${secrets.GEMINI_API_KEY}`, {
-      method: 'POST', headers: { 'content-type': 'application/json' },
-      body: JSON.stringify({ systemInstruction: { parts: [{ text: sys }] }, contents: [{ role: 'user', parts: [{ text: user }] }], generationConfig: { responseMimeType: 'application/json', temperature: 0.1, maxOutputTokens: 600 } }),
-    });
-    const d: any = await r.json();
-    if (!r.ok) return [];
-    const text = (d.candidates?.[0]?.content?.parts ?? []).map((p: any) => p?.text ?? '').join('').trim();
-    const parsed = JSON.parse(text);
-    const valid = new Set(candidates.map((c) => c.id));
-    return (Array.isArray(parsed?.links) ? parsed.links : [])
-      .filter((l: any) => valid.has(String(l.id)))
-      .map((l: any) => ({ id: String(l.id), relation: ['discussed', 'implements', 'resulted_in', 'related'].includes(l.relation) ? l.relation : 'related' }));
-  } catch { return []; }
+const VERDICT_SYS = `You are a technical lead reviewing work against intent. You are given an INTENT — either a MEETING (a decision/discussion) or a JIRA TASK (work to be done) — and candidate WORK ITEMS (Jira issues, GitHub commits/PRs) that may fulfil it. JUDGE alignment. Be STRICT — only include items that clearly relate; most intents relate to 0-4 items.
+For each related item give:
+- "relation": "discussed"|"implements"|"resulted_in"|"related"
+- "verdict": how well the work item matches what the intent wanted — "aligned" (does what was asked), "partial" (related but incomplete/differs somewhat), "divergent" (claims to relate but the actual work goes a different direction than intended), "unrelated" (not actually connected — drop it).
+- "rationale": ONE sentence: what the intent wanted vs what the item actually is/does (cite specifics — for commits, reason about the REAL code change described, not the commit message).
+- For a GitHub commit/PR ALSO add a co-architect read of the code itself:
+  - "assessment": "sound" (well-structured, no concern) | "concern" (works but has a design smell — coupling, missing tests/error-handling, scope creep) | "risk" (a real architectural problem — security, scalability, wrong layer).
+  - "suggestion": ONE concrete sentence proposing a better approach or what to watch — empty "" if assessment is "sound". Be specific and helpful to the developer.
+Output JSON only: {"links":[{"id","relation","verdict","rationale","assessment","suggestion"}]}. Use only ids from the candidate list; never invent.`;
+
+/** Pull the first {...} JSON object out of a model response (handles ```json fences / prose). */
+function extractJson(text: string): any | null {
+  const s = text.indexOf('{'); const e = text.lastIndexOf('}');
+  if (s < 0 || e <= s) return null;
+  try { return JSON.parse(text.slice(s, e + 1)); } catch { return null; }
 }
 
-export async function runBrainLink(): Promise<BrainLinkResult> {
+async function callAnthropic(model: string, sys: string, user: string, key: string): Promise<string> {
+  const ctrl = new AbortController();
+  const timer = setTimeout(() => ctrl.abort(), 12_000);
+  try {
+    const r = await fetch('https://api.anthropic.com/v1/messages', {
+      method: 'POST',
+      headers: { 'content-type': 'application/json', 'x-api-key': key, 'anthropic-version': '2023-06-01' },
+      body: JSON.stringify({ model, max_tokens: 1600, system: sys, messages: [{ role: 'user', content: user }] }),
+      signal: ctrl.signal,
+    });
+    if (!r.ok) return '';
+    const d: any = await r.json();
+    return (Array.isArray(d?.content) ? d.content : []).map((b: any) => b?.text ?? '').join('').trim();
+  } catch { return ''; } finally { clearTimeout(timer); }
+}
+
+async function callGemini(model: string, sys: string, user: string, key: string): Promise<string> {
+  const ctrl = new AbortController();
+  const timer = setTimeout(() => ctrl.abort(), 10_000);
+  try {
+    const r = await fetch(`https://generativelanguage.googleapis.com/v1beta/models/${model}:generateContent?key=${key}`, {
+      method: 'POST', headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({ systemInstruction: { parts: [{ text: sys }] }, contents: [{ role: 'user', parts: [{ text: user }] }], generationConfig: { responseMimeType: 'application/json', temperature: 0.1, maxOutputTokens: 2500 } }),
+      signal: ctrl.signal,
+    });
+    if (!r.ok) return '';
+    const d: any = await r.json();
+    return (d.candidates?.[0]?.content?.parts ?? []).map((p: any) => p?.text ?? '').join('').trim();
+  } catch { return ''; } finally { clearTimeout(timer); }
+}
+
+/** TIER 3 — the alignment VERDICT. One batched call per intent (meeting OR Jira task) over
+ *  its top-K candidates. Quality-first model (Sonnet primary → Gemini 3.1 Pro fallback;
+ *  brainVerdict registry). Candidates carry the REAL diff summary (Tier 2) for commits, so
+ *  the judgment is grounded in actual code, not fluff messages. */
+async function judgeAlignment(
+  intent: { kind: 'MEETING' | 'JIRA TASK'; title: string | null; body: string | null },
+  candidates: Array<{ id: string; source: string; text: string }>,
+): Promise<Array<{ id: string; relation: string; verdict: Verdict; rationale: string; assessment: string | null; suggestion: string | null }>> {
+  if (!candidates.length) return [];
+  const secrets = await getSecrets();
+  const list = candidates.map((c) => `${c.id} [${c.source}] ${(c.text || '').slice(0, 240)}`).join('\n');
+  const user = `INTENT (${intent.kind}):\n${intent.title || ''}\n${(intent.body || '').slice(0, 2500)}\n\nCANDIDATE WORK ITEMS (id [source] description):\n${list}`;
+
+  let text = '';
+  if (secrets.ANTHROPIC_API_KEY) text = await callAnthropic(MODELS.brainVerdict.primary, VERDICT_SYS, user, secrets.ANTHROPIC_API_KEY);
+  if (!text && secrets.GEMINI_API_KEY) text = await callGemini(MODELS.brainVerdict.fallbacks?.[0] || 'gemini-3.1-pro', VERDICT_SYS, user, secrets.GEMINI_API_KEY);
+  if (!text) return [];
+
+  const parsed = extractJson(text);
+  if (!parsed) return [];
+  const valid = new Set(candidates.map((c) => c.id));
+  const verdicts = ['aligned', 'partial', 'divergent', 'unrelated'];
+  const assessments = ['sound', 'concern', 'risk'];
+  return (Array.isArray(parsed?.links) ? parsed.links : [])
+    .filter((l: any) => valid.has(String(l.id)) && l.verdict !== 'unrelated')
+    .map((l: any) => ({
+      id: String(l.id),
+      relation: ['discussed', 'implements', 'resulted_in', 'related'].includes(l.relation) ? l.relation : 'related',
+      verdict: (verdicts.includes(l.verdict) ? l.verdict : 'partial') as Verdict,
+      rationale: String(l.rationale || '').slice(0, 300),
+      assessment: assessments.includes(l.assessment) ? l.assessment : null,
+      suggestion: l.suggestion ? String(l.suggestion).slice(0, 300) : null,
+    }));
+}
+
+export interface BrainLinkOpts {
+  workspaceId?: string;    // scope to one workspace (the on-demand sync-now path)
+  llmBudget?: number;      // verdict calls allowed per workspace (0 = cheap links only — fast path)
+  timeBudgetMs?: number;   // override the default sweep budget
+}
+
+export async function runBrainLink(opts?: BrainLinkOpts): Promise<BrainLinkResult> {
   await ensureConnectorSchema();
   await ensureBrainEdgeSchema();
   const started = Date.now();
   const result: BrainLinkResult = { workspaces: 0, provenance: 0, reference: 0, semantic: 0, llm: 0 };
+  const llmBudget = opts?.llmBudget ?? LLM_INTENT_PER_TICK;
+  const timeBudget = opts?.timeBudgetMs ?? TIME_BUDGET_MS;
 
-  const wss: Array<{ user_id: string; workspace_id: string }> = await query<{ user_id: string; workspace_id: string }>(
-    `SELECT DISTINCT user_id, workspace_id FROM knowledge_item LIMIT ${WORKSPACE_CAP}`,
-  ).catch(() => []);
+  const wss: Array<{ user_id: string; workspace_id: string }> = opts?.workspaceId
+    ? await query<{ user_id: string; workspace_id: string }>(`SELECT DISTINCT user_id, workspace_id FROM knowledge_item WHERE workspace_id=$1`, [opts.workspaceId]).catch(() => [])
+    : await query<{ user_id: string; workspace_id: string }>(`SELECT DISTINCT user_id, workspace_id FROM knowledge_item LIMIT ${WORKSPACE_CAP}`).catch(() => []);
 
   for (const { user_id: userId, workspace_id: workspaceId } of wss) {
-    if (Date.now() - started > TIME_BUDGET_MS) break;
+    if (Date.now() - started > timeBudget) break;
     result.workspaces++;
 
     // Index this workspace's items by (source, source_id) → id, for reference matching.
-    const items: Array<{ id: string; source: string; source_id: string; title: string | null; body: string | null }> = await query<{ id: string; source: string; source_id: string; title: string | null; body: string | null }>(
-      `SELECT id, source, source_id, title, body FROM knowledge_item WHERE user_id=$1 AND workspace_id=$2`,
+    type Item = { id: string; source: string; source_id: string; type: string | null; title: string | null; body: string | null; enriched_summary: string | null; fingerprint: string | null };
+    const items: Item[] = await query<any>(
+      `SELECT id, source, source_id, type, title, body, enriched_summary, fingerprint FROM knowledge_item WHERE user_id=$1 AND workspace_id=$2`,
       [userId, workspaceId],
     ).catch(() => []);
-    // Tool items (non-meeting) are the link candidates for the LLM meeting linker.
-    const toolCandidates = items.filter((i) => i.source !== 'meeting').slice(0, LLM_CANDIDATES)
-      .map((i) => ({ id: String(i.id), source: i.source, title: i.title }));
     const byKey = new Map(items.map((i) => [`${i.source}:${i.source_id}`, String(i.id)]));
+    const itemById = new Map(items.map((i) => [String(i.id), i]));
 
     // 1) PROVENANCE — meeting → the Jira issue the agent created from it.
     try {
@@ -122,18 +191,42 @@ export async function runBrainLink(): Promise<BrainLinkResult> {
     }
 
     // 3) SEMANTIC — embedding-nearest items not yet linked (bounded). Cross-source first.
-    if (Date.now() - started > TIME_BUDGET_MS) continue;
-    const fresh: Array<{ id: string; source: string; title: string | null; body: string | null }> = await query<{ id: string; source: string; title: string | null; body: string | null }>(
+    if (Date.now() - started > timeBudget) continue;
+    // Fetch meetings and non-meetings SEPARATELY so a flood of new items (e.g. commits)
+    // never starves the meeting linker — meetings are the spine of the brain.
+    type Fresh = { id: string; source: string; title: string | null; body: string | null };
+    const freshMeetings: Fresh[] = await query<Fresh>(
       `SELECT k.id, k.source, k.title, k.body FROM knowledge_item k
-        WHERE k.user_id=$1 AND k.workspace_id=$2
-          AND NOT EXISTS (SELECT 1 FROM brain_link_state s WHERE s.user_id=$1 AND s.workspace_id=$2 AND s.item_id=k.id)
+        WHERE k.user_id=$1 AND k.workspace_id=$2 AND k.source='meeting'
+          AND NOT EXISTS (SELECT 1 FROM brain_link_state s WHERE s.user_id=$1 AND s.workspace_id=$2 AND s.item_id=k.id AND s.linked_at >= k.synced_at)
+        ORDER BY k.occurred_at DESC NULLS LAST LIMIT ${LLM_INTENT_PER_TICK}`,
+      [userId, workspaceId],
+    ).catch(() => []);
+    // Jira TASKS are intents too (the middle hop) — fetch them on their own so a flood of
+    // commits never starves the meeting→task→commit lineage.
+    const freshTasks: Fresh[] = await query<Fresh>(
+      `SELECT k.id, k.source, k.title, k.body FROM knowledge_item k
+        WHERE k.user_id=$1 AND k.workspace_id=$2 AND k.source='jira'
+          AND NOT EXISTS (SELECT 1 FROM brain_link_state s WHERE s.user_id=$1 AND s.workspace_id=$2 AND s.item_id=k.id AND s.linked_at >= k.synced_at)
+        ORDER BY k.occurred_at DESC NULLS LAST LIMIT ${LLM_INTENT_PER_TICK}`,
+      [userId, workspaceId],
+    ).catch(() => []);
+    const freshOther: Fresh[] = await query<Fresh>(
+      `SELECT k.id, k.source, k.title, k.body FROM knowledge_item k
+        WHERE k.user_id=$1 AND k.workspace_id=$2 AND k.source NOT IN ('meeting','jira')
+          AND NOT EXISTS (SELECT 1 FROM brain_link_state s WHERE s.user_id=$1 AND s.workspace_id=$2 AND s.item_id=k.id AND s.linked_at >= k.synced_at)
         LIMIT ${SEM_BATCH}`,
       [userId, workspaceId],
     ).catch(() => []);
+    // Tasks FIRST: they're few and form the middle hop (task→commit). Processing them ahead
+    // of the many meetings guarantees the full meeting→task→commit chain forms each tick
+    // (once linked they drop out, so meetings then get the full budget on later ticks).
+    const fresh = [...freshTasks, ...freshMeetings, ...freshOther];
     if (fresh.length) {
       const srcById = new Map<string, string>(items.map((i) => [String(i.id), i.source]));
-      // Embed non-meeting fresh items for semantic linking (meetings use the LLM linker).
-      const nonMeeting = fresh.filter((f) => f.source !== 'meeting');
+      // Embed only the items that take the SEMANTIC branch (meetings + Jira tasks use the
+      // intent/verdict pipeline, so they don't need a precomputed self-vector here).
+      const nonMeeting = fresh.filter((f) => f.source !== 'meeting' && f.source !== 'jira');
       const vecById = new Map<string, number[]>();
       if (nonMeeting.length) {
         const vecs = await embedTexts(nonMeeting.map((f) => [f.title, (f.body || '').slice(0, 1500)].filter(Boolean).join('\n'))).catch(() => null);
@@ -141,16 +234,50 @@ export async function runBrainLink(): Promise<BrainLinkResult> {
       }
       let llmUsed = 0;
       for (const self of fresh) {
-        if (Date.now() - started > TIME_BUDGET_MS) break;
-        if (self.source === 'meeting') {
-          // GROUNDED meeting linking: let the model judge which work items it relates to.
-          if (llmUsed < LLM_MEETINGS_PER_TICK && toolCandidates.length) {
-            llmUsed++;
-            const links = await llmLinkMeeting(self, toolCandidates);
-            for (const l of links) {
-              if (await insertEdge({ userId, workspaceId, srcKind: 'item', srcId: String(self.id), dstKind: 'item', dstId: l.id, relation: l.relation, origin: 'llm', confidence: 0.9 })) result.llm++;
+        if (Date.now() - started > timeBudget) break;
+        // INTENT linking — meetings AND Jira tasks both get the grounded verdict pipeline,
+        // building the real lineage: meeting → Jira task → GitHub commit, with a reasoning
+        // verdict ON EACH LINE.
+        //   1. CANDIDATES (cheap): embed the intent, ANN-nearest → top-K work items. For a
+        //      Jira task we restrict candidates to CODE (github), so the chain is task→commit.
+        //   2. LAZY ENRICH (Tier 2): only these K candidate commits pay the diff→summary cost
+        //      — i.e. we read the actual commit diff to judge whether it implements the intent.
+        //   3. VERDICT (Tier 3): ONE batched Sonnet→Gemini call → verdict+rationale stored
+        //      DIRECTLY on the edge (the brain map colours + explains the line).
+        if (self.source === 'meeting' || self.source === 'jira') {
+          if (llmUsed >= llmBudget) continue;   // budget hit (or 0 = fast path) → leave unmarked for a later tick
+          llmUsed++;
+          const isTask = self.source === 'jira';
+          // Restrict the ANN search to the right candidate pool — task→code, meeting→any work
+          // item — so tightly-clustered meetings can't crowd out the cross-source candidates.
+          const candSources = isTask ? ['github'] : ['jira', 'github'];
+          const mv = await embedTexts([[self.title, (self.body || '').slice(0, 1500)].filter(Boolean).join('\n')]).catch(() => null);
+          const hits = mv?.[0] ? await queryNearestItems(userId, workspaceId, mv[0], CAND_K, candSources).catch(() => null) : null;
+          const candIds = (hits || [])
+            .filter((h) => h.id !== String(self.id) && h.similarity >= CAND_MIN_SIM)
+            .map((h) => h.id);
+          const cands: Array<{ id: string; source: string; text: string }> = [];
+          for (const cid of candIds) {
+            const it = itemById.get(cid);
+            if (!it) continue;
+            let text = it.enriched_summary || it.fingerprint || it.title || '';
+            if (it.type === 'commit' && !it.enriched_summary) {
+              const s = await enrichCommit(userId, workspaceId, cid).catch(() => null);   // Tier 2: read the real diff
+              if (s) text = s;
             }
-          } else { continue; }   // leave unmarked → linked on a later tick
+            cands.push({ id: cid, source: it.source, text });
+          }
+          const links = await judgeAlignment({ kind: isTask ? 'JIRA TASK' : 'MEETING', title: self.title, body: self.body }, cands);
+          for (const l of links) {
+            // Verdict + rationale stored ON the edge → the line is coloured & explains itself.
+            if (await insertEdge({ userId, workspaceId, srcKind: 'item', srcId: String(self.id), dstKind: 'item', dstId: l.id, relation: l.relation, origin: 'llm', confidence: 0.9, evidence: l.verdict, verdict: l.verdict, rationale: l.rationale })) result.llm++;
+            // Keep the reasoning ledger too (history) for meeting intents.
+            if (!isTask) await insertReasoning({ userId, workspaceId, meetingId: String(self.id), implId: l.id, verdict: l.verdict, rationale: l.rationale, tags: [l.verdict, l.relation] }).catch(() => {});
+            // Co-architect advisory: store the code read on the COMMIT itself (diff-grounded).
+            if (l.assessment && itemById.get(l.id)?.type === 'commit') {
+              await query(`UPDATE knowledge_item SET advisory_assessment=$2, advisory_note=$3 WHERE id=$1`, [l.id, l.assessment, l.suggestion]).catch(() => {});
+            }
+          }
         } else {
           const vec = vecById.get(String(self.id));
           const hits = vec ? await queryNearestItems(userId, workspaceId, vec, SEM_K).catch(() => null) : null;
@@ -161,7 +288,7 @@ export async function runBrainLink(): Promise<BrainLinkResult> {
             if (await insertEdge({ userId, workspaceId, srcKind: 'item', srcId: String(self.id), dstKind: 'item', dstId: h.id, relation: 'related', origin: 'semantic', confidence: h.similarity })) result.semantic++;
           }
         }
-        await query(`INSERT INTO brain_link_state (user_id, workspace_id, item_id) VALUES ($1,$2,$3) ON CONFLICT DO NOTHING`, [userId, workspaceId, self.id]).catch(() => {});
+        await query(`INSERT INTO brain_link_state (user_id, workspace_id, item_id) VALUES ($1,$2,$3) ON CONFLICT (user_id, workspace_id, item_id) DO UPDATE SET linked_at=NOW()`, [userId, workspaceId, self.id]).catch(() => {});
       }
     }
   }

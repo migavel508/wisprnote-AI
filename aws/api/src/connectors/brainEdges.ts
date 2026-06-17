@@ -23,13 +23,19 @@ export function ensureBrainEdgeSchema(): Promise<void> {
           dst_kind TEXT NOT NULL,
           dst_id TEXT NOT NULL,
           relation TEXT NOT NULL,        -- references | implements | spawned | related | mentions
-          origin TEXT NOT NULL,          -- provenance | reference | people | semantic
+          origin TEXT NOT NULL,          -- provenance | reference | people | semantic | llm
           confidence REAL,
           evidence TEXT,
+          verdict TEXT,                  -- aligned | partial | divergent (reasoning lives ON the edge)
+          rationale TEXT,                -- one-sentence "what was intended vs what shipped"
           created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
           UNIQUE (user_id, workspace_id, src_kind, src_id, dst_kind, dst_id, relation)
         )
       `);
+      // The verdict/rationale carry the reasoning DIRECTLY on the relationship line (so the
+      // brain map can colour + explain each connection) — added here for existing tables.
+      await query(`ALTER TABLE brain_edge ADD COLUMN IF NOT EXISTS verdict TEXT`);
+      await query(`ALTER TABLE brain_edge ADD COLUMN IF NOT EXISTS rationale TEXT`);
       await query(`CREATE INDEX IF NOT EXISTS brain_edge_ws_idx ON brain_edge (user_id, workspace_id)`);
       await query(`CREATE INDEX IF NOT EXISTS brain_edge_src_idx ON brain_edge (user_id, workspace_id, src_kind, src_id)`);
       await query(`CREATE INDEX IF NOT EXISTS brain_edge_dst_idx ON brain_edge (user_id, workspace_id, dst_kind, dst_id)`);
@@ -52,31 +58,39 @@ export interface EdgeInput {
   userId: string; workspaceId: string;
   srcKind: string; srcId: string; dstKind: string; dstId: string;
   relation: string; origin: string; confidence?: number; evidence?: string;
+  verdict?: string; rationale?: string;
 }
 
-/** Insert an edge (idempotent). Skips self-loops. Returns true if newly inserted. */
+/** Upsert an edge (idempotent). Skips self-loops. Returns true if NEWLY inserted (not an
+ *  update). When verdict/rationale are supplied they refresh on conflict, so re-judging a
+ *  link updates the reasoning shown on the line; otherwise existing values are kept. */
 export async function insertEdge(e: EdgeInput): Promise<boolean> {
   if (e.srcKind === e.dstKind && e.srcId === e.dstId) return false;
-  const r = await queryOne<{ id: string }>(
-    `INSERT INTO brain_edge (user_id, workspace_id, src_kind, src_id, dst_kind, dst_id, relation, origin, confidence, evidence)
-     VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10)
-     ON CONFLICT (user_id, workspace_id, src_kind, src_id, dst_kind, dst_id, relation) DO NOTHING
-     RETURNING id`,
-    [e.userId, e.workspaceId, e.srcKind, e.srcId, e.dstKind, e.dstId, e.relation, e.origin, e.confidence ?? null, e.evidence ?? null],
+  const r = await queryOne<{ inserted: boolean }>(
+    `INSERT INTO brain_edge (user_id, workspace_id, src_kind, src_id, dst_kind, dst_id, relation, origin, confidence, evidence, verdict, rationale)
+     VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12)
+     ON CONFLICT (user_id, workspace_id, src_kind, src_id, dst_kind, dst_id, relation) DO UPDATE SET
+       confidence = COALESCE(EXCLUDED.confidence, brain_edge.confidence),
+       evidence   = COALESCE(EXCLUDED.evidence, brain_edge.evidence),
+       verdict    = COALESCE(EXCLUDED.verdict, brain_edge.verdict),
+       rationale  = COALESCE(EXCLUDED.rationale, brain_edge.rationale)
+     RETURNING (xmax = 0) AS inserted`,
+    [e.userId, e.workspaceId, e.srcKind, e.srcId, e.dstKind, e.dstId, e.relation, e.origin, e.confidence ?? null, e.evidence ?? null, e.verdict ?? null, e.rationale ?? null],
   );
-  return !!r;
+  return !!r?.inserted;
 }
 
 export interface BrainEdgeRow {
   src_kind: string; src_id: string; dst_kind: string; dst_id: string;
   relation: string; origin: string; confidence: number | null; evidence: string | null;
+  verdict: string | null; rationale: string | null;
 }
 
 /** All edges for a workspace (for the brain map + lineage). */
 export async function getBrainEdges(userId: string, workspaceId: string, limit = 500): Promise<BrainEdgeRow[]> {
   await ensureBrainEdgeSchema();
   return query<BrainEdgeRow>(
-    `SELECT src_kind, src_id, dst_kind, dst_id, relation, origin, confidence, evidence
+    `SELECT src_kind, src_id, dst_kind, dst_id, relation, origin, confidence, evidence, verdict, rationale
        FROM brain_edge WHERE user_id=$1 AND workspace_id=$2 ORDER BY created_at DESC LIMIT ${limit}`,
     [userId, workspaceId],
   );
@@ -86,7 +100,7 @@ export async function getBrainEdges(userId: string, workspaceId: string, limit =
 export async function neighboursOf(userId: string, workspaceId: string, kind: string, id: string, limit = 12): Promise<BrainEdgeRow[]> {
   await ensureBrainEdgeSchema();
   return query<BrainEdgeRow>(
-    `SELECT src_kind, src_id, dst_kind, dst_id, relation, origin, confidence, evidence
+    `SELECT src_kind, src_id, dst_kind, dst_id, relation, origin, confidence, evidence, verdict, rationale
        FROM brain_edge
       WHERE user_id=$1 AND workspace_id=$2
         AND ((src_kind=$3 AND src_id=$4) OR (dst_kind=$3 AND dst_id=$4))

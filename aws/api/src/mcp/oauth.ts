@@ -141,3 +141,23 @@ export async function completeMcpOAuth(f: OAuthInflight, code: string): Promise<
   if (!j.access_token) throw new Error('Token response missing access_token');
   return { access_token: j.access_token, refresh_token: j.refresh_token, expires_in: j.expires_in, token_type: j.token_type, raw: j };
 }
+
+/** Refresh an expired access token using the stored refresh token + OAuth client metadata.
+ *  Atlassian (and most OAuth servers) ROTATE the refresh token, so callers must persist the
+ *  new one. If the server omits a new refresh_token, we keep reusing the old one. */
+export async function refreshMcpOAuth(
+  meta: { tokenEndpoint: string; clientId: string; clientSecret?: string | null },
+  refreshToken: string,
+): Promise<OAuthToken> {
+  const body = new URLSearchParams({ grant_type: 'refresh_token', client_id: meta.clientId, refresh_token: refreshToken });
+  if (meta.clientSecret) body.set('client_secret', meta.clientSecret);
+  const r = await fetch(meta.tokenEndpoint, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/x-www-form-urlencoded', Accept: 'application/json' },
+    body: body.toString(),
+  });
+  if (!r.ok) throw new Error(`Token refresh failed: ${r.status} ${(await r.text()).slice(0, 200)}`);
+  const j: any = await r.json();
+  if (!j.access_token) throw new Error('Refresh response missing access_token');
+  return { access_token: j.access_token, refresh_token: j.refresh_token ?? refreshToken, expires_in: j.expires_in, token_type: j.token_type, raw: j };
+}

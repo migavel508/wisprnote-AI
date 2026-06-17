@@ -55,12 +55,17 @@ export async function upsertItemVectors(rows: ItemVectorRow[]): Promise<boolean>
 
 export interface ItemHit { id: string; source: string; similarity: number }
 
-/** Top-K nearest knowledge_items to `vector` within (user, workspace). null on failure. */
-export async function queryNearestItems(userId: string, workspaceId: string, vector: number[], k: number): Promise<ItemHit[] | null> {
+/** Top-K nearest knowledge_items to `vector` within (user, workspace). null on failure.
+ *  `sources` restricts the search to specific sources (e.g. ['jira','github']) — essential
+ *  for candidate generation, since meetings cluster so tightly they'd otherwise fill every
+ *  top-K slot and crowd out the cross-source work items we actually want. */
+export async function queryNearestItems(userId: string, workspaceId: string, vector: number[], k: number, sources?: string[]): Promise<ItemHit[] | null> {
+  const filters: any[] = [['user_id', 'Eq', userId], ['workspace_id', 'Eq', workspaceId]];
+  if (sources?.length) filters.push(['source', 'In', sources]);
   const res = await tpFetch('/query', {
     rank_by: ['vector', 'ANN', vector],
     top_k: k,
-    filters: ['And', [['user_id', 'Eq', userId], ['workspace_id', 'Eq', workspaceId]]],
+    filters: ['And', filters],
     include_attributes: ['source'],
   });
   if (res == null) return null;
