@@ -99,6 +99,19 @@ async function migrateExisting(): Promise<void> {
   await query(`ALTER TABLE connector_credentials ADD COLUMN IF NOT EXISTS workspace_id UUID`);
   await query(`ALTER TABLE knowledge_item        ADD COLUMN IF NOT EXISTS workspace_id UUID`);
   await query(`ALTER TABLE oauth_state           ADD COLUMN IF NOT EXISTS workspace_id UUID`);
+  // Brain content columns (kept apart from `body` so a re-sync can't clobber them): the
+  // deterministic Tier-1 fingerprint and the lazy Tier-2 diff summary. Ensured centrally so
+  // every read path (embed, brain-link) has them regardless of which job runs first.
+  await query(`ALTER TABLE knowledge_item        ADD COLUMN IF NOT EXISTS fingerprint TEXT`);
+  await query(`ALTER TABLE knowledge_item        ADD COLUMN IF NOT EXISTS enriched_summary TEXT`);
+  // Live state of the item, mirrored from the backend (Jira status name / GitHub PR state).
+  // First-class so the brain map can SHOW status and emit status-change events.
+  await query(`ALTER TABLE knowledge_item        ADD COLUMN IF NOT EXISTS status TEXT`);
+  // Co-architect advisory (Phase 2): the brain's read on a commit's code — assessment
+  // (sound | concern | risk) + a one-line architectural suggestion. Produced from the REAL
+  // diff during the alignment-verdict pass (no extra LLM call).
+  await query(`ALTER TABLE knowledge_item        ADD COLUMN IF NOT EXISTS advisory_assessment TEXT`);
+  await query(`ALTER TABLE knowledge_item        ADD COLUMN IF NOT EXISTS advisory_note TEXT`);
 
   // 2) Backfill NULLs: attach legacy connections/items to the user's default
   //    (earliest) workspace so they keep working in-place; sentinel if none.

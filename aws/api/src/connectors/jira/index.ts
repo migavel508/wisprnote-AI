@@ -42,10 +42,22 @@ registerConnector({
     }
     if (!cloudId) return { items: [], nextCursor: cursor };
 
-    const since = cursor || '2000-01-01 00:00';
-    const jql = `updated >= "${since}" ORDER BY updated ASC`;
+    // Incremental window. CRITICAL: Jira JQL does NOT accept an ISO-8601 timestamp
+    // ("2026-06-16T11:36:10.000+0000") — only "yyyy-MM-dd HH:mm". Our stored cursor IS the
+    // raw `updated` (ISO), so feeding it back as `updated >= "<ISO>"` silently errors and the
+    // sync stops pulling changes. Use a RELATIVE window (`updated >= -Nm`) which is both
+    // JQL-valid AND timezone-agnostic: minutes since the watermark + a 120m skew buffer,
+    // capped at 30d. First sync (no cursor) does an absolute backfill. Idempotent upsert
+    // tolerates the overlap.
+    const cursorMs = cursor ? new Date(cursor).getTime() : NaN;
+    const sinceClause = Number.isFinite(cursorMs)
+      ? `updated >= -${Math.min(43200, Math.max(1, Math.ceil((Date.now() - cursorMs) / 60000) + 120))}m`
+      : `updated >= "2000-01-01 00:00"`;
+    const jql = `${sinceClause} ORDER BY updated ASC`;
     let parsed: any = {};
     try {
+      // NOTE: searchJiraIssuesUsingJql does NOT support `expand`/changelog — passing it makes
+      // the search error and freezes the sync. Changelog is fetched per-issue below instead.
       const s = await mcpCallTool(server, accessToken, 'searchJiraIssuesUsingJql', {
         cloudId, jql, maxResults: PAGE, fields: FIELDS, responseContentFormat: 'markdown',
       });
@@ -61,6 +73,23 @@ registerConnector({
     }
 
     const issues: any[] = Array.isArray(parsed?.issues) ? parsed.issues : [];
+
+    // WHO moved each task: author of the most-recent STATUS transition. The SUPPORTED path is a
+    // per-issue getJiraIssue(expand='changelog'). Bounded (incremental pages are small; on a
+    // big backfill the first N get the real author, the rest fall back to assignee).
+    const CHANGELOG_CAP = 12;
+    const actorByKey = new Map<string, string>();
+    await Promise.all(issues.slice(0, CHANGELOG_CAP).map(async (iss: any) => {
+      try {
+        const r = await mcpCallTool(server, accessToken, 'getJiraIssue', { cloudId, issueIdOrKey: iss.key, expand: 'changelog', fields: ['status'], responseContentFormat: 'markdown' });
+        const d = JSON.parse(r?.content?.[0]?.text ?? '{}');
+        const hist: any[] = Array.isArray(d.changelog?.histories) ? d.changelog.histories : [];
+        for (let i = hist.length - 1; i >= 0; i--) {
+          if (Array.isArray(hist[i]?.items) && hist[i].items.some((c: any) => c.field === 'status')) { if (hist[i].author?.displayName) actorByKey.set(iss.key, hist[i].author.displayName); break; }
+        }
+      } catch { /* fall back to assignee */ }
+    }));
+
     const items: KnowledgeItemInput[] = issues.map((iss: any) => {
       const f = iss.fields || {};
       const people: Record<string, string> = {};
@@ -79,6 +108,8 @@ registerConnector({
         type: 'issue',
         title: `${iss.key}: ${f.summary || ''}`.trim(),
         body,
+        status: f.status?.name || null,         // live status → drives status-change events
+        actor: actorByKey.get(iss.key) || f.assignee?.displayName || null, // who moved it (changelog) → assignee fallback
         people,
         links: siteUrl ? { url: `${siteUrl}/browse/${iss.key}` } : {},
         raw: iss,

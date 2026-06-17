@@ -37,48 +37,75 @@ registerConnector({
 
     const items: KnowledgeItemInput[] = [];
     let maxUpdated = cursor || '';
-    // PROJECT MAPPING: if the workspace is mapped to specific repos, scope the search to
-    // THOSE repos only (so the workspace's brain holds just its project). Otherwise fall
-    // back to everything the user is involved in.
     const repos = await getGithubRepos(userId, scope).catch(() => []);
-    const repoQual = repos.length ? repos.map((r) => `repo:${r}`).join(' ') + ' ' : '';
-    // search_issues / search_pull_requests share the GitHub search shape; involves:@me
-    // covers authored + assigned + mentioned + review-requested.
-    for (const [tool, isPrTool] of [['search_issues', false], ['search_pull_requests', true]] as const) {
-      try {
-        const r = await mcpCallTool(server, token, tool, {
-          query: `${repoQual}involves:@me`, sort: 'updated', order: 'desc', perPage: PER_PAGE,
-        });
-        const parsed = parseText(r);
-        const arr: any[] = Array.isArray(parsed?.items) ? parsed.items : Array.isArray(parsed) ? parsed : [];
-        for (const it of arr) {
-          const loc = locFromUrl(it.html_url);
-          const owner = loc?.owner; const repo = loc?.repo; const number = it.number ?? loc?.number;
-          if (!owner || !repo || !number) continue;
-          const type = (isPrTool || it.pull_request) ? 'pull_request' : 'issue';
-          const labels = Array.isArray(it.labels) ? it.labels.map((l: any) => (typeof l === 'string' ? l : l?.name)).filter(Boolean) : [];
-          const body = [
-            it.body, it.state ? `State: ${it.state}` : '',
-            labels.length ? `Labels: ${labels.join(', ')}` : '',
-          ].filter(Boolean).join('\n');
-          items.push({
-            source: 'github',
-            source_id: `${owner}/${repo}#${number}`,
-            type,
-            title: `${repo}#${number}: ${it.title || ''}`.trim(),
-            body,
-            people: { author: it.user?.login ?? null, assignees: (it.assignees || []).map((a: any) => a?.login).filter(Boolean) },
-            links: { url: it.html_url },
-            raw: it,
-            occurred_at: it.updated_at || it.created_at || null,
-          });
-          if (it.updated_at && it.updated_at > maxUpdated) maxUpdated = it.updated_at;
+
+    const pushIssue = (it: any, isPrTool: boolean) => {
+      const loc = locFromUrl(it.html_url);
+      const owner = loc?.owner; const repo = loc?.repo; const number = it.number ?? loc?.number;
+      if (!owner || !repo || !number) return;
+      const type = (isPrTool || it.pull_request) ? 'pull_request' : 'issue';
+      const labels = Array.isArray(it.labels) ? it.labels.map((l: any) => (typeof l === 'string' ? l : l?.name)).filter(Boolean) : [];
+      const body = [it.body, it.state ? `State: ${it.state}` : '', labels.length ? `Labels: ${labels.join(', ')}` : ''].filter(Boolean).join('\n');
+      const prState = it.merged_at ? 'merged' : (it.state || null);   // merged | open | closed
+      items.push({
+        source: 'github', source_id: `${owner}/${repo}#${number}`, type,
+        title: `${repo}#${number}: ${it.title || ''}`.trim(), body,
+        status: type === 'pull_request' ? prState : (it.state || null),
+        actor: it.user?.login ?? null,
+        people: { author: it.user?.login ?? null, assignees: (it.assignees || []).map((a: any) => a?.login).filter(Boolean) },
+        links: { url: it.html_url }, raw: it, occurred_at: it.updated_at || it.created_at || null,
+      });
+      if (it.updated_at && it.updated_at > maxUpdated) maxUpdated = it.updated_at;
+    };
+
+    if (repos.length) {
+      // MAPPED MODE: this workspace IS these repos → ingest each repo's full activity:
+      // issues + PRs + recent COMMITS (so code-only repos with no issues still populate).
+      for (const full of repos.slice(0, 5)) {
+        const [owner, repo] = full.split('/');
+        if (!owner || !repo) continue;
+        for (const [tool, isPr] of [['search_issues', false], ['search_pull_requests', true]] as const) {
+          try {
+            const r = await mcpCallTool(server, token, tool, { query: `repo:${full}`, sort: 'updated', order: 'desc', perPage: PER_PAGE });
+            const parsed = parseText(r);
+            for (const it of (Array.isArray(parsed?.items) ? parsed.items : [])) pushIssue(it, isPr);
+          } catch (e: any) { console.error('github_sync_failed', JSON.stringify({ tool, full, message: e?.message })); }
         }
-      } catch (e: any) {
-        console.error('github_sync_failed', JSON.stringify({ tool, message: e?.message }));
+        try {
+          const r = await mcpCallTool(server, token, 'list_commits', { owner, repo, perPage: 20 });
+          const parsed = parseText(r);
+          const commits: any[] = Array.isArray(parsed) ? parsed : Array.isArray(parsed?.commits) ? parsed.commits : Array.isArray(parsed?.items) ? parsed.items : [];
+          for (const c of commits) {
+            const sha = (c.sha || c.oid || '').toString().slice(0, 7);
+            const msg = (c.commit?.message || c.message || '').toString();
+            if (!sha || !msg) continue;
+            // Tier-0 filter: skip MERGE commits (>1 parent) — they carry no own diff, just
+            // noise. The real work lives in the parent commits we already ingest.
+            if (Array.isArray(c.parents) && c.parents.length > 1) continue;
+            const when = c.commit?.author?.date || c.commit?.committer?.date || null;
+            const author = c.author?.login || c.commit?.author?.name || null;
+            items.push({
+              source: 'github', source_id: `${full}@${sha}`, type: 'commit',
+              title: `${repo}@${sha}: ${msg.split('\n')[0].slice(0, 120)}`,
+              body: msg, actor: author, people: { author },
+              links: { url: c.html_url || `https://github.com/${full}/commit/${c.sha || sha}` }, raw: c,
+              occurred_at: when,
+            });
+            if (when && when > maxUpdated) maxUpdated = when;
+          }
+        } catch (e: any) { console.error('github_sync_failed', JSON.stringify({ tool: 'list_commits', full, message: e?.message })); }
+      }
+    } else {
+      // UNMAPPED MODE: everything the user is involved in across all repos (issues + PRs).
+      for (const [tool, isPr] of [['search_issues', false], ['search_pull_requests', true]] as const) {
+        try {
+          const r = await mcpCallTool(server, token, tool, { query: 'involves:@me', sort: 'updated', order: 'desc', perPage: PER_PAGE });
+          const parsed = parseText(r);
+          for (const it of (Array.isArray(parsed?.items) ? parsed.items : [])) pushIssue(it, isPr);
+        } catch (e: any) { console.error('github_sync_failed', JSON.stringify({ tool, message: e?.message })); }
       }
     }
-    console.log('github_sync', JSON.stringify({ count: items.length, nextCursor: maxUpdated || null }));
+    console.log('github_sync', JSON.stringify({ count: items.length, mapped: repos.length, nextCursor: maxUpdated || null }));
     return { items, nextCursor: maxUpdated || cursor || null };
   },
 });

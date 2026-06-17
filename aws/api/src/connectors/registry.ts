@@ -16,6 +16,8 @@ export interface KnowledgeItemInput {
   links?: unknown;
   raw: unknown;            // full original payload — never lose data
   occurred_at?: string | null;
+  status?: string | null;  // live backend state (Jira status name / GitHub PR state); drives events
+  actor?: string | null;   // who currently owns/authored it (assignee / commit author) — for events
 }
 
 /** One bounded page of a sync; the engine loops/advances the cursor across ticks. */

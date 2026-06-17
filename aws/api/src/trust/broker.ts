@@ -43,7 +43,33 @@ export async function getToken(
       WHERE user_id=$1 AND workspace_id=$2 AND source=$3`,
     [userId, workspaceId, source],
   );
-  return r ? { token: r.token, account: r.account, scopes: r.scopes } : null;
+  if (!r) return null;
+
+  // Auto-refresh expired OAuth tokens (transparent to every caller). Only fires when the
+  // refresh metadata was stored at connect (oauth_meta) — PAT connectors (github) skip this.
+  let token: any = r.token;
+  const m = token?.oauth_meta;
+  if (m?.client_id && token?.refresh_token && token?.expires_at && Date.now() > token.expires_at) {
+    try {
+      const { refreshMcpOAuth } = await import('../mcp/oauth');
+      const fresh = await refreshMcpOAuth(
+        { tokenEndpoint: m.token_endpoint, clientId: m.client_id, clientSecret: m.client_secret ?? null },
+        token.refresh_token,
+      );
+      token = {
+        ...fresh.raw,
+        refresh_token: fresh.refresh_token,                 // rotated — keep the new one
+        oauth_meta: m,
+        expires_at: fresh.expires_in ? Date.now() + (fresh.expires_in - 60) * 1000 : null,
+      };
+      await storeToken(userId, source, token, r.account, r.scopes, workspaceId);
+      console.log('oauth_refreshed', JSON.stringify({ source, workspaceId }));
+    } catch (e: any) {
+      console.error('oauth_refresh_failed', JSON.stringify({ source, message: e?.message }));
+      // fall through with the stale token; the caller fails gracefully + user can reconnect
+    }
+  }
+  return { token, account: r.account, scopes: r.scopes };
 }
 
 export async function deleteToken(
