@@ -447,6 +447,9 @@ export default function App() {
   // dropped agent_plan from the saved message — making the steps vanish on reload).
   const liveAgentPlanRef = useRef<AgentStep[] | undefined>(undefined);
   const realtimeTranscriptRef = useRef<string[]>([]);
+  // Mirror of the faded (not-yet-final) interim text, so stop/pause can COMMIT it instead of
+  // dropping it if the user stops before Deepgram promotes it to a final.
+  const interimTranscriptRef = useRef('');
   const isRealtimePausedRef = useRef(false);
   const pausedBatchSegmentsRef = useRef<File[]>([]);
   const pausedRealtimeTranscriptRef = useRef<string[]>([]);
@@ -1546,6 +1549,43 @@ export default function App() {
     }
   };
 
+  // Commit a finalized line. If it merely EXTENDS the previous line — the normal interim→final
+  // promotion, OR a stop/pause-committed interim later superseded by its fuller final — REPLACE
+  // the last line instead of appending a near-duplicate. Comparison ignores the speaker label
+  // prefix + trailing punctuation. This is what makes the faded text PERSIST (it becomes a line
+  // and is only ever upgraded in place, never erased).
+  const commitTranscriptLine = (raw: string) => {
+    const trimmed = raw.trim();
+    if (!trimmed) return;
+    const norm = (s: string) => s.replace(/^[^:]{1,24}:\s*/, '').replace(/[\s.?!,]+$/, '').toLowerCase();
+    const arr = realtimeTranscriptRef.current;
+    const last = arr[arr.length - 1];
+    if (last) {
+      const nl = norm(last);
+      const nt = norm(trimmed);
+      if (nl === nt) { setInterimTranscript(''); return; }                 // exact duplicate
+      if (nt.startsWith(nl) || nl.startsWith(nt)) {                        // one extends the other
+        const keep = trimmed.length >= last.length ? trimmed : last;
+        const next = [...arr.slice(0, -1), keep];
+        realtimeTranscriptRef.current = next;
+        setRealtimeTranscript(next);
+        setInterimTranscript('');
+        return;
+      }
+    }
+    realtimeTranscriptRef.current = [...arr, trimmed];
+    setRealtimeTranscript(prev => [...prev, trimmed]);
+    setInterimTranscript('');
+  };
+
+  // Persist the current faded/interim text as a committed line so it NEVER vanishes when the
+  // user pauses or stops mid-utterance. The drain's eventual final is deduped by commitTranscriptLine.
+  const commitPendingInterim = () => {
+    const pending = interimTranscriptRef.current.trim();
+    interimTranscriptRef.current = '';
+    if (pending) commitTranscriptLine(pending);
+  };
+
   const attachRealtimeTranscriptListener = async () => {
     if (unlistenRef.current) {
       unlistenRef.current();
@@ -1554,16 +1594,10 @@ export default function App() {
     const unlisten = await listenForTranscripts((text, isFinal) => {
       if (isRealtimePausedRef.current) return;
       if (isFinal) {
-        const trimmed = text.trim();
-        if (!trimmed) return;
-        if (realtimeTranscriptRef.current[realtimeTranscriptRef.current.length - 1] === trimmed) {
-          setInterimTranscript('');
-          return;
-        }
-        realtimeTranscriptRef.current = [...realtimeTranscriptRef.current, trimmed];
-        setRealtimeTranscript(prev => [...prev, trimmed]);
-        setInterimTranscript('');
+        interimTranscriptRef.current = '';   // a final replaced the interim
+        commitTranscriptLine(text);
       } else {
+        interimTranscriptRef.current = text;   // remember the faded text so stop/pause can keep it
         setInterimTranscript(text);
       }
     });
@@ -1612,6 +1646,7 @@ export default function App() {
       setFile(null);
       setRealtimeTranscript([]);
       realtimeTranscriptRef.current = [];
+      interimTranscriptRef.current = '';
       setInterimTranscript('');
       if (timerRef.current) clearInterval(timerRef.current);
       timerRef.current = setInterval(() => {
@@ -1639,6 +1674,7 @@ export default function App() {
       pausedRealtimeTranscriptRef.current = [];
       setRealtimeTranscript([]);
       realtimeTranscriptRef.current = [];
+      interimTranscriptRef.current = '';
       setInterimTranscript('');
       setIsRecording(true);
       setIsPaused(false);
@@ -1719,6 +1755,8 @@ export default function App() {
         if (segment) pausedBatchSegmentsRef.current.push(segment);
       } else if (mode === 'realtime') {
         isRealtimePausedRef.current = true;
+        // Persist the faded text INSTANTLY as a committed line so pause never erases it.
+        commitPendingInterim();
         // Emulate pause by stopping realtime stream and retaining transcript so far.
         const partialTranscript = await safeStopRealtimeRecording();
         if (partialTranscript.trim()) {
@@ -1828,6 +1866,9 @@ export default function App() {
       // ── Stop Real-time mode: stop integrated Tauri recording ──
       const backupAudioFile = await stopRealtimeBackupCapture();
       try {
+        // Persist the faded text INSTANTLY so it never vanishes when stopping mid-utterance.
+        // The drain's trailing final (below) is deduped/upgraded in place by commitTranscriptLine.
+        commitPendingInterim();
         isRealtimePausedRef.current = false;
         const fullTranscript = isPaused ? '' : await safeStopRealtimeRecording();
 
@@ -1835,6 +1876,8 @@ export default function App() {
         setIsRecording(false);
         setIsPaused(false);
         const pausedTranscript = pausedRealtimeTranscriptRef.current.join(' ').trim();
+        // refTranscript now includes the committed interim (commitPendingInterim above), so the
+        // last words are part of the saved transcript even when stopping mid-utterance.
         const refTranscript = realtimeTranscriptRef.current.join(' ').trim();
         const transcriptToUse = [pausedTranscript, fullTranscript.trim(), refTranscript].filter(Boolean).join(' ').trim();
 

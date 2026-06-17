@@ -449,7 +449,9 @@ pub mod macos {
 
     // ─── Realtime Recording with Deepgram Integration ──────────────────────────
 
-    const CHUNK_SIZE: usize = 4800;
+    // Samples per send (mono). Smaller = lower interim latency (faded text appears + firms up
+    // faster). ~1600 samples ≈ 33 ms at 48 kHz.
+    const CHUNK_SIZE: usize = 1600;
 
     use crate::deepgram_transcriber::DeepgramTranscriber;
 
@@ -476,6 +478,7 @@ pub mod macos {
             &mut self,
             api_key: String,
             keyterms: Option<Vec<String>>,
+            language: Option<String>,
             app_handle: tauri::AppHandle,
         ) -> Result<(), String> {
             if self.is_recording.load(Ordering::Relaxed) {
@@ -492,7 +495,7 @@ pub mod macos {
             let transcripts = self.transcripts.clone();
 
             let handle = std::thread::spawn(move || {
-                if let Err(e) = record_realtime(is_recording.clone(), transcripts, api_key, keyterms, app_handle) {
+                if let Err(e) = record_realtime(is_recording.clone(), transcripts, api_key, keyterms, language, app_handle) {
                     eprintln!("Realtime recording error: {}", e);
                     is_recording.store(false, Ordering::Relaxed);
                 }
@@ -514,17 +517,21 @@ pub mod macos {
             }
 
             let transcripts = self.transcripts.lock().map_err(|e| e.to_string())?;
+            // "[FINAL|Label] text" → "Label: text" so the saved transcript keeps speaker
+            // attribution (You / Speaker N) for the notes + knowledge-graph pipeline.
             let clean: Vec<String> = transcripts
                 .iter()
                 .filter_map(|t| {
-                    if let Some(pos) = t.find("] ") {
-                        Some(t[pos + 2..].to_string())
-                    } else {
-                        None
+                    let close = t.find("] ")?;
+                    let text = t[close + 2..].trim();
+                    if text.is_empty() {
+                        return None;
                     }
+                    let label = t.find('|').map(|p| &t[p + 1..close]).unwrap_or("");
+                    Some(if label.is_empty() { text.to_string() } else { format!("{}: {}", label, text) })
                 })
                 .collect();
-            Ok(clean.join(" "))
+            Ok(clean.join("\n"))
         }
     }
 
@@ -533,6 +540,7 @@ pub mod macos {
         transcripts: Arc<Mutex<Vec<String>>>,
         api_key: String,
         keyterms: Option<Vec<String>>,
+        language: Option<String>,
         app_handle: tauri::AppHandle,
     ) -> Result<(), anyhow::Error> {
         use crate::device_monitor;
@@ -554,6 +562,7 @@ pub mod macos {
                 &transcripts,
                 &api_key,
                 &keyterms,
+                &language,
                 &app_handle,
                 &dev_rx,
             ) {
@@ -595,6 +604,7 @@ pub mod macos {
         transcripts: &Arc<Mutex<Vec<String>>>,
         api_key: &str,
         keyterms: &Option<Vec<String>>,
+        language: &Option<String>,
         app_handle: &tauri::AppHandle,
         dev_rx: &std::sync::mpsc::Receiver<crate::device_monitor::DeviceChange>,
     ) -> Result<(), anyhow::Error> {
@@ -674,8 +684,16 @@ pub mod macos {
         let device_changed_clone = device_changed.clone();
 
         rt.block_on(async {
-            let mut transcriber = DeepgramTranscriber::new(api_key.to_string(), sample_rate, keyterms.clone());
-            let mut chunk_buffer = Vec::with_capacity(CHUNK_SIZE);
+            let mut transcriber = DeepgramTranscriber::new(api_key.to_string(), sample_rate, keyterms.clone(), language.clone());
+            // Per-chunk source buffers (mic + system) + the interleaved 2-channel output.
+            let mut mic_buf: Vec<f32> = Vec::with_capacity(CHUNK_SIZE);
+            let mut sys_buf: Vec<f32> = Vec::with_capacity(CHUNK_SIZE);
+            let mut chunk_buffer: Vec<f32> = Vec::with_capacity(CHUNK_SIZE * 2);
+            // Half-duplex gate state: how many more chunks to keep the mic muted after the
+            // system last went active (hangover catches the echo/reverb tail + avoids chatter).
+            let mut mic_mute_hangover: i32 = 0;
+            const SYS_VAD_FLOOR: f32 = 0.01;   // system RMS above this ⇒ a participant is talking
+            const HANGOVER_CHUNKS: i32 = 8;    // ~250 ms at ~33 ms/chunk
 
             while is_recording.load(Ordering::Relaxed) {
                 // Only react to actual input device changes (e.g. Bluetooth headset connected).
@@ -691,8 +709,8 @@ pub mod macos {
                     }
                 }
 
-                // Read and mix mic + system audio (tap is the master clock).
-                while chunk_buffer.len() < CHUNK_SIZE {
+                // Collect one chunk of mic + system frames (tap is the master clock).
+                while mic_buf.len() < CHUNK_SIZE {
                     match system_consumer.try_pop() {
                         Some(s) => {
                             let m = mic_follower.next_mic_for_system_tick(
@@ -700,16 +718,37 @@ pub mod macos {
                                 mic_cpal_hz,
                                 sample_rate,
                             );
-                            chunk_buffer.push((m + s) * 0.5);
+                            mic_buf.push(m);
+                            sys_buf.push(s);
                         }
                         None => break,
                     }
                 }
 
-                // Send audio chunk to Deepgram
-                if chunk_buffer.len() >= CHUNK_SIZE {
-                    let _ = transcriber.send_audio(chunk_buffer.clone());
+                // HALF-DUPLEX SOURCE GATING. The mic also picks up the participant's voice from
+                // the speakers (acoustic echo). Decide purely from the CLEAN system signal: if a
+                // participant is talking (system RMS above floor), mute the mic for this chunk so
+                // that voice stays only on ch1 (Participant) and never duplicates onto ch0 (You).
+                // A hangover keeps the mic muted briefly after the system goes quiet (reverb tail).
+                // Trade-off: true simultaneous speech favours the participant side. No echo canceller.
+                if mic_buf.len() >= CHUNK_SIZE {
+                    let sys_sq: f32 = sys_buf.iter().map(|s| s * s).sum();
+                    let sys_rms = (sys_sq / sys_buf.len() as f32).sqrt();
+                    if sys_rms > SYS_VAD_FLOOR {
+                        mic_mute_hangover = HANGOVER_CHUNKS;
+                    } else if mic_mute_hangover > 0 {
+                        mic_mute_hangover -= 1;
+                    }
+                    let mic_gain = if mic_mute_hangover > 0 { 0.0 } else { 1.0 };
+
                     chunk_buffer.clear();
+                    for i in 0..mic_buf.len() {
+                        chunk_buffer.push(mic_buf[i] * mic_gain); // ch0 — you (gated)
+                        chunk_buffer.push(sys_buf[i]);            // ch1 — participants
+                    }
+                    let _ = transcriber.send_audio(chunk_buffer.clone());
+                    mic_buf.clear();
+                    sys_buf.clear();
                 }
 
                 // Poll for transcripts and emit to frontend
@@ -730,23 +769,39 @@ pub mod macos {
                 tokio::time::sleep(std::time::Duration::from_millis(10)).await;
             }
 
-            // Send remaining audio
-            if !chunk_buffer.is_empty() {
-                let _ = transcriber.send_audio(chunk_buffer);
+            // Flush any partial chunk (interleaved, mic gated by the last hangover state), then
+            // CLOSE the input so Deepgram flushes its trailing FINAL results — the last words you
+            // spoke (still shown as faded interim). Without closing first, those finals never
+            // arrive and the words are lost on stop.
+            if !mic_buf.is_empty() {
+                let mic_gain = if mic_mute_hangover > 0 { 0.0 } else { 1.0 };
+                chunk_buffer.clear();
+                for i in 0..mic_buf.len() {
+                    chunk_buffer.push(mic_buf[i] * mic_gain);
+                    chunk_buffer.push(*sys_buf.get(i).unwrap_or(&0.0));
+                }
+                let _ = transcriber.send_audio(std::mem::take(&mut chunk_buffer));
             }
+            transcriber.close_input();
 
-            // Drain remaining transcripts
-            tokio::time::sleep(std::time::Duration::from_millis(500)).await;
-            while let Some(transcript) = transcriber.try_recv_transcript() {
-                let _ = app_handle.emit("realtime-transcript", &transcript);
-                if transcript.contains("[FINAL") {
-                    if let Ok(mut t) = transcripts.lock() {
-                        let should_push = t.last().map(|prev| prev != &transcript).unwrap_or(true);
-                        if should_push {
-                            t.push(transcript);
+            // Drain the flushed finals for up to ~3.5s (covers Deepgram's CloseStream flush).
+            let drain_until = tokio::time::Instant::now() + std::time::Duration::from_millis(3500);
+            loop {
+                while let Some(transcript) = transcriber.try_recv_transcript() {
+                    let _ = app_handle.emit("realtime-transcript", &transcript);
+                    if transcript.contains("[FINAL") {
+                        if let Ok(mut t) = transcripts.lock() {
+                            let should_push = t.last().map(|prev| prev != &transcript).unwrap_or(true);
+                            if should_push {
+                                t.push(transcript);
+                            }
                         }
                     }
                 }
+                if tokio::time::Instant::now() >= drain_until {
+                    break;
+                }
+                tokio::time::sleep(std::time::Duration::from_millis(50)).await;
             }
         });
 
