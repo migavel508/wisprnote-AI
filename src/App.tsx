@@ -4601,7 +4601,7 @@ export default function App() {
   }
 
   return (
-    <div className="h-screen w-screen bg-app-canvas text-app-fg font-[system-ui] selection:bg-app-fg selection:text-app-panel flex flex-col overflow-hidden">
+    <div className="h-full w-full bg-app-canvas text-app-fg selection:bg-app-fg selection:text-app-panel flex flex-col overflow-hidden">
       {/* Free-tier meeting limit → upgrade prompt (portal) */}
       <FreeLimitModal
         open={showLimitModal}
@@ -4803,7 +4803,7 @@ export default function App() {
       <div className="flex-1 flex flex-col overflow-hidden relative min-h-0">
         {/* The shared global top bar already provides the drag region + top
             spacing, so the content starts right beneath it (no extra top gap). */}
-        <div className={`flex-1 flex overflow-hidden ${isCompactMode ? 'pr-2.5 pl-1.5 pb-2.5 pt-1' : 'p-0 md:pr-2.5 md:pl-1.5 md:pb-2.5 md:pt-1'}`}>
+        <div className={`flex-1 flex overflow-hidden ${isCompactMode ? 'pr-2.5 pl-1.5 pb-2.5 pt-2.5' : 'p-0 md:pr-2.5 md:pl-1.5 md:pb-2.5 md:pt-2.5'}`}>
         <main className={`flex-1 bg-app-panel w-full relative overflow-y-auto shadow-sm text-app-fg ${isCompactMode ? 'rounded-3xl border border-app-border' : 'rounded-none md:rounded-3xl md:border md:border-app-border'}`}>
           <AnimatePresence mode="wait">
             {currentView === 'process' && (

@@ -257,7 +257,7 @@ export default function WorkspaceChat({
           {messages.map((m, i) =>
             m.role === 'user' ? (
               <div key={i} className="flex justify-end">
-                <div className="max-w-[85%] bg-[#f5f2ef] dark:bg-app-chip text-zinc-900 dark:text-app-fg px-4 py-2.5 rounded-3xl rounded-tr-md text-[13.5px]">
+                <div className="max-w-[85%] bg-[#f0f0f0] dark:bg-app-chip text-zinc-900 dark:text-app-fg px-4 py-2.5 rounded-3xl rounded-tr-md text-[13.5px]">
                   {m.text}
                 </div>
               </div>
@@ -321,7 +321,7 @@ export default function WorkspaceChat({
 
       {/* Input bar */}
       <div className="p-3 sm:p-4">
-        <div className="rounded-2xl border border-app-divider bg-app-canvas">
+        <div className="rounded-xl border border-app-divider bg-app-canvas">
           <textarea
             ref={textareaRef}
             value={input}

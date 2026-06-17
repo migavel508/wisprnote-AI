@@ -33,6 +33,19 @@ function cognitoGoogleIdentityProviderName(): string {
   return fromEnv || 'Google';
 }
 
+/**
+ * Cognito federated provider name for “Continue with Microsoft”.
+ * Must match User pool → Sign-in experience → Federated identity provider **name** exactly.
+ * Override via VITE_COGNITO_MICROSOFT_IDENTITY_PROVIDER if yours differs from `Microsoft`.
+ */
+function cognitoMicrosoftIdentityProviderName(): string {
+  const fromEnv =
+    typeof import.meta.env.VITE_COGNITO_MICROSOFT_IDENTITY_PROVIDER === 'string'
+      ? import.meta.env.VITE_COGNITO_MICROSOFT_IDENTITY_PROVIDER.trim()
+      : '';
+  return fromEnv || 'Microsoft';
+}
+
 function normalizeCognitoOrigin(raw: string): string {
   let o = raw.trim().replace(/\/+$/, '');
   if (!o) return '';
@@ -412,9 +425,29 @@ export async function getGoogleOAuthUrl(redirectUri: string): Promise<string> {
   return `${cognitoHostedUiOrigin()}/oauth2/authorize?${params.toString()}`;
 }
 
+/**
+ * Cognito Hosted UI authorize URL for Microsoft with PKCE.
+ * Requires Microsoft configured as a federated identity provider in your Cognito user pool.
+ */
+export async function getMicrosoftOAuthUrl(redirectUri: string): Promise<string> {
+  const verifier = randomPkceVerifier();
+  storePkceVerifier(verifier);
+  const challenge = await pkceChallengeFromVerifier(verifier);
+  const params = new URLSearchParams({
+    client_id: clientId,
+    response_type: 'code',
+    scope: 'openid email profile',
+    redirect_uri: redirectUri,
+    code_challenge_method: 'S256',
+    code_challenge: challenge,
+    identity_provider: cognitoMicrosoftIdentityProviderName(),
+  });
+  return `${cognitoHostedUiOrigin()}/oauth2/authorize?${params.toString()}`;
+}
+
 /** A clean, user-safe failure during the OAuth token exchange. */
 export class OAuthError extends Error {
-  constructor(message = "Couldn't complete Google sign-in. Please try again.") {
+  constructor(message = "Couldn't complete sign-in. Please try again.") {
     super(message);
     this.name = 'OAuthError';
   }
