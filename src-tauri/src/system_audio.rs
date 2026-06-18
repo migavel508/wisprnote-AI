@@ -15,6 +15,54 @@ pub mod macos {
 
     const BUFFER_SIZE: usize = 65536;
 
+    /// Downsamples an interleaved mic/system pair from the capture (tap) rate to a
+    /// target rate (16 kHz for Deepgram) by box-filter averaging each source window.
+    ///
+    /// Why: nova-3 runs at 16 kHz internally, so sending the tap's native 48 kHz buys
+    /// no accuracy — it just triples the websocket bytes (192 KB/s vs 64 KB/s of stereo
+    /// linear16). On a real meeting (already sharing the uplink with Zoom/Meet) that
+    /// extra upload is what causes send backpressure → dropped connections → gaps. We
+    /// downsample once, here, before it ever hits the socket.
+    ///
+    /// Both channels share one phase accumulator so they stay sample-aligned, and the
+    /// phase carries across chunks so there are no clicks at chunk boundaries. Averaging
+    /// (rather than naive drop-sample decimation) gives mild anti-aliasing — adequate for
+    /// speech STT and far simpler than a full polyphase resampler. Any ratio works; if the
+    /// source is already ≤ target it passes through 1:1.
+    struct StereoDownsampler {
+        step: f64, // source frames consumed per output frame (src_hz / dst_hz)
+        pos: f64,  // fractional progress toward the next output frame
+        mic_acc: f32,
+        sys_acc: f32,
+        count: u32,
+    }
+
+    impl StereoDownsampler {
+        fn new(src_hz: u32, dst_hz: u32) -> Self {
+            let step = (src_hz.max(1) as f64) / (dst_hz.max(1) as f64);
+            Self { step: step.max(1.0), pos: 0.0, mic_acc: 0.0, sys_acc: 0.0, count: 0 }
+        }
+
+        /// Feed one source frame; emit an averaged frame to `out_*` once a full
+        /// output window has been gathered.
+        #[inline]
+        fn push(&mut self, mic: f32, sys: f32, out_mic: &mut Vec<f32>, out_sys: &mut Vec<f32>) {
+            self.mic_acc += mic;
+            self.sys_acc += sys;
+            self.count += 1;
+            self.pos += 1.0;
+            if self.pos >= self.step {
+                let inv = 1.0 / self.count as f32;
+                out_mic.push(self.mic_acc * inv);
+                out_sys.push(self.sys_acc * inv);
+                self.mic_acc = 0.0;
+                self.sys_acc = 0.0;
+                self.count = 0;
+                self.pos -= self.step;
+            }
+        }
+    }
+
     /// Streaming sink: recorded samples are appended (as little-endian f32 bytes)
     /// to a scratch .pcm file on disk DURING recording, instead of accumulating in
     /// a growing in-memory Vec. This keeps recording-phase RAM flat regardless of
@@ -684,11 +732,19 @@ pub mod macos {
         let device_changed_clone = device_changed.clone();
 
         rt.block_on(async {
-            let mut transcriber = DeepgramTranscriber::new(api_key.to_string(), sample_rate, keyterms.clone(), language.clone());
-            // Per-chunk source buffers (mic + system) + the interleaved 2-channel output.
+            // Stream to Deepgram at 16 kHz, not the tap's native rate (~48 kHz). nova-3
+            // is a 16 kHz model, so this is no accuracy loss but ~1/3 the upload bytes —
+            // the single biggest lever against the latency/stutter/drop-outs that show up
+            // in long meetings on a shared uplink.
+            const TARGET_HZ: u32 = 16_000;
+            let mut downsampler = StereoDownsampler::new(sample_rate, TARGET_HZ);
+            let mut transcriber = DeepgramTranscriber::new(api_key.to_string(), TARGET_HZ, keyterms.clone(), language.clone());
+            // Per-chunk source buffers (mic + system, at tap rate) and the resampled,
+            // interleaved 16 kHz output staged before send.
             let mut mic_buf: Vec<f32> = Vec::with_capacity(CHUNK_SIZE);
             let mut sys_buf: Vec<f32> = Vec::with_capacity(CHUNK_SIZE);
-            let mut chunk_buffer: Vec<f32> = Vec::with_capacity(CHUNK_SIZE * 2);
+            let mut out_mic: Vec<f32> = Vec::with_capacity(CHUNK_SIZE);
+            let mut out_sys: Vec<f32> = Vec::with_capacity(CHUNK_SIZE);
             // Half-duplex gate state: how many more chunks to keep the mic muted after the
             // system last went active (hangover catches the echo/reverb tail + avoids chatter).
             let mut mic_mute_hangover: i32 = 0;
@@ -741,12 +797,23 @@ pub mod macos {
                     }
                     let mic_gain = if mic_mute_hangover > 0 { 0.0 } else { 1.0 };
 
-                    chunk_buffer.clear();
+                    // Downsample (tap rate → 16 kHz) and interleave in one pass. The mic
+                    // gate is applied pre-resample so the gated participant echo never
+                    // reaches ch0 (You). A partial output window is carried in the
+                    // downsampler across chunks, so nothing is lost at boundaries.
+                    out_mic.clear();
+                    out_sys.clear();
                     for i in 0..mic_buf.len() {
-                        chunk_buffer.push(mic_buf[i] * mic_gain); // ch0 — you (gated)
-                        chunk_buffer.push(sys_buf[i]);            // ch1 — participants
+                        downsampler.push(mic_buf[i] * mic_gain, sys_buf[i], &mut out_mic, &mut out_sys);
                     }
-                    let _ = transcriber.send_audio(chunk_buffer.clone());
+                    if !out_mic.is_empty() {
+                        let mut frame = Vec::with_capacity(out_mic.len() * 2);
+                        for i in 0..out_mic.len() {
+                            frame.push(out_mic[i]); // ch0 — you (gated)
+                            frame.push(out_sys[i]); // ch1 — participants
+                        }
+                        let _ = transcriber.send_audio(frame);
+                    }
                     mic_buf.clear();
                     sys_buf.clear();
                 }
@@ -775,12 +842,20 @@ pub mod macos {
             // arrive and the words are lost on stop.
             if !mic_buf.is_empty() {
                 let mic_gain = if mic_mute_hangover > 0 { 0.0 } else { 1.0 };
-                chunk_buffer.clear();
+                out_mic.clear();
+                out_sys.clear();
                 for i in 0..mic_buf.len() {
-                    chunk_buffer.push(mic_buf[i] * mic_gain);
-                    chunk_buffer.push(*sys_buf.get(i).unwrap_or(&0.0));
+                    let s = *sys_buf.get(i).unwrap_or(&0.0);
+                    downsampler.push(mic_buf[i] * mic_gain, s, &mut out_mic, &mut out_sys);
                 }
-                let _ = transcriber.send_audio(std::mem::take(&mut chunk_buffer));
+                if !out_mic.is_empty() {
+                    let mut frame = Vec::with_capacity(out_mic.len() * 2);
+                    for i in 0..out_mic.len() {
+                        frame.push(out_mic[i]);
+                        frame.push(out_sys[i]);
+                    }
+                    let _ = transcriber.send_audio(frame);
+                }
             }
             transcriber.close_input();
 
