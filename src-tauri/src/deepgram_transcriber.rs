@@ -1,11 +1,44 @@
 use anyhow::{Context, Result};
 use futures_util::{SinkExt, StreamExt};
 use serde::{Deserialize, Serialize};
+use std::collections::VecDeque;
 use std::time::Duration;
 use tokio::sync::mpsc;
 use tokio_tungstenite::tungstenite::Message;
 
 const DEEPGRAM_WS_URL: &str = "wss://api.deepgram.com/v1/listen";
+
+// Bounded buffer of audio captured DURING a reconnect outage, replayed to the fresh
+// Deepgram session on reconnect so words spoken across a network blip aren't lost.
+// 16 kHz interleaved stereo (TARGET_HZ × 2 channels). Capped so neither a multi-hour
+// meeting nor a long outage can grow memory.
+//
+// We deliberately replay ONLY this outage audio — never the pre-drop tail already sent
+// to the previous session. With multichannel + diarize, Deepgram finalizes ch0 ("You")
+// and ch1 ("Speaker N") independently and interleaved, and the UI dedup only collapses
+// against the single last line; re-sending already-finalized audio would re-finalize a
+// now-buried line and append a visible duplicate. Outage audio was never sent anywhere,
+// so the fresh session transcribes it for the first time — it cannot duplicate. (An
+// adversarial review of the in-flight-tail/“acoustic context” variant found it
+// duplication-unsafe under this app's multichannel config; this is the safe subset.)
+const REPLAY_SECS: usize = 5;
+const REPLAY_MAX_SAMPLES: usize = REPLAY_SECS * 16_000 * 2; // ~160k f32 (~640 KB)
+
+/// Append a chunk to the bounded outage-replay ring, evicting oldest-first (FIFO) so
+/// the buffer never exceeds REPLAY_MAX_SAMPLES. `total` tracks the exact sample count
+/// so the cap is O(1) to enforce regardless of how chunks are sized. For an outage
+/// longer than REPLAY_SECS this keeps only the freshest window — a bounded, intentional
+/// loss (the earliest outage words age out rather than growing memory unbounded).
+fn push_replay(replay: &mut VecDeque<Vec<f32>>, total: &mut usize, chunk: Vec<f32>) {
+    *total += chunk.len();
+    replay.push_back(chunk);
+    while *total > REPLAY_MAX_SAMPLES {
+        match replay.pop_front() {
+            Some(old) => *total -= old.len(),
+            None => break,
+        }
+    }
+}
 
 enum StreamOutcome {
     /// Recorder closed the audio channel; the session is complete.
@@ -142,9 +175,13 @@ impl DeepgramTranscriber {
 
     /// Supervisor loop: keeps a Deepgram connection alive for the whole
     /// recording. If the socket drops (network blip, server-side close), it
-    /// reconnects with backoff and resumes. Audio captured during an outage is
-    /// discarded so transcription "pauses" and picks back up with live audio,
-    /// matching the recorder's expectation of an uninterrupted session.
+    /// reconnects with backoff and resumes. Audio captured during the outage is
+    /// BUFFERED into a bounded replay ring (`REPLAY_SECS` cap) instead of being
+    /// discarded, then replayed to the fresh session on reconnect — so the words
+    /// spoken across a brief blip survive instead of vanishing. The ring lives here,
+    /// at supervisor scope, because it must persist across `stream_once` reconnects
+    /// (a buffer owned by `stream_once` would be dropped on every disconnect). An
+    /// outage longer than `REPLAY_SECS` keeps only its freshest window.
     async fn run_websocket(
         api_key: String,
         sample_rate: u32,
@@ -155,21 +192,24 @@ impl DeepgramTranscriber {
     ) -> Result<()> {
         let url = Self::build_url(sample_rate, keyterms, &language);
         let mut backoff_ms = 500u64;
+        // Outage-replay ring + running sample count (see push_replay / REPLAY_MAX_SAMPLES).
+        let mut replay: VecDeque<Vec<f32>> = VecDeque::new();
+        let mut replay_samples: usize = 0;
 
         loop {
-            match Self::stream_once(&api_key, &url, &mut audio_rx, &transcript_tx).await {
+            match Self::stream_once(&api_key, &url, &mut audio_rx, &transcript_tx, &mut replay, &mut replay_samples).await {
                 StreamOutcome::Finished => break,
                 StreamOutcome::Disconnected(reason) => {
                     // Healthy connection that dropped mid-stream: reset backoff.
                     backoff_ms = 500;
                     eprintln!("Deepgram disconnected ({}); reconnecting in {}ms", reason, backoff_ms);
-                    if Self::pause_until(&mut audio_rx, backoff_ms).await {
+                    if Self::pause_until(&mut audio_rx, backoff_ms, &mut replay, &mut replay_samples).await {
                         break;
                     }
                 }
                 StreamOutcome::ConnectFailed(reason) => {
                     eprintln!("Deepgram connect failed ({}); retrying in {}ms", reason, backoff_ms);
-                    if Self::pause_until(&mut audio_rx, backoff_ms).await {
+                    if Self::pause_until(&mut audio_rx, backoff_ms, &mut replay, &mut replay_samples).await {
                         break;
                     }
                     backoff_ms = (backoff_ms * 2).min(5000);
@@ -208,11 +248,15 @@ impl DeepgramTranscriber {
     }
 
     /// Connect once and stream until the recorder finishes or the socket drops.
+    /// On a reconnect the `replay` ring holds audio captured during the outage; it is
+    /// replayed to the fresh session before live audio resumes.
     async fn stream_once(
         api_key: &str,
         url: &str,
         audio_rx: &mut mpsc::UnboundedReceiver<Vec<f32>>,
         transcript_tx: &mpsc::UnboundedSender<String>,
+        replay: &mut VecDeque<Vec<f32>>,
+        replay_samples: &mut usize,
     ) -> StreamOutcome {
         use tokio_tungstenite::tungstenite::client::IntoClientRequest;
 
@@ -230,12 +274,62 @@ impl DeepgramTranscriber {
             Err(e) => return StreamOutcome::ConnectFailed(format!("auth header: {}", e)),
         }
 
-        let (ws_stream, _response) = match tokio_tungstenite::connect_async(request).await {
-            Ok(s) => s,
-            Err(e) => return StreamOutcome::ConnectFailed(format!("connect: {}", e)),
-        };
+        // Bound the connect: on a black-holed network (firewall dropping SYN, stalled TLS)
+        // the OS can hang the handshake for ~75s, during which the unbounded audio channel
+        // keeps filling (~128 KB/s) with nothing draining it. Cap it so a bad reconnect
+        // fails fast into backoff (where pause_until drains the channel) instead.
+        let (ws_stream, _response) =
+            match tokio::time::timeout(Duration::from_secs(10), tokio_tungstenite::connect_async(request)).await {
+                Ok(Ok(s)) => s,
+                Ok(Err(e)) => return StreamOutcome::ConnectFailed(format!("connect: {}", e)),
+                Err(_) => return StreamOutcome::ConnectFailed("connect timeout".to_string()),
+            };
 
         let (mut ws_tx, mut ws_rx) = ws_stream.split();
+
+        // DECOUPLED READ PATH. Responses are drained on their own task so that a
+        // congested / slow upload (a `ws_tx.send().await` that blocks because the
+        // socket's send buffer is full) can NEVER stall response handling, the
+        // keep-alive, or let the OS receive buffer back up. Previously all three
+        // shared one `select!`, so a brief upload hiccup mid-meeting would freeze
+        // reads → Deepgram would time the connection out → reconnect (discarding
+        // audio). That cascade is exactly what made long meetings stutter, lag and
+        // sometimes stop transcribing. Keeping the reader always-live is what
+        // anarlog/Hyprnote does (separate TX/RX tasks), and is the core fix here.
+        let rx_transcript_tx = transcript_tx.clone();
+        let mut rx_task = tokio::spawn(async move {
+            while let Some(msg) = ws_rx.next().await {
+                match msg {
+                    Ok(Message::Text(text)) => Self::handle_text(&text, &rx_transcript_tx),
+                    Ok(Message::Close(frame)) => {
+                        let reason = frame
+                            .map(|f| format!("{} {}", f.code, f.reason))
+                            .unwrap_or_else(|| "close".to_string());
+                        return StreamOutcome::Disconnected(reason);
+                    }
+                    Ok(_) => {}
+                    Err(e) => return StreamOutcome::Disconnected(format!("ws error: {}", e)),
+                }
+            }
+            StreamOutcome::Disconnected("stream ended".to_string())
+        });
+
+        // Replay audio buffered during the outage (oldest first), so words spoken across
+        // the blip land in the new session. Sequenced AFTER the reader task is live (so the
+        // transcripts this generates are read) and BEFORE the live select! loop. The ring
+        // holds ONLY outage audio (never sent to any prior session), so this can't produce a
+        // duplicate line. Drain as we send: a chunk whose send fails is on a dead socket
+        // anyway, and the rest stays buffered for the next reconnect. On the first connect
+        // the ring is empty, so this is a no-op and behaviour is identical to before.
+        while let Some(chunk) = replay.pop_front() {
+            *replay_samples = replay_samples.saturating_sub(chunk.len());
+            let bytes = Self::f32_to_i16_bytes(&chunk);
+            if ws_tx.send(Message::Binary(bytes)).await.is_err() {
+                rx_task.abort();
+                return StreamOutcome::Disconnected("replay send failed".to_string());
+            }
+        }
+
         let mut keep_alive = tokio::time::interval(Duration::from_secs(5));
         keep_alive.tick().await; // consume the immediate first tick
 
@@ -246,47 +340,36 @@ impl DeepgramTranscriber {
                         Some(samples) => {
                             let bytes = Self::f32_to_i16_bytes(&samples);
                             if ws_tx.send(Message::Binary(bytes)).await.is_err() {
+                                rx_task.abort();
                                 return StreamOutcome::Disconnected("audio send failed".to_string());
                             }
                         }
                         None => {
-                            // Recorder stopped: tell Deepgram to flush, drain trailing
-                            // results, then end the supervisor loop.
+                            // Recorder stopped: tell Deepgram to flush its trailing FINAL
+                            // results, then let the reader task drain them (it forwards to
+                            // transcript_tx) for up to 2s before we finish the session.
                             let _ = ws_tx.send(Message::Text(
                                 serde_json::json!({"type": "CloseStream"}).to_string().into()
                             )).await;
-                            let _ = tokio::time::timeout(Duration::from_secs(2), async {
-                                while let Some(Ok(msg)) = ws_rx.next().await {
-                                    match msg {
-                                        Message::Text(text) => Self::handle_text(&text, transcript_tx),
-                                        Message::Close(_) => break,
-                                        _ => {}
-                                    }
-                                }
-                            }).await;
+                            let _ = tokio::time::timeout(Duration::from_secs(2), &mut rx_task).await;
+                            rx_task.abort();
                             return StreamOutcome::Finished;
                         }
                     }
                 }
-                maybe_msg = ws_rx.next() => {
-                    match maybe_msg {
-                        Some(Ok(Message::Text(text))) => Self::handle_text(&text, transcript_tx),
-                        Some(Ok(Message::Close(frame))) => {
-                            let reason = frame
-                                .map(|f| format!("{} {}", f.code, f.reason))
-                                .unwrap_or_else(|| "close".to_string());
-                            return StreamOutcome::Disconnected(reason);
-                        }
-                        Some(Ok(_)) => {}
-                        Some(Err(e)) => return StreamOutcome::Disconnected(format!("ws error: {}", e)),
-                        None => return StreamOutcome::Disconnected("stream ended".to_string()),
-                    }
+                rx_done = &mut rx_task => {
+                    // Read side ended first (server closed the socket, or a read error):
+                    // surface the reason so the supervisor reconnects with backoff.
+                    return rx_done.unwrap_or_else(|_| {
+                        StreamOutcome::Disconnected("reader task aborted".to_string())
+                    });
                 }
                 _ = keep_alive.tick() => {
                     let keep_alive_msg = serde_json::to_string(&KeepAliveMessage {
                         msg_type: "KeepAlive".to_string(),
                     }).unwrap();
                     if ws_tx.send(Message::Text(keep_alive_msg.into())).await.is_err() {
+                        rx_task.abort();
                         return StreamOutcome::Disconnected("keepalive send failed".to_string());
                     }
                 }
@@ -294,9 +377,16 @@ impl DeepgramTranscriber {
         }
     }
 
-    /// Wait `wait_ms` before reconnecting, discarding any audio captured during
-    /// the outage. Returns true if the recorder finished while waiting.
-    async fn pause_until(audio_rx: &mut mpsc::UnboundedReceiver<Vec<f32>>, wait_ms: u64) -> bool {
+    /// Wait `wait_ms` before reconnecting, BUFFERING any audio captured during the
+    /// outage into the bounded replay ring (capped at `REPLAY_SECS`) so it can be
+    /// replayed to the fresh session instead of being lost. Returns true if the
+    /// recorder finished while waiting (so the supervisor stops).
+    async fn pause_until(
+        audio_rx: &mut mpsc::UnboundedReceiver<Vec<f32>>,
+        wait_ms: u64,
+        replay: &mut VecDeque<Vec<f32>>,
+        replay_samples: &mut usize,
+    ) -> bool {
         let deadline = tokio::time::sleep(Duration::from_millis(wait_ms));
         tokio::pin!(deadline);
         loop {
@@ -304,7 +394,7 @@ impl DeepgramTranscriber {
                 _ = &mut deadline => return false,
                 maybe = audio_rx.recv() => {
                     match maybe {
-                        Some(_) => {} // discard audio captured while disconnected
+                        Some(samples) => push_replay(replay, replay_samples, samples), // keep outage audio for replay
                         None => return true,
                     }
                 }

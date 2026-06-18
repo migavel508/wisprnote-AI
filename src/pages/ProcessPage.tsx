@@ -51,6 +51,20 @@ interface ProcessPageProps {
 
 type ViewState = 'collapsed' | 'expanded';
 
+// Committed (finalized) transcript lines. Memoized on the array reference so the
+// fast interim updates — which fire several times a second and only change the
+// faded partial line — don't re-render and re-diff the entire (ever-growing) list.
+// In a long meeting that list is hundreds of lines; without this, every partial
+// word reconciled all of them, which is what made the live transcript feel laggy.
+const CommittedTranscript = React.memo(({ lines }: { lines: string[] }) => (
+  <>
+    {lines.map((line, i) => (
+      <p key={i} className="text-[13px] text-zinc-700 dark:text-zinc-300 leading-relaxed py-1">{line}</p>
+    ))}
+  </>
+));
+CommittedTranscript.displayName = 'CommittedTranscript';
+
 const formatTime = (seconds: number) => {
   const mins = Math.floor(seconds / 60);
   const secs = seconds % 60;
@@ -94,10 +108,12 @@ export default function ProcessPage({
   const [showTooltip, setShowTooltip] = useState(false);
   const [isDragOver, setIsDragOver] = useState(false);
 
-  // Auto-scroll live transcript
+  // Auto-scroll live transcript. Use instant ('auto') not 'smooth': interim updates
+  // fire several times a second, and queuing an overlapping smooth-scroll animation on
+  // each one is what made the panel jitter and lag during an active meeting.
   useEffect(() => {
     if (transcriptEndRef.current) {
-      transcriptEndRef.current.scrollIntoView({ behavior: 'smooth' });
+      transcriptEndRef.current.scrollIntoView({ behavior: 'auto', block: 'end' });
     }
   }, [realtimeTranscript, interimTranscript]);
 
@@ -563,9 +579,7 @@ export default function ProcessPage({
                             </div>
                           ) : (
                             <div className="space-y-1">
-                              {realtimeTranscript.map((line, i) => (
-                                <p key={i} className="text-[13px] text-zinc-700 dark:text-zinc-300 leading-relaxed py-1">{line}</p>
-                              ))}
+                              <CommittedTranscript lines={realtimeTranscript} />
                               {interimTranscript && <p className="text-[13px] text-zinc-400 dark:text-zinc-500 italic leading-relaxed py-1">{interimTranscript}</p>}
                               <div ref={transcriptEndRef} />
                             </div>
