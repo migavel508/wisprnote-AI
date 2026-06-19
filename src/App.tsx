@@ -38,8 +38,8 @@ import {
   PlayCircle,
   AudioLines,
   PenLine,
-  PanelLeft,
 } from 'lucide-react';
+import WindowToggleIcon from './components/WindowToggleIcon';
 import { motion, AnimatePresence } from 'motion/react';
 import Markdown from 'react-markdown';
 import remarkGfm from 'remark-gfm';
@@ -430,9 +430,12 @@ export default function App() {
   const [showReconnectingMessage, setShowReconnectingMessage] = useState(false);
   
   // Recording State
-  const [inputMode, setInputMode] = useState<'upload' | 'record'>('upload');
+  const [inputMode, setInputMode] = useState<'upload' | 'record'>('record');
   const [isRecording, setIsRecording] = useState(false);
   const [isPaused, setIsPaused] = useState(false);
+  // True while a pause/resume/stop control op is running — used to disable the
+  // pause button so rapid mashing can't kick off overlapping native operations.
+  const [isControlBusy, setIsControlBusy] = useState(false);
   const [recordingTime, setRecordingTime] = useState(0);
   const mediaRecorderRef = useRef<MediaRecorder | null>(null);
   const audioChunksRef = useRef<Blob[]>([]);
@@ -459,7 +462,15 @@ export default function App() {
   const isRealtimePausedRef = useRef(false);
   const pausedBatchSegmentsRef = useRef<File[]>([]);
   const pausedRealtimeTranscriptRef = useRef<string[]>([]);
-  const pauseResumeInFlightRef = useRef(false);
+  // Recording-control concurrency: pause/resume/stop all mutate the SAME native
+  // recorder, so they must never overlap. recordingOpLockRef is a promise-chain
+  // mutex every op runs through; controlBusyRef debounces rapid pause/resume
+  // mashing; isStoppingRef makes stop idempotent and freezes pause/resume once a
+  // stop begins; isPausedRef is the async-readable mirror of the isPaused state.
+  const recordingOpLockRef = useRef<Promise<unknown>>(Promise.resolve());
+  const controlBusyRef = useRef(false);
+  const isStoppingRef = useRef(false);
+  const isPausedRef = useRef(false);
   const realtimeEngineActiveRef = useRef(false);
   const [permissionsGranted, setPermissionsGranted] = useState(false);
   const [currentInputDevice, setCurrentInputDevice] = useState<string | null>(null);
@@ -1639,6 +1650,12 @@ export default function App() {
     const activeMode: RecordingMode = forcedRecordingModeRef.current ?? desktopRecordingMode;
     forcedRecordingModeRef.current = null;
     activeRecordingModeRef.current = activeMode; // single source of truth for pause/resume/stop
+    // Fresh recording → reset the control-concurrency latches from any prior session.
+    isStoppingRef.current = false;
+    controlBusyRef.current = false;
+    isPausedRef.current = false;
+    recordingOpLockRef.current = Promise.resolve();
+    setIsControlBusy(false);
     if (nativeServerAvailable && activeMode === 'batch') {
       // ── Native Batch Recording (mic + system audio via Tauri) ──
       // Optimistic UI: flip to "recording" instantly; start the native capture
@@ -1747,96 +1764,122 @@ export default function App() {
     }
   };
 
+  // Serialize a recording-control operation behind any in-flight one. The lock
+  // never deadlocks — the next op runs whether the previous settled or threw.
+  const runRecordingOp = <T,>(fn: () => Promise<T>): Promise<T> => {
+    const run = recordingOpLockRef.current.then(fn, fn);
+    recordingOpLockRef.current = run.then(() => undefined, () => undefined);
+    return run as Promise<T>;
+  };
+
   const pauseRecording = async () => {
-    if (!isRecording || isPaused || pauseResumeInFlightRef.current) return;
-    pauseResumeInFlightRef.current = true;
+    // Debounce mashing and freeze once a stop is underway. isPausedRef keeps the
+    // "already paused" check correct even before React flushes isPaused.
+    if (!isRecording || isPausedRef.current || isStoppingRef.current || controlBusyRef.current) return;
+    controlBusyRef.current = true;
+    setIsControlBusy(true);
+    isPausedRef.current = true;
     setIsPaused(true);
     setInterimTranscript('');
     if (timerRef.current) clearInterval(timerRef.current);
 
     const mode = activeRecordingModeRef.current;
     try {
-      if (nativeServerAvailable && mode === 'batch') {
-        // Emulate pause by checkpointing a finished native segment.
-        const segment = await stopSystemAudioRecording();
-        if (segment) pausedBatchSegmentsRef.current.push(segment);
-      } else if (mode === 'realtime') {
-        isRealtimePausedRef.current = true;
-        // Persist the faded text INSTANTLY as a committed line so pause never erases it.
-        commitPendingInterim();
-        // Emulate pause by stopping realtime stream and retaining transcript so far.
-        const partialTranscript = await safeStopRealtimeRecording();
-        if (partialTranscript.trim()) {
-          pausedRealtimeTranscriptRef.current.push(partialTranscript.trim());
+      await runRecordingOp(async () => {
+        if (nativeServerAvailable && mode === 'batch') {
+          // Checkpoint a native segment — but only if the recorder is genuinely
+          // running, so a desync can't trigger a "not recording" error.
+          if (await isSystemAudioRecording()) {
+            const segment = await stopSystemAudioRecording();
+            if (segment) pausedBatchSegmentsRef.current.push(segment);
+          }
+        } else if (mode === 'realtime') {
+          isRealtimePausedRef.current = true;
+          // Persist the faded text INSTANTLY as a committed line so pause never erases it.
+          commitPendingInterim();
+          const partialTranscript = await safeStopRealtimeRecording();
+          if (partialTranscript.trim()) {
+            pausedRealtimeTranscriptRef.current.push(partialTranscript.trim());
+          }
+        } else if (mediaRecorderRef.current && mediaRecorderRef.current.state === 'recording') {
+          mediaRecorderRef.current.pause();
         }
-      } else if (mediaRecorderRef.current && mediaRecorderRef.current.state === 'recording') {
-        mediaRecorderRef.current.pause();
-      } else {
-        return;
-      }
+      });
     } catch (err: any) {
       log.error('pause_recording_error', { error: err instanceof Error ? err : undefined });
       setError(err.message || 'Failed to pause recording.');
-      // Roll back paused UI state if pause fails.
-      setIsPaused(false);
+      // Roll back paused UI — unless a stop has since taken over.
+      isPausedRef.current = false;
       isRealtimePausedRef.current = false;
-      timerRef.current = setInterval(() => {
-        setRecordingTime(prev => prev + 1);
-      }, 1000);
+      setIsPaused(false);
+      if (!isStoppingRef.current && isRecording) {
+        timerRef.current = setInterval(() => setRecordingTime(prev => prev + 1), 1000);
+      }
     } finally {
-      pauseResumeInFlightRef.current = false;
+      controlBusyRef.current = false;
+      setIsControlBusy(false);
     }
   };
 
   const resumeRecording = async () => {
-    if (!isRecording || !isPaused || pauseResumeInFlightRef.current) return;
-    pauseResumeInFlightRef.current = true;
+    if (!isRecording || !isPausedRef.current || isStoppingRef.current || controlBusyRef.current) return;
+    controlBusyRef.current = true;
+    setIsControlBusy(true);
+    isPausedRef.current = false;
     setIsPaused(false);
 
     const mode = activeRecordingModeRef.current;
     try {
-      if (nativeServerAvailable && mode === 'batch') {
-        await startSystemAudioRecording();
-      } else if (mode === 'realtime') {
-        // Short-lived token from the authed backend; real key never bundled.
-        const apiKey = await getDeepgramToken();
-        if (!unlistenRef.current) {
-          await attachRealtimeTranscriptListener();
-        }
-        if (!realtimeEngineActiveRef.current) {
-          await startRealtimeRecording(apiKey, extractDeepgramKeyterms(prompt));
+      await runRecordingOp(async () => {
+        if (nativeServerAvailable && mode === 'batch') {
+          // Resume only if the recorder isn't somehow already running.
+          if (!(await isSystemAudioRecording())) {
+            await startSystemAudioRecording();
+          }
+        } else if (mode === 'realtime') {
+          // Short-lived token from the authed backend; real key never bundled.
+          const apiKey = await getDeepgramToken();
+          if (!unlistenRef.current) {
+            await attachRealtimeTranscriptListener();
+          }
+          if (!realtimeEngineActiveRef.current && !(await isRealtimeRecording())) {
+            await startRealtimeRecording(apiKey, extractDeepgramKeyterms(prompt));
+          }
           realtimeEngineActiveRef.current = true;
+          isRealtimePausedRef.current = false;
+        } else if (mediaRecorderRef.current && mediaRecorderRef.current.state === 'paused') {
+          mediaRecorderRef.current.resume();
         }
-        isRealtimePausedRef.current = false;
-      } else if (mediaRecorderRef.current && mediaRecorderRef.current.state === 'paused') {
-        mediaRecorderRef.current.resume();
-      } else {
-        return;
+      });
+      // Don't restart the clock if a stop slipped in while we were resuming.
+      if (!isStoppingRef.current) {
+        timerRef.current = setInterval(() => setRecordingTime(prev => prev + 1), 1000);
       }
-
-      timerRef.current = setInterval(() => {
-        setRecordingTime(prev => prev + 1);
-      }, 1000);
     } catch (err: any) {
       log.error('resume_recording_error', { error: err instanceof Error ? err : undefined });
       setError(err.message || 'Failed to resume recording.');
-      // Roll back resumed UI state if resume fails.
+      // Roll back to paused on failure.
+      isPausedRef.current = true;
       setIsPaused(true);
       if (timerRef.current) clearInterval(timerRef.current);
     } finally {
-      pauseResumeInFlightRef.current = false;
+      controlBusyRef.current = false;
+      setIsControlBusy(false);
     }
   };
 
-  const stopRecording = async () => {
-    if (timerRef.current) clearInterval(timerRef.current);
+  // The actual stop work — runs exclusively through the lock (never overlapping a
+  // pause/resume). Reads the recorder's REAL state rather than the (possibly stale
+  // or paused) isPaused flag, which is what makes stop reliable after rapid clicks.
+  const stopRecordingImpl = async () => {
     const mode = activeRecordingModeRef.current;
 
     if (nativeServerAvailable && mode === 'batch' && isRecording) {
       // ── Stop Native Batch Recording (Tauri) ──
       try {
         let finalSegment: File | null = null;
-        if (!isPaused) {
+        // Authoritative: ask the recorder itself instead of trusting isPaused.
+        if (await isSystemAudioRecording()) {
           finalSegment = await stopSystemAudioRecording();
         }
         const allSegments = [...pausedBatchSegmentsRef.current, ...(finalSegment ? [finalSegment] : [])];
@@ -1856,6 +1899,7 @@ export default function App() {
         }
         setIsRecording(false);
         setIsPaused(false);
+        isPausedRef.current = false;
         pausedBatchSegmentsRef.current = [];
         if (audioFile) {
           fileSourceRef.current = 'native-batch';
@@ -1868,6 +1912,7 @@ export default function App() {
         setError(err.message || 'Failed to stop recording.');
         setIsRecording(false);
         setIsPaused(false);
+        isPausedRef.current = false;
         pausedBatchSegmentsRef.current = [];
       }
     } else if (mode === 'realtime' && isRecording) {
@@ -1878,11 +1923,14 @@ export default function App() {
         // The drain's trailing final (below) is deduped/upgraded in place by commitTranscriptLine.
         commitPendingInterim();
         isRealtimePausedRef.current = false;
-        const fullTranscript = isPaused ? '' : await safeStopRealtimeRecording();
+        // safeStopRealtimeRecording returns '' when the engine is already stopped
+        // (e.g. we were paused), so this is correct without reading isPaused.
+        const fullTranscript = await safeStopRealtimeRecording();
 
         if (unlistenRef.current) { unlistenRef.current(); unlistenRef.current = null; }
         setIsRecording(false);
         setIsPaused(false);
+        isPausedRef.current = false;
         const pausedTranscript = pausedRealtimeTranscriptRef.current.join(' ').trim();
         // refTranscript now includes the committed interim (commitPendingInterim above), so the
         // last words are part of the saved transcript even when stopping mid-utterance.
@@ -1921,6 +1969,7 @@ export default function App() {
         if (unlistenRef.current) { unlistenRef.current(); unlistenRef.current = null; }
         setIsRecording(false);
         setIsPaused(false);
+        isPausedRef.current = false;
         // If network drops while stopping the realtime stream, salvage any finalized transcript.
         const fallbackTranscript = realtimeTranscriptRef.current.join(' ').trim();
         if (fallbackTranscript) {
@@ -1939,6 +1988,22 @@ export default function App() {
       mediaRecorderRef.current.stop();
       setIsRecording(false);
       setIsPaused(false);
+      isPausedRef.current = false;
+    }
+  };
+
+  const stopRecording = async () => {
+    // Idempotent: the first stop wins; later clicks (and any queued pause/resume)
+    // are ignored via isStoppingRef. The work waits behind any in-flight
+    // pause/resume through the lock, so native start/stop never overlap.
+    if (isStoppingRef.current) return;
+    isStoppingRef.current = true;
+    setIsControlBusy(true);
+    if (timerRef.current) clearInterval(timerRef.current);
+    try {
+      await runRecordingOp(stopRecordingImpl);
+    } finally {
+      setIsControlBusy(false);
     }
   };
 
@@ -4805,7 +4870,7 @@ export default function App() {
           className="w-8 h-8 flex items-center justify-center text-app-fg-subtle hover:text-app-fg hover:bg-app-nav-active-bg rounded-lg transition-all duration-200"
           title="Toggle sidebar"
         >
-          <PanelLeft size={19} strokeWidth={1.6} />
+          <WindowToggleIcon open={isSidebarOpen} size={19} strokeWidth={1.8} />
         </button>
       </div>
 
@@ -4891,6 +4956,7 @@ export default function App() {
                   stopRecording={stopRecording}
                   pauseRecording={pauseRecording}
                   resumeRecording={resumeRecording}
+                  isControlBusy={isControlBusy}
                   prompt={prompt}
                   setPrompt={setPrompt}
                   startProcessing={startProcessing}
