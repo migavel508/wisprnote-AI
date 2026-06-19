@@ -1,4 +1,5 @@
 import React, { useEffect, useState } from 'react';
+import { WisprnoteLogo } from './WisprnoteLogo';
 import {
   signUp,
   signIn,
@@ -256,24 +257,24 @@ export default function Auth() {
         className="w-full max-w-[400px]"
       >
         {/* Logo + brand — outside the card */}
-        <div className="flex items-center gap-2.5 mb-4 px-1">
-          <img src="/logo.png" alt="Wisprnote" className="w-7 h-7 rounded-lg object-cover" />
-          <span className="text-[15px] font-semibold text-zinc-800 dark:text-app-fg tracking-[-0.01em]">Wisprnote</span>
+        <div className="flex items-center justify-center gap-3.5 mb-5">
+          <WisprnoteLogo className="w-14 h-14" />
+          <span style={{ fontFamily: "'EB Garamond', Georgia, serif" }} className="text-[40px] font-semibold text-zinc-900 dark:text-app-fg tracking-[-0.01em]">Wisprnote</span>
         </div>
 
         <div className="bg-white dark:bg-app-panel rounded-2xl shadow-sm border border-zinc-200/80 dark:border-app-card-border p-6">
 
           {/* Header */}
           <div className="mb-4">
-            <h1 className="text-[19px] font-bold text-zinc-900 dark:text-app-fg mb-0.5">
+            <h1 style={{ fontFamily: "'EB Garamond', Georgia, serif" }} className="text-[30px] font-bold text-zinc-900 dark:text-app-fg mb-1">
               {isSignUp ? 'Create your account' : 'Welcome back'}
             </h1>
-            <p className="text-[13.5px] text-zinc-500 dark:text-app-fg-muted">
+            <p className="text-[12px] text-zinc-400 dark:text-app-fg-muted">
               {isSignUp ? 'Start capturing and acting on every meeting.' : 'Sign in to continue to Wisprnote.'}
             </p>
           </div>
 
-          <form onSubmit={handleAuth} className="space-y-3">
+          <form onSubmit={handleAuth} className="space-y-4">
             <AnimatePresence>
               {error && <AlertBanner message={error} />}
               {message && <SuccessBanner message={message} />}
@@ -291,7 +292,7 @@ export default function Auth() {
                   className="overflow-hidden"
                 >
                   <div className="pb-0.5">
-                    <label className="block text-[12.5px] font-semibold text-zinc-700 dark:text-app-fg mb-1">Full Name</label>
+                    <label className="block text-[13.5px] font-semibold text-zinc-700 dark:text-app-fg mb-1">Name</label>
                     <div className={inputBase('name')}>
                       <User size={15} className="absolute left-3.5 top-1/2 -translate-y-1/2 text-zinc-400 dark:text-app-fg-subtle" />
                       <input
@@ -301,7 +302,7 @@ export default function Auth() {
                         onFocus={() => setFocusedField('name')}
                         onBlur={() => setFocusedField(null)}
                         className="w-full bg-transparent rounded-lg py-2 pl-10 pr-4 text-[13.5px] text-zinc-900 dark:text-app-fg placeholder:text-zinc-400 dark:placeholder:text-app-fg-subtle focus:outline-none"
-                        placeholder="Enter your full name"
+                        placeholder="Enter your name"
                       />
                     </div>
                   </div>
@@ -311,7 +312,7 @@ export default function Auth() {
 
             {/* Email */}
             <div>
-              <label className="block text-[12.5px] font-semibold text-zinc-700 dark:text-app-fg mb-1">Email Address</label>
+              <label className="block text-[13.5px] font-semibold text-zinc-700 dark:text-app-fg mb-1">Email Address</label>
               <div className={inputBase('email')}>
                 <Mail size={15} className="absolute left-3.5 top-1/2 -translate-y-1/2 text-zinc-400 dark:text-app-fg-subtle" />
                 <input
@@ -329,7 +330,7 @@ export default function Auth() {
 
             {/* Password */}
             <div>
-              <label className="block text-[12.5px] font-semibold text-zinc-700 dark:text-app-fg mb-1">Password</label>
+              <label className="block text-[13.5px] font-semibold text-zinc-700 dark:text-app-fg mb-1">Password</label>
               <div className={inputBase('password')}>
                 <Lock size={15} className="absolute left-3.5 top-1/2 -translate-y-1/2 text-zinc-400 dark:text-app-fg-subtle" />
                 <input
@@ -352,7 +353,7 @@ export default function Auth() {
                 </button>
               </div>
               {isSignUp && (
-                <p className="text-[11.5px] text-zinc-400 dark:text-app-fg-subtle mt-1.5">
+                <p className="text-[11px] text-zinc-400 dark:text-app-fg-subtle mt-1.5">
                   Use at least 8 characters with a mix of letters, numbers &amp; symbols
                 </p>
               )}
@@ -362,7 +363,7 @@ export default function Auth() {
             <button
               type="submit"
               disabled={loading}
-              className="w-full bg-zinc-900 dark:bg-zinc-100 text-white dark:text-zinc-900 py-2.5 rounded-lg text-[13.5px] font-semibold hover:bg-zinc-800 dark:hover:bg-zinc-200 active:scale-[0.98] transition-all flex items-center justify-center gap-2 disabled:opacity-50 mt-0.5"
+              className="w-full bg-zinc-900 dark:bg-zinc-100 text-white dark:text-zinc-900 py-2.5 rounded-lg text-[13.5px] font-semibold hover:bg-zinc-800 dark:hover:bg-zinc-200 active:scale-[0.98] transition-all flex items-center justify-center gap-2 disabled:opacity-50"
             >
               {loading
                 ? <Loader2 size={16} className="animate-spin" />
@@ -415,7 +416,7 @@ export default function Auth() {
           </div>
 
           {/* Switch mode */}
-          <p className="text-center text-[12.5px] text-zinc-500 dark:text-app-fg-subtle mt-3">
+          <p className="text-center text-[12.5px] text-zinc-500 dark:text-app-fg-subtle mt-4">
             {isSignUp ? (
               <>Already have an account?{' '}
                 <button onClick={switchMode} className="font-semibold text-blue-600 dark:text-blue-400 hover:underline">Sign In</button>

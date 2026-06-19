@@ -1,4 +1,4 @@
-@import url('https://fonts.googleapis.com/css2?family=EB+Garamond:ital,wght@0,400;0,500;0,600;1,600&family=Inter:wght@400;500;600;700&family=JetBrains+Mono:wght@400;500&display=swap');
+@import url('https://fonts.googleapis.com/css2?family=EB+Garamond:ital,wght@0,400;0,500;0,600;1,400;1,500;1,600&family=Inter:wght@400;500;600;700&family=JetBrains+Mono:wght@400;500&display=swap');
 @import "tailwindcss";
 
 @custom-variant dark (&:where(.dark, .dark *));
@@ -20,7 +20,7 @@
   --radius: 0.5rem;
 
   /* ── Neutral design system — content area (light mode) ─────────── */
-  --color-app-canvas: #FAFAFA;       /* pure light gray canvas */
+  --color-app-canvas: #FAF9F5;       /* pure light gray canvas */
   --color-app-panel: #FAFAFA;        /* main content surface */
   --color-app-raised: #F2F2F2;       /* soft surface */
   --color-app-chip: #E8E8E8;         /* card surface */
@@ -83,8 +83,8 @@
 @layer theme {
   .dark {
     /* Design system dark surfaces — surface-dark / surface-dark-soft / surface-dark-elevated */
-    --color-app-canvas: #1a1a1a;       /* surface-dark */
-    --color-app-panel: #212121;        /* surface-dark-soft */
+    --color-app-canvas: #141414;       /* surface-dark — deep background */
+    --color-app-panel: #232323;        /* surface-dark-soft — elevated sheet */
     --color-app-raised: #262626;       /* surface-dark-elevated */
     --color-app-chip: #2e2e2e;
 
@@ -126,6 +126,15 @@
     --color-kg-accent-border: rgba(163, 196, 41, 0.35);
     --color-kg-glow: #b5d43d;
   }
+}
+
+/* Canvas and sidebar grain — background-image layer; child elements with their
+   own background-color cover this completely, so content is unaffected. */
+#app-shell,
+.sidebar-grain {
+  background-image: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='150' height='150'%3E%3Cfilter id='n'%3E%3CfeTurbulence type='fractalNoise' baseFrequency='0.65' numOctaves='6' stitchTiles='stitch'/%3E%3CfeColorMatrix type='saturate' values='0'/%3E%3C/filter%3E%3Crect width='150' height='150' filter='url(%23n)' opacity='0.12'/%3E%3C/svg%3E");
+  background-repeat: repeat;
+  background-size: 150px 150px;
 }
 
 @layer base {

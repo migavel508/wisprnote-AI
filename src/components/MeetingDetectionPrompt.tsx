@@ -1,4 +1,5 @@
 import { useEffect, useRef, useState } from 'react';
+import { WisprnoteLogo } from './WisprnoteLogo';
 import { motion, AnimatePresence, useAnimationControls } from 'motion/react';
 import { ChevronDown, X } from 'lucide-react';
 import {
@@ -231,7 +232,7 @@ export default function MeetingDetectionPrompt() {
                     onClick={handleTakeNotes}
                     className="flex items-center gap-2 pl-2 pr-2.5 py-1.5 hover:bg-zinc-50 transition-colors active:scale-[0.98]"
                   >
-                    <img src="/logo.png" alt="" className="w-[22px] h-[22px] rounded-[6px] object-cover flex-shrink-0" />
+                    <WisprnoteLogo className="w-[22px] h-[22px] flex-shrink-0" />
                     <span className="text-[13px] font-medium text-zinc-900 whitespace-nowrap tracking-[-0.01em]">Take Notes</span>
                   </button>
                   <button

@@ -1,4 +1,5 @@
 import { useEffect, useRef, useState } from 'react';
+import { WisprnoteLogo } from './WisprnoteLogo';
 import {
   listenForRecordingIndicatorState,
   emitStopRecording,
@@ -137,7 +138,7 @@ export default function RecordingIndicator() {
           title="Open Wisprnote"
           className="w-7 h-7 rounded-full flex items-center justify-center hover:bg-white/[0.08] transition-colors"
         >
-          <img src="/logo.png" alt="" className="w-[18px] h-[18px] rounded-md object-cover" draggable={false} />
+          <WisprnoteLogo className="w-[18px] h-[18px]" />
         </button>
 
         {/* bottom: animated waveform → stop square on hover. The canvas stays

@@ -36,9 +36,8 @@ import {
   StopCircle,
   PauseCircle,
   PlayCircle,
-  AudioLines,
+  House,
   PenLine,
-  PanelLeft,
 } from 'lucide-react';
 import { motion, AnimatePresence } from 'motion/react';
 import Markdown from 'react-markdown';
@@ -285,8 +284,8 @@ function MobileBottomNav({ currentView, onViewChange, status }: {
   onViewChange: (view: MobileView) => void;
   status: string;
 }) {
-  const tabs: { id: MobileView; label: string; icon: typeof AudioLines }[] = [
-    { id: 'process', label: 'Record', icon: AudioLines },
+  const tabs: { id: MobileView; label: string; icon: typeof House }[] = [
+    { id: 'process', label: 'Home', icon: House },
     { id: 'notes', label: 'Notes', icon: PenLine },
     { id: 'chat', label: 'Chat', icon: MessageSquare },
     { id: 'history', label: 'History', icon: Clock },
@@ -4601,7 +4600,7 @@ export default function App() {
   }
 
   return (
-    <div className="h-full w-full bg-app-canvas text-app-fg selection:bg-app-fg selection:text-app-panel flex flex-col overflow-hidden">
+    <div id="app-shell" className="h-full w-full bg-app-canvas text-app-fg selection:bg-app-fg selection:text-app-panel flex flex-col overflow-hidden relative">
       {/* Free-tier meeting limit → upgrade prompt (portal) */}
       <FreeLimitModal
         open={showLimitModal}
@@ -4725,21 +4724,9 @@ export default function App() {
           sits next to the traffic lights (reference layout). */}
       <div
         data-tauri-drag-region
-        className="relative z-[80] flex flex-shrink-0 h-[38px] items-center bg-app-canvas"
+        className={`absolute ${isSidebarOpen && !isCompactMode ? 'left-[200px]' : 'left-[52px]'} right-0 top-0 z-[80] flex h-[38px] items-center bg-transparent`}
         style={{ WebkitUserSelect: 'none', userSelect: 'none' }}
       >
-        {/* Reserve space for the traffic lights, then the sidebar toggle. In
-            fullscreen the lights are hidden, so collapse the gap and let the
-            toggle sit at the top-left corner. */}
-        <div className={`flex-shrink-0 ${isFullscreen ? 'w-2' : 'w-[78px]'}`} />
-        <button
-          onClick={() => setIsSidebarOpen(!isSidebarOpen)}
-          data-tauri-drag-region="false"
-          className="w-8 h-8 flex items-center justify-center text-app-fg-subtle hover:text-app-fg hover:bg-app-nav-active-bg rounded-lg transition-all duration-200"
-          title="Toggle sidebar"
-        >
-          <PanelLeft size={19} strokeWidth={1.6} />
-        </button>
       </div>
 
       {/* Full-window Settings — renders as a top-level overlay (its own nav +
@@ -4801,10 +4788,8 @@ export default function App() {
           region, padding, rounded panel + border) instead of the bare mobile
           fallback — the inner layout looks identical to the wide window. */}
       <div className="flex-1 flex flex-col overflow-hidden relative min-h-0">
-        {/* The shared global top bar already provides the drag region + top
-            spacing, so the content starts right beneath it (no extra top gap). */}
-        <div className={`flex-1 flex overflow-hidden ${isCompactMode ? 'pr-2.5 pl-1.5 pb-2.5 pt-2.5' : 'p-0 md:pr-2.5 md:pl-1.5 md:pb-2.5 md:pt-2.5'}`}>
-        <main className={`flex-1 bg-app-panel w-full relative overflow-y-auto shadow-sm text-app-fg ${isCompactMode ? 'rounded-3xl border border-app-border' : 'rounded-none md:rounded-3xl md:border md:border-app-border'}`}>
+        <div className="flex-1 flex overflow-hidden pr-2.5 pl-1.5 pb-2.5 pt-2.5">
+        <main className={`flex-1 bg-app-panel w-full relative overflow-y-auto shadow-sm text-app-fg ${isCompactMode ? 'rounded-3xl border border-app-border' : 'rounded-3xl border border-app-border'}`}>
           <AnimatePresence mode="wait">
             {currentView === 'process' && (
               <motion.div 

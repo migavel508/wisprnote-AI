@@ -3,8 +3,7 @@ import {
   MessageSquareText,
   Network,
   Clock,
-  PanelLeft,
-  AudioLines,
+  House,
   LogOut,
   Headphones,
   Users,
@@ -12,7 +11,6 @@ import {
   Moon,
   Monitor,
   Plus,
-  ChevronRight,
   Lock,
   Folder as FolderIcon,
   Pencil,
@@ -35,6 +33,7 @@ import { setWorkspaceSelection, useWorkspaceSelection } from '../services/worksp
 import CreateFolderModal, { type FolderDraft } from './CreateFolderModal';
 import WorkspaceCreationWizard from './WorkspaceCreationWizard';
 import WorkspaceSwitcher from './WorkspaceSwitcher';
+import { WisprnoteLogo } from './WisprnoteLogo';
 
 type View = 'process' | 'history' | 'notes' | 'chat' | 'knowledge' | 'notebooks' | 'audio-devices' | 'workspace' | 'people' | 'settings';
 
@@ -456,7 +455,7 @@ export default function MainSidebar({
   };
 
   const navItems = [
-    { id: 'process' as View, label: 'Record', icon: AudioLines },
+    { id: 'process' as View, label: 'Home', icon: House },
     { id: 'history' as View, label: 'Meetings', icon: Clock },
     { id: 'chat' as View, label: 'Chat', icon: MessageSquareText },
     { id: 'knowledge' as View, label: 'Knowledge', icon: Network },
@@ -471,10 +470,21 @@ export default function MainSidebar({
   // user can ALWAYS toggle between the 52px rail and the full sidebar.
   if (!isOpen) {
     return (
-      <div className="h-full w-[52px] bg-app-canvas flex flex-col items-center flex-shrink-0 font-sans">
-        {/* The shared global top bar holds the traffic lights + toggle, so the
-            rail just needs a small top gap before the nav icons. */}
-        <div className="pt-2 pb-1.5" />
+      <div className="sidebar-grain h-full w-[52px] bg-app-canvas flex flex-col items-center flex-shrink-0 font-sans">
+        <div className="h-[10px]" />
+
+        {/* Standalone sidebar toggle */}
+        <button
+          onClick={onToggle}
+          title="Open sidebar"
+          style={{ pointerEvents: 'all', cursor: 'pointer' }}
+          className="w-9 h-9 flex items-center justify-center rounded-lg text-app-fg-subtle hover:bg-app-nav-hover-bg hover:text-app-nav-fg-hover transition-colors flex-shrink-0 mb-1"
+        >
+          <svg xmlns="http://www.w3.org/2000/svg" width="19" height="19" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.8" strokeLinecap="round" strokeLinejoin="round" style={{ pointerEvents: 'none' }}>
+              <rect x="3" y="4.5" width="18" height="15" rx="4.5"/>
+              <rect x="5.6" y="7" width="3.1" height="10" rx="1.5" fill="currentColor" stroke="none"/>
+            </svg>
+        </button>
 
         <nav className="flex flex-col items-center gap-0.5 px-1.5">
           {navItems.map(({ id, label, icon: Icon }) => {
@@ -538,44 +548,54 @@ export default function MainSidebar({
         <div className="fixed inset-0 z-[60]" onClick={onToggle} />
       )}
 
-      <div className={`bg-app-canvas flex flex-col flex-shrink-0 font-sans ${
+      <div className={`sidebar-grain bg-app-canvas flex flex-col flex-shrink-0 font-sans ${
         isCompactMode
           ? 'fixed left-2 top-[34px] bottom-2 w-[260px] z-[70] rounded-2xl border border-app-border shadow-2xl'
           : 'fixed md:relative h-full w-[200px] z-[70]'
       }`}>
-        {/* Small top gap — the shared global top bar already clears the traffic
-            lights, so no tall drag strip is needed here. */}
-        <div className="w-full flex-shrink-0 h-2" />
+        {/* 10px spacer matches the closed-state rail exactly — App.tsx widens the
+            drag-region exclusion zone to left-[200px] when the sidebar is open, so
+            the right-aligned toggle at x≈154px is outside the drag region at any y. */}
+        <div className="w-full flex-shrink-0 h-[10px]" />
 
-        {/* Brand header — toggle lives in the shared global top bar. */}
-        <div className="flex items-center gap-2 px-4 pt-0.5 pb-4">
-          <div className="flex items-center gap-1.5 ml-0.5">
-            <img src="/logo.png" alt="Logo" className="w-5 h-5 rounded-full object-cover" />
-            <span className="text-[15px] font-serif font-semibold text-app-fg tracking-[-0.01em]">
-              Wisprnote
-            </span>
-            <span className="text-[9px] font-mono font-medium bg-amber-100 dark:bg-amber-500/15 text-amber-700 dark:text-amber-300 px-1.5 py-0.5 rounded-md uppercase tracking-wider">
-              Pro
-            </span>
+        {/* Header row: logo + name on left, close toggle on right */}
+        <div className="flex items-center px-2 flex-shrink-0 mb-1">
+          <div className="flex items-center gap-2 flex-1 min-w-0 pl-1">
+            <WisprnoteLogo className="w-[26px] h-[26px] flex-shrink-0" />
+            <span style={{ fontFamily: "'EB Garamond', Georgia, serif" }} className="text-[17px] font-semibold text-app-fg tracking-[-0.01em] truncate">Wisprnote</span>
           </div>
+          <button
+            onClick={onToggle}
+            title="Close sidebar"
+            style={{ pointerEvents: 'all', cursor: 'pointer' }}
+            className="w-9 h-9 flex items-center justify-center rounded-lg text-app-fg-subtle hover:bg-app-nav-hover-bg hover:text-app-nav-fg-hover transition-colors flex-shrink-0"
+          >
+            <svg xmlns="http://www.w3.org/2000/svg" width="19" height="19" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.8" strokeLinecap="round" strokeLinejoin="round" style={{ pointerEvents: 'none' }}>
+                <rect x="3" y="4.5" width="18" height="15" rx="4.5"/>
+                <path d="M8.6 4.5V19.5"/>
+              </svg>
+          </button>
         </div>
 
-        {/* Main nav */}
-        <nav className="px-2.5 space-y-px flex-shrink-0">
+        {/* Main nav — identical icon container (w-9 h-9, size=17, gap-0.5) to the
+            closed rail so nothing changes except the text label appearing beside it. */}
+        <nav className="px-2 flex flex-col gap-0.5 flex-shrink-0">
           {navItems.map(({ id, label, icon: Icon }) => {
             const isActive = currentView === id;
             return (
               <button
                 key={id}
                 onClick={() => onViewChange(id)}
-                className={`w-full flex items-center gap-2.5 px-2.5 py-[7px] text-[13px] rounded-lg transition-all duration-200 ${
+                className={`w-full flex items-center rounded-lg transition-all duration-200 ${
                   isActive ? 'bg-app-nav-active-bg text-app-nav-active-fg font-medium' : 'text-app-nav-fg hover:bg-app-nav-hover-bg hover:text-app-nav-fg-hover'
                 }`}
               >
-                <Icon size={15} strokeWidth={isActive ? 1.8 : 1.5} className="flex-shrink-0" />
-                <span className="tracking-[-0.01em]">{label}</span>
+                <div className="w-9 h-9 flex items-center justify-center flex-shrink-0">
+                  <Icon size={17} strokeWidth={isActive ? 1.8 : 1.5} />
+                </div>
+                <span className="text-[13px] tracking-[-0.01em]">{label}</span>
                 {id === 'history' && pendingSyncCount > 0 && (
-                  <span className="ml-auto inline-flex items-center rounded-full bg-amber-100 text-amber-800 dark:bg-amber-500/20 dark:text-amber-200 text-[9px] font-mono font-medium px-1.5 py-[1px]">
+                  <span className="ml-auto mr-2 inline-flex items-center rounded-full bg-amber-100 text-amber-800 dark:bg-amber-500/20 dark:text-amber-200 text-[9px] font-mono font-medium px-1.5 py-[1px]">
                     {pendingSyncCount > 99 ? '99+' : pendingSyncCount}
                   </span>
                 )}
@@ -612,6 +632,15 @@ export default function MainSidebar({
 
         {/* Bottom section — pinned footer (appearance + account) */}
         <div className="px-2.5 pb-3 pt-2 space-y-1 flex-shrink-0">
+          {/* Upgrade prompt */}
+          <button
+            onClick={() => onViewChange('settings')}
+            className="w-full flex items-center gap-2 px-2.5 py-2 rounded-lg border border-amber-200/70 dark:border-amber-500/25 bg-amber-50/60 dark:bg-amber-500/[0.08] hover:bg-amber-100/80 dark:hover:bg-amber-500/15 transition-colors"
+          >
+            <Star size={12} strokeWidth={1.8} className="text-amber-500 dark:text-amber-400 flex-shrink-0" />
+            <span className="text-[11.5px] font-medium text-amber-700 dark:text-amber-400 tracking-[-0.01em]">Upgrade to Pro</span>
+          </button>
+
           <ThemeAppearancePicker />
 
           <div className="h-px bg-app-divider w-full my-1" />
