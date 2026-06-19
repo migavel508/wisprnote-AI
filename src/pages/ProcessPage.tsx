@@ -28,6 +28,8 @@ interface ProcessPageProps {
   stopRecording: () => void;
   pauseRecording: () => void;
   resumeRecording: () => void;
+  /** True while a pause/resume/stop op is in flight — disables pause/resume to block mashing. */
+  isControlBusy?: boolean;
   prompt: string;
   setPrompt: (prompt: string) => void;
   startProcessing: () => void;
@@ -81,6 +83,7 @@ export default function ProcessPage({
   stopRecording,
   pauseRecording,
   resumeRecording,
+  isControlBusy = false,
   prompt,
   setPrompt,
   startProcessing,
@@ -438,24 +441,24 @@ export default function ProcessPage({
               <div className="flex items-center justify-between px-5 py-2.5">
                 <div className="flex gap-0.5 bg-[#1a1a1a]/[0.04] dark:bg-app-panel rounded-lg p-0.5 ring-1 ring-transparent dark:ring-white/[0.06]">
                   <button
-                    onClick={() => setInputMode('upload')}
-                    className={`flex items-center gap-1.5 px-3 py-[6px] text-[12px] font-medium rounded-md transition-all ${
-                      inputMode === 'upload' 
-                        ? 'bg-white dark:bg-app-chip shadow-sm shadow-black/[0.04] dark:shadow-black/40 text-zinc-900 dark:text-app-fg' 
-                        : 'text-zinc-500 dark:text-app-fg-subtle hover:text-zinc-800 dark:hover:text-app-fg-muted'
-                    }`}
-                  >
-                    <Upload className="w-3.5 h-3.5" /> Upload
-                  </button>
-                  <button
                     onClick={() => setInputMode('record')}
                     className={`flex items-center gap-1.5 px-3 py-[6px] text-[12px] font-medium rounded-md transition-all ${
-                      inputMode === 'record' 
-                        ? 'bg-white dark:bg-app-chip shadow-sm shadow-black/[0.04] dark:shadow-black/40 text-zinc-900 dark:text-app-fg' 
+                      inputMode === 'record'
+                        ? 'bg-white dark:bg-app-chip shadow-sm shadow-black/[0.04] dark:shadow-black/40 text-zinc-900 dark:text-app-fg'
                         : 'text-zinc-500 dark:text-app-fg-subtle hover:text-zinc-800 dark:hover:text-app-fg-muted'
                     }`}
                   >
                     <Mic className="w-3.5 h-3.5" /> Record
+                  </button>
+                  <button
+                    onClick={() => setInputMode('upload')}
+                    className={`flex items-center gap-1.5 px-3 py-[6px] text-[12px] font-medium rounded-md transition-all ${
+                      inputMode === 'upload'
+                        ? 'bg-white dark:bg-app-chip shadow-sm shadow-black/[0.04] dark:shadow-black/40 text-zinc-900 dark:text-app-fg'
+                        : 'text-zinc-500 dark:text-app-fg-subtle hover:text-zinc-800 dark:hover:text-app-fg-muted'
+                    }`}
+                  >
+                    <Upload className="w-3.5 h-3.5" /> Upload
                   </button>
                 </div>
                 <button 
@@ -548,7 +551,8 @@ export default function ProcessPage({
                             {isPaused ? (
                               <button
                                 onClick={resumeRecording}
-                                className="w-8 h-8 bg-[#1a1a1a] text-white rounded-full flex items-center justify-center hover:bg-[#333] transition-colors"
+                                disabled={isControlBusy}
+                                className="w-8 h-8 bg-[#1a1a1a] text-white rounded-full flex items-center justify-center hover:bg-[#333] transition-colors disabled:opacity-40 disabled:cursor-not-allowed"
                                 title="Resume recording"
                               >
                                 <PlayCircle className="w-4 h-4" />
@@ -556,7 +560,8 @@ export default function ProcessPage({
                             ) : (
                               <button
                                 onClick={pauseRecording}
-                                className="w-8 h-8 bg-[#1a1a1a]/[0.06] text-zinc-600 dark:text-zinc-400 rounded-full flex items-center justify-center hover:bg-[#1a1a1a]/10 transition-colors"
+                                disabled={isControlBusy}
+                                className="w-8 h-8 bg-[#1a1a1a]/[0.06] text-zinc-600 dark:text-zinc-400 rounded-full flex items-center justify-center hover:bg-[#1a1a1a]/10 transition-colors disabled:opacity-40 disabled:cursor-not-allowed"
                                 title="Pause recording"
                               >
                                 <PauseCircle className="w-4 h-4" />
@@ -606,11 +611,11 @@ export default function ProcessPage({
 
                         <div className="flex items-center gap-3">
                           {isPaused ? (
-                            <button onClick={resumeRecording} className="w-10 h-10 bg-[#1a1a1a] text-white rounded-full flex items-center justify-center hover:bg-[#333] transition-colors">
+                            <button onClick={resumeRecording} disabled={isControlBusy} className="w-10 h-10 bg-[#1a1a1a] text-white rounded-full flex items-center justify-center hover:bg-[#333] transition-colors disabled:opacity-40 disabled:cursor-not-allowed">
                               <PlayCircle className="w-5 h-5" />
                             </button>
                           ) : (
-                            <button onClick={pauseRecording} className="w-10 h-10 bg-[#1a1a1a]/[0.06] text-zinc-600 dark:text-zinc-400 rounded-full flex items-center justify-center hover:bg-[#1a1a1a]/10 transition-colors">
+                            <button onClick={pauseRecording} disabled={isControlBusy} className="w-10 h-10 bg-[#1a1a1a]/[0.06] text-zinc-600 dark:text-zinc-400 rounded-full flex items-center justify-center hover:bg-[#1a1a1a]/10 transition-colors disabled:opacity-40 disabled:cursor-not-allowed">
                               <PauseCircle className="w-5 h-5" />
                             </button>
                           )}
