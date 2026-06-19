@@ -139,9 +139,9 @@ export async function runBrainLink(opts?: BrainLinkOpts): Promise<BrainLinkResul
     result.workspaces++;
 
     // Index this workspace's items by (source, source_id) → id, for reference matching.
-    type Item = { id: string; source: string; source_id: string; type: string | null; title: string | null; body: string | null; enriched_summary: string | null; fingerprint: string | null };
+    type Item = { id: string; source: string; source_id: string; type: string | null; title: string | null; body: string | null; enriched_summary: string | null; fingerprint: string | null; folder_id: string | null };
     const items: Item[] = await query<any>(
-      `SELECT id, source, source_id, type, title, body, enriched_summary, fingerprint FROM knowledge_item WHERE user_id=$1 AND workspace_id=$2`,
+      `SELECT id, source, source_id, type, title, body, enriched_summary, fingerprint, folder_id FROM knowledge_item WHERE user_id=$1 AND workspace_id=$2`,
       [userId, workspaceId],
     ).catch(() => []);
     const byKey = new Map(items.map((i) => [`${i.source}:${i.source_id}`, String(i.id)]));
@@ -223,7 +223,6 @@ export async function runBrainLink(opts?: BrainLinkOpts): Promise<BrainLinkResul
     // (once linked they drop out, so meetings then get the full budget on later ticks).
     const fresh = [...freshTasks, ...freshMeetings, ...freshOther];
     if (fresh.length) {
-      const srcById = new Map<string, string>(items.map((i) => [String(i.id), i.source]));
       // Embed only the items that take the SEMANTIC branch (meetings + Jira tasks use the
       // intent/verdict pipeline, so they don't need a precomputed self-vector here).
       const nonMeeting = fresh.filter((f) => f.source !== 'meeting' && f.source !== 'jira');
@@ -248,13 +247,28 @@ export async function runBrainLink(opts?: BrainLinkOpts): Promise<BrainLinkResul
           if (llmUsed >= llmBudget) continue;   // budget hit (or 0 = fast path) → leave unmarked for a later tick
           llmUsed++;
           const isTask = self.source === 'jira';
-          // Restrict the ANN search to the right candidate pool — task→code, meeting→any work
-          // item — so tightly-clustered meetings can't crowd out the cross-source candidates.
+          // FOLDER SCOPING — but asymmetric, because a meeting and a task have different shapes:
+          //  • A JIRA TASK is single-project: its implementing commits MUST be in its own folder
+          //    → hard folder gate (prevents task→wrong-repo links).
+          //  • A MEETING can span projects (or be left unfiled): its CONTENT decides which
+          //    projects it relates to. So we do NOT gate a meeting to one folder — candidates
+          //    come from all projects and each resulting link is attributed to the CANDIDATE's
+          //    project. Cross-project + unfiled meetings therefore link to every project they
+          //    actually discuss; the similarity floor + strict verdict keep out projects they don't.
+          const intentFolder = itemById.get(String(self.id))?.folder_id ?? null;
           const candSources = isTask ? ['github'] : ['jira', 'github'];
+          const candK = isTask ? CAND_K : 10;   // meetings may legitimately touch several projects
           const mv = await embedTexts([[self.title, (self.body || '').slice(0, 1500)].filter(Boolean).join('\n')]).catch(() => null);
-          const hits = mv?.[0] ? await queryNearestItems(userId, workspaceId, mv[0], CAND_K, candSources).catch(() => null) : null;
+          const hits = mv?.[0] ? await queryNearestItems(userId, workspaceId, mv[0], candK * 4, candSources).catch(() => null) : null;
           const candIds = (hits || [])
-            .filter((h) => h.id !== String(self.id) && h.similarity >= CAND_MIN_SIM)
+            .filter((h) => {
+              if (h.id === String(self.id) || h.similarity < CAND_MIN_SIM) return false;
+              const it = itemById.get(h.id);
+              if (!it) return false;
+              if (isTask && (it.folder_id ?? null) !== intentFolder) return false;   // task → own project only
+              return true;   // meeting → any project its content relates to
+            })
+            .slice(0, candK)
             .map((h) => h.id);
           const cands: Array<{ id: string; source: string; text: string }> = [];
           for (const cid of candIds) {
@@ -279,13 +293,19 @@ export async function runBrainLink(opts?: BrainLinkOpts): Promise<BrainLinkResul
             }
           }
         } else {
+          // Semantic links also stay within the same project (folder).
+          const selfFolder = itemById.get(String(self.id))?.folder_id ?? null;
           const vec = vecById.get(String(self.id));
-          const hits = vec ? await queryNearestItems(userId, workspaceId, vec, SEM_K).catch(() => null) : null;
+          const hits = vec ? await queryNearestItems(userId, workspaceId, vec, SEM_K * 3).catch(() => null) : null;
+          let made = 0;
           for (const h of hits || []) {
+            if (made >= SEM_K) break;
             if (h.id === String(self.id) || h.similarity < SEM_MIN_SIM) continue;
-            const crossSource = (srcById.get(h.id) || h.source) !== self.source;
+            const hit = itemById.get(h.id);
+            if (!hit || (hit.folder_id ?? null) !== selfFolder) continue;   // same project only
+            const crossSource = hit.source !== self.source;
             if (!crossSource && h.similarity < 0.82) continue;
-            if (await insertEdge({ userId, workspaceId, srcKind: 'item', srcId: String(self.id), dstKind: 'item', dstId: h.id, relation: 'related', origin: 'semantic', confidence: h.similarity })) result.semantic++;
+            if (await insertEdge({ userId, workspaceId, srcKind: 'item', srcId: String(self.id), dstKind: 'item', dstId: h.id, relation: 'related', origin: 'semantic', confidence: h.similarity })) { result.semantic++; made++; }
           }
         }
         await query(`INSERT INTO brain_link_state (user_id, workspace_id, item_id) VALUES ($1,$2,$3) ON CONFLICT (user_id, workspace_id, item_id) DO UPDATE SET linked_at=NOW()`, [userId, workspaceId, self.id]).catch(() => {});

@@ -37,10 +37,11 @@ export async function syncBrain(workspaceId: string): Promise<{ syncedAt: string
 
 export interface BrainAlert { type: string; severity: string; title: string; detail?: string; intent?: string; url?: string | null }
 
-export async function getBrainAlerts(workspaceId: string): Promise<BrainAlert[]> {
+export async function getBrainAlerts(workspaceId: string, folderId?: string | null): Promise<BrainAlert[]> {
   try {
     const token = await getIdToken();
-    const r = await baseFetch(`${API_BASE}/brain/alerts?workspace=${encodeURIComponent(workspaceId)}`, {
+    const fq = folderId ? `&folder=${encodeURIComponent(folderId)}` : '';
+    const r = await baseFetch(`${API_BASE}/brain/alerts?workspace=${encodeURIComponent(workspaceId)}${fq}`, {
       headers: { 'Content-Type': 'application/json', Authorization: token },
     });
     if (!r.ok) return [];
@@ -49,10 +50,11 @@ export async function getBrainAlerts(workspaceId: string): Promise<BrainAlert[]>
   } catch { return []; }
 }
 
-export async function getBrainPulse(workspaceId: string): Promise<BrainEvent[]> {
+export async function getBrainPulse(workspaceId: string, folderId?: string | null): Promise<BrainEvent[]> {
   try {
     const token = await getIdToken();
-    const r = await baseFetch(`${API_BASE}/brain/pulse?workspace=${encodeURIComponent(workspaceId)}`, {
+    const fq = folderId ? `&folder=${encodeURIComponent(folderId)}` : '';
+    const r = await baseFetch(`${API_BASE}/brain/pulse?workspace=${encodeURIComponent(workspaceId)}${fq}`, {
       headers: { 'Content-Type': 'application/json', Authorization: token },
     });
     if (!r.ok) return [];
@@ -76,10 +78,12 @@ export async function getBrainNode(workspaceId: string, id: string): Promise<Bra
   }
 }
 
-export async function getBrainGraph(workspaceId: string): Promise<{ nodes: BrainNode[]; links: BrainLink[] }> {
+/** `folderId` scopes to one project; omit for the whole-workspace aggregate. */
+export async function getBrainGraph(workspaceId: string, folderId?: string | null): Promise<{ nodes: BrainNode[]; links: BrainLink[] }> {
   try {
     const token = await getIdToken();
-    const r = await baseFetch(`${API_BASE}/brain/graph?workspace=${encodeURIComponent(workspaceId)}`, {
+    const fq = folderId ? `&folder=${encodeURIComponent(folderId)}` : '';
+    const r = await baseFetch(`${API_BASE}/brain/graph?workspace=${encodeURIComponent(workspaceId)}${fq}`, {
       headers: { 'Content-Type': 'application/json', Authorization: token },
     });
     if (!r.ok) return { nodes: [], links: [] };

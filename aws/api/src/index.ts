@@ -688,26 +688,31 @@ async function handleConnectors(method: string, segments: string[], userId: stri
     return ok(result);
   }
 
-  // GET /connectors/routing?workspace= → the workspace's project mapping (Jira project + GitHub repos).
+  // GET /connectors/routing?workspace=[&folder=] → the (folder→workspace-fallback) project mapping.
   if (method === 'GET' && id === 'routing') {
-    return ok(await getMapping(userId, qsWorkspace));
+    return ok(await getMapping(userId, qsWorkspace, event.queryStringParameters?.folder || null));
   }
-  // POST /connectors/routing?workspace= { source, projectKey?, repos? } → set the mapping.
-  // For GitHub, also PRUNE off-project items so the workspace's brain holds just this project.
+  // POST /connectors/routing?workspace=[&folder=] { source, projectKey?, repos? } → set the mapping
+  // for a FOLDER (project) or the workspace default, then backfill so existing items tag to it.
   if (method === 'POST' && id === 'routing') {
     const b = parseBody(event);
-    if (b.source === 'jira' && b.projectKey) await rememberRoute(userId, qsWorkspace, String(b.projectKey), 'jira', true);
+    const folder = event.queryStringParameters?.folder || null;
+    if (b.source === 'jira' && b.projectKey) await rememberRoute(userId, qsWorkspace, String(b.projectKey), 'jira', true, folder);
     if (b.source === 'github') {
       const repos = Array.isArray(b.repos) ? b.repos.map((r: any) => String(r).trim()).filter(Boolean) : [];
-      await setGithubRepos(userId, qsWorkspace, repos);
-      if (repos.length) {
+      await setGithubRepos(userId, qsWorkspace, repos, folder);
+      // Legacy workspace-wide prune ONLY for the non-folder default mapping (folder mappings are
+      // additive — each project keeps its own repos; pruning would delete other projects' items).
+      if (!folder && repos.length) {
         await query(
           `DELETE FROM knowledge_item WHERE user_id=$1 AND workspace_id=$2 AND source='github' AND split_part(source_id,'#',1) <> ALL($3)`,
           [userId, qsWorkspace, repos],
         ).catch(() => {});
       }
     }
-    return ok({ ok: true, mapping: await getMapping(userId, qsWorkspace) });
+    // Re-tag existing items into their projects now that the mapping changed (idempotent).
+    try { const { backfillItemFolders } = await import('./connectors/sync'); await backfillItemFolders(); } catch { /* best-effort */ }
+    return ok({ ok: true, mapping: await getMapping(userId, qsWorkspace, folder) });
   }
 
   // POST /connectors/{id}/pat?workspace= { token } → connect via a Personal Access Token
@@ -808,28 +813,34 @@ async function handleBrain(method: string, segments: string[], userId: string, e
   if (method === 'GET' && segments[1] === 'alerts') {
     const ws = event.queryStringParameters?.workspace;
     if (!ws) return badRequest('workspace required');
+    // Optional folder (project) scope: present → just that project; absent → whole workspace.
+    // `$3::uuid IS NULL OR col=$3` makes one query serve both (null = aggregate).
+    const folder = event.queryStringParameters?.folder || null;
     const alerts: any[] = [];
     // 1) Divergent work — a commit/PR went a different direction than the meeting/task intended.
     const diverged = await query<any>(
       `SELECT di.title impl, di.links->>'url' url, e.rationale, si.title intent
          FROM brain_edge e JOIN knowledge_item si ON si.id::text=e.src_id JOIN knowledge_item di ON di.id::text=e.dst_id
-        WHERE e.user_id=$1 AND e.workspace_id=$2 AND e.verdict='divergent' ORDER BY e.created_at DESC LIMIT 15`,
-      [userId, ws],
+        WHERE e.user_id=$1 AND e.workspace_id=$2 AND e.verdict='divergent'
+          AND ($3::uuid IS NULL OR di.folder_id=$3) ORDER BY e.created_at DESC LIMIT 15`,
+      [userId, ws, folder],
     ).catch(() => []);
     for (const d of diverged) alerts.push({ type: 'divergent', severity: 'high', title: d.impl, detail: d.rationale || `Diverges from "${d.intent}"`, intent: d.intent, url: d.url ?? null });
     // 2) Risky commits — the co-architect flagged an architectural risk.
     const risky = await query<any>(
       `SELECT title, advisory_assessment, advisory_note, links->>'url' url FROM knowledge_item
-        WHERE user_id=$1 AND workspace_id=$2 AND advisory_assessment IN ('risk','concern') ORDER BY (advisory_assessment='risk') DESC, synced_at DESC LIMIT 20`,
-      [userId, ws],
+        WHERE user_id=$1 AND workspace_id=$2 AND advisory_assessment IN ('risk','concern')
+          AND ($3::uuid IS NULL OR folder_id=$3) ORDER BY (advisory_assessment='risk') DESC, synced_at DESC LIMIT 20`,
+      [userId, ws, folder],
     ).catch(() => []);
     for (const r of risky) alerts.push({ type: r.advisory_assessment === 'risk' ? 'risk' : 'concern', severity: r.advisory_assessment === 'risk' ? 'high' : 'low', title: r.title, detail: r.advisory_note || 'Architectural attention suggested', url: r.url ?? null });
     // 3) Stalled work — a task in progress with no update for over a week.
     const stalled = await query<any>(
       `SELECT title, status, occurred_at, links->>'url' url FROM knowledge_item
         WHERE user_id=$1 AND workspace_id=$2 AND source='jira' AND status ~* 'progress|review|doing'
-          AND occurred_at < NOW() - INTERVAL '7 days' ORDER BY occurred_at ASC LIMIT 15`,
-      [userId, ws],
+          AND occurred_at < NOW() - INTERVAL '7 days'
+          AND ($3::uuid IS NULL OR folder_id=$3) ORDER BY occurred_at ASC LIMIT 15`,
+      [userId, ws, folder],
     ).catch(() => []);
     for (const s of stalled) alerts.push({ type: 'stalled', severity: 'medium', title: s.title, detail: `Stuck in "${s.status}" since ${new Date(s.occurred_at).toISOString().slice(0, 10)}`, url: s.url ?? null });
     // 4) Untracked decisions — a meeting (>7d ago) that HAD action items / decisions but never
@@ -842,12 +853,13 @@ async function handleBrain(method: string, segments: string[], userId: string, e
          JOIN knowledge_graph kg ON kg.task_id::text = ki.source_id AND kg.user_id = ki.user_id
         WHERE ki.user_id=$1 AND ki.workspace_id=$2 AND ki.source='meeting'
           AND ki.occurred_at < NOW() - INTERVAL '7 days'
+          AND ($3::uuid IS NULL OR ki.folder_id=$3)
           AND (jsonb_array_length(COALESCE(kg.action_items, '[]'::jsonb)) > 0 OR jsonb_array_length(COALESCE(kg.decisions, '[]'::jsonb)) > 0)
           AND NOT EXISTS (
             SELECT 1 FROM brain_edge e JOIN knowledge_item ji ON ji.id::text = e.dst_id
              WHERE e.user_id=ki.user_id AND e.workspace_id=ki.workspace_id AND e.src_id = ki.id::text AND ji.source='jira')
         ORDER BY ki.occurred_at DESC LIMIT 15`,
-      [userId, ws],
+      [userId, ws, folder],
     ).catch(() => []);
     for (const u of untracked) alerts.push({ type: 'untracked', severity: 'medium', title: u.title, detail: `Had ${u.ai} action item(s) / ${u.dec} decision(s) but no Jira task exists — decided ${new Date(u.occurred_at).toISOString().slice(0, 10)}`, url: null });
     return ok({ enabled: true, alerts });
@@ -858,7 +870,7 @@ async function handleBrain(method: string, segments: string[], userId: string, e
     const ws = event.queryStringParameters?.workspace;
     if (!ws) return badRequest('workspace required');
     const { getEvents } = await import('./connectors/brainEvents');
-    const events = await getEvents(userId, ws, 40);
+    const events = await getEvents(userId, ws, 40, event.queryStringParameters?.folder || null);
     return ok({ enabled: true, events: events.map((e) => ({ kind: e.kind, source: e.source, sourceId: e.source_id, actor: e.actor, from: e.from_state, to: e.to_state, title: e.title, at: e.occurred_at })) });
   }
   // GET /brain/node?workspace=&id=item:123 → the full info card for one node: its content
@@ -925,16 +937,20 @@ async function handleBrain(method: string, segments: string[], userId: string, e
     });
   }
 
-  // GET /brain/graph?workspace= → nodes (items + meetings) + edges, for the brain map.
+  // GET /brain/graph?workspace=[&folder=] → nodes (items + meetings) + edges, for the brain map.
+  // folder set → just that project (scoped view); omitted → the whole workspace (aggregate).
   if (method === 'GET' && segments[1] === 'graph') {
     const ws = event.queryStringParameters?.workspace;
     if (!ws) return badRequest('workspace required');
+    const folder = event.queryStringParameters?.folder || null;
     const edges = await getBrainEdges(userId, ws, 1500);
     // Meetings are now knowledge_item rows (source='meeting'), so this single query covers
-    // every brain node — meetings, Jira, GitHub — and matches the brain_edge endpoints.
+    // every brain node — meetings, Jira, GitHub. Scoping NODES by folder is enough: the client
+    // drops any edge whose endpoints aren't both present, so only intra-project edges render.
     const items = await query<any>(
-      `SELECT id, source, type, title, source_id, links, status FROM knowledge_item WHERE user_id=$1 AND workspace_id=$2 LIMIT 2000`,
-      [userId, ws],
+      `SELECT id, source, type, title, source_id, links, status FROM knowledge_item
+        WHERE user_id=$1 AND workspace_id=$2 AND ($3::uuid IS NULL OR folder_id=$3) LIMIT 2000`,
+      [userId, ws, folder],
     ).catch(() => []);
     const nodes: any[] = items.map((i: any) => ({ id: `item:${i.id}`, kind: 'item', source: i.source, type: i.type, title: i.title || i.source_id, url: i.links?.url ?? null, status: i.status ?? null }));
     // Reasoning lives ON the edge (verdict + rationale colour & explain the line — no more

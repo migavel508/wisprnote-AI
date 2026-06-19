@@ -27,7 +27,7 @@ const VERDICT_HUE: Record<string, { light: string; dark: string }> = {
   unrelated: { light: '#c44d47', dark: '#e0635c' },
 };
 
-export default function BrainMapModal({ workspaceId, workspaceName, onClose }: { workspaceId: string; workspaceName: string; onClose: () => void }) {
+export default function BrainMapModal({ workspaceId, workspaceName, folderId = null, folderName, onClose }: { workspaceId: string; workspaceName: string; folderId?: string | null; folderName?: string; onClose: () => void }) {
   const [data, setData] = useState<{ nodes: BrainNode[]; links: BrainLink[] }>({ nodes: [], links: [] });
   const [loading, setLoading] = useState(true);
   const fgRef = useRef<any>(null);
@@ -56,7 +56,7 @@ export default function BrainMapModal({ workspaceId, workspaceName, onClose }: {
   };
 
   const reloadView = async (cancelledRef?: { v: boolean }) => {
-    const [g, p, a] = await Promise.all([getBrainGraph(workspaceId), getBrainPulse(workspaceId), getBrainAlerts(workspaceId)]);
+    const [g, p, a] = await Promise.all([getBrainGraph(workspaceId, folderId), getBrainPulse(workspaceId, folderId), getBrainAlerts(workspaceId, folderId)]);
     if (cancelledRef?.v) return;
     setData(g); setPulse(p); setAlerts(a);
   };
@@ -72,12 +72,12 @@ export default function BrainMapModal({ workspaceId, workspaceName, onClose }: {
   useEffect(() => {
     const ref = { v: false };
     // 1) paint the CURRENT brain instantly, 2) sync-on-open in the background, then refresh.
-    getBrainGraph(workspaceId).then((g) => { if (!ref.v) setData(g); }).finally(() => { if (!ref.v) setLoading(false); });
-    getBrainPulse(workspaceId).then((p) => { if (!ref.v) setPulse(p); });
-    getBrainAlerts(workspaceId).then((a) => { if (!ref.v) setAlerts(a); });
+    getBrainGraph(workspaceId, folderId).then((g) => { if (!ref.v) setData(g); }).finally(() => { if (!ref.v) setLoading(false); });
+    getBrainPulse(workspaceId, folderId).then((p) => { if (!ref.v) setPulse(p); });
+    getBrainAlerts(workspaceId, folderId).then((a) => { if (!ref.v) setAlerts(a); });
     doSync(ref);
     return () => { ref.v = true; };
-  }, [workspaceId]);
+  }, [workspaceId, folderId]);
 
   // Responsive canvas: fill the available area (the graph needs ROOM to breathe).
   useEffect(() => {
@@ -179,7 +179,8 @@ export default function BrainMapModal({ workspaceId, workspaceName, onClose }: {
         <div className="flex items-center justify-between px-6 py-4 border-b border-app-divider flex-shrink-0">
           <div className="flex items-center gap-2 min-w-0">
             <BrainCircuit size={16} className="text-app-accent flex-shrink-0" />
-            <h3 className="text-[15px] font-semibold text-app-fg truncate">Brain map · {workspaceName}</h3>
+            <h3 className="text-[15px] font-semibold text-app-fg truncate">Brain map · {workspaceName}{folderName ? ` › ${folderName}` : ''}</h3>
+            <span className="text-[10px] text-app-fg-subtle px-1.5 py-0.5 rounded-full bg-app-chip flex-shrink-0">{folderId ? 'project' : 'all projects'}</span>
             {!loading && <span className="text-[11px] text-app-fg-subtle">{data.nodes.length} nodes · {data.links.length} links</span>}
           </div>
           <button onClick={onClose} className="w-7 h-7 flex items-center justify-center rounded-md text-app-fg-subtle hover:bg-app-nav-hover-bg hover:text-app-fg transition-colors"><X size={15} /></button>

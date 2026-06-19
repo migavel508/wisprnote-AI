@@ -258,14 +258,25 @@ export default function NotesPage({ selectedTask, isLoading = false, isLoadingDe
 
   const toggleWorkspace = async (ws: Workspace & { has_task: boolean }) => {
     if (!selectedTask?.id || togglingWsId) return;
+    const taskId = selectedTask.id;
+    // If the note is filed inside one of this workspace's folders, the workspace row
+    // isn't a second "location" — it's the parent. Clicking it files the note at the
+    // workspace ROOT (out of the subfolder) rather than toggling membership, so we never
+    // strand a folder membership or drop the note out of the workspace entirely.
+    const wsFolders = (foldersByWs[ws.id] || []).filter(f => assignedFolderIds.has(f.id));
     setTogglingWsId(ws.id);
     try {
-      if (ws.has_task) {
-        await removeMeetingFromWorkspace(ws.id, selectedTask.id);
+      if (wsFolders.length > 0) {
+        await Promise.all(wsFolders.map(f => removeMeetingFromFolder(f.id, taskId)));
+        setAssignedFolderIds(prev => { const n = new Set(prev); wsFolders.forEach(f => n.delete(f.id)); return n; });
+        // Workspace membership stays (has_task already true) — the note now lives at the root.
+      } else if (ws.has_task) {
+        await removeMeetingFromWorkspace(ws.id, taskId);
+        setWorkspaces(prev => prev.map(w => w.id === ws.id ? { ...w, has_task: false } : w));
       } else {
-        await addMeetingToWorkspace(ws.id, selectedTask.id);
+        await addMeetingToWorkspace(ws.id, taskId);
+        setWorkspaces(prev => prev.map(w => w.id === ws.id ? { ...w, has_task: true } : w));
       }
-      setWorkspaces(prev => prev.map(w => w.id === ws.id ? { ...w, has_task: !w.has_task } : w));
     } finally {
       setTogglingWsId(null);
     }
@@ -331,6 +342,13 @@ export default function NotesPage({ selectedTask, isLoading = false, isLoadingDe
   const assignedFolders = workspaces.flatMap(w =>
     (foldersByWs[w.id] || []).filter(f => assignedFolderIds.has(f.id)).map(f => ({ folder: f, ws: w }))
   );
+  // A note inside a folder is ALSO a member of the folder's workspace (required so it shows
+  // in the workspace's master view). In the picker that read as "ticked in two places". So we
+  // treat a workspace as a *location* only when the note sits at its ROOT (not inside one of
+  // its folders); otherwise the folder is the location and the workspace is just its parent.
+  const wsHasAssignedFolder = (wsId: string) =>
+    (foldersByWs[wsId] || []).some(f => assignedFolderIds.has(f.id));
+  const rootWorkspaces = assignedWorkspaces.filter(w => !wsHasAssignedFolder(w.id));
   const filteredWs = workspaces.filter(w =>
     !wsSearch || w.name.toLowerCase().includes(wsSearch.toLowerCase()) ||
     (foldersByWs[w.id] || []).some(f => f.name.toLowerCase().includes(wsSearch.toLowerCase()))
@@ -591,8 +609,10 @@ export default function NotesPage({ selectedTask, isLoading = false, isLoadingDe
               )}
             </div>
 
-            {/* Assigned workspace chips */}
-            {assignedWorkspaces.map(ws => (
+            {/* Assigned workspace chips — only workspaces the note is filed in directly
+                (at the root). When it's inside a folder, the folder chip below represents
+                that location and the workspace is its parent (shown in the picker). */}
+            {rootWorkspaces.map(ws => (
               <button
                 key={ws.id}
                 onClick={() => { setShowWorkspacePicker(true); setShowPeoplePicker(false); setWsSearch(''); }}
@@ -653,6 +673,7 @@ export default function NotesPage({ selectedTask, isLoading = false, isLoadingDe
                           <button
                             onClick={() => toggleWorkspace(ws)}
                             disabled={togglingWsId === ws.id}
+                            title={wsHasAssignedFolder(ws.id) ? 'Note is in a folder below — click to move it to the workspace root' : ws.has_task ? 'Remove from workspace' : 'Add to workspace'}
                             className="w-full flex items-center gap-3 px-3 py-2 hover:bg-app-nav-hover-bg transition-colors text-left disabled:opacity-60"
                           >
                             {isDefaultWorkspace(ws) ? (
@@ -667,8 +688,10 @@ export default function NotesPage({ selectedTask, isLoading = false, isLoadingDe
                             <span className="flex-1 text-[13px] text-app-fg truncate">{ws.name}</span>
                             {togglingWsId === ws.id ? (
                               <Loader2 className="w-3.5 h-3.5 animate-spin text-app-fg-subtle" />
-                            ) : ws.has_task ? (
+                            ) : (ws.has_task && !wsHasAssignedFolder(ws.id)) ? (
                               <Check className="w-3.5 h-3.5 text-emerald-500" />
+                            ) : wsHasAssignedFolder(ws.id) ? (
+                              <span className="text-[10.5px] text-app-fg-subtle">in folder</span>
                             ) : null}
                           </button>
                           {wsFolders.map(f => {

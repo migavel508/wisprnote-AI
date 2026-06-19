@@ -446,13 +446,16 @@ export default function WorkspacePage({ allTasks, onSelectTask }: WorkspacePageP
             folders.map(f => getFolderMeetings(f.id).then(list => ({ folderId: f.id, list })).catch(() => ({ folderId: f.id, list: [] as WorkspaceMeeting[] })))
           ),
         ]);
+        // The workspace is the MASTER overall view — it lists EVERY meeting (filed or not),
+        // each tagged with WHERE it lives (its folder). A foldered meeting is one entry here,
+        // badged with its folder; it is not duplicated. Dedup by id so it appears exactly once.
         const folderMap: Record<string, string> = {};
         const merged: Record<string, WorkspaceMeeting> = {};
         for (const m of wsMeetings) merged[m.id] = m;
         for (const { folderId, list } of folderResults) {
           for (const m of list) {
             merged[m.id] = m;
-            folderMap[m.id] = folderId; // last folder wins; UI shows a single badge
+            folderMap[m.id] = folderId; // the meeting's home folder → shown as a badge
           }
         }
         const combined = Object.values(merged).sort(
@@ -626,8 +629,18 @@ export default function WorkspacePage({ allTasks, onSelectTask }: WorkspacePageP
       const { addMeetingToFolder } = await import('../services/workspaceService');
       await addMeetingToFolder(folderId, taskId).catch(() => {});
     }
-    if (wsId !== activeWs.id || folderId !== selection.folderId) {
-      setMeetings(prev => prev.filter(m => m.id !== taskId));
+    if (activeFolder) {
+      // In a folder view: the meeting leaves this view only if it moved out of THIS folder.
+      if (folderId !== activeFolder.id) setMeetings(prev => prev.filter(m => m.id !== taskId));
+    } else {
+      // In the workspace MASTER view: keep the meeting listed; just re-badge its home folder.
+      // It leaves the list only if it moved to a different workspace.
+      setMeetingFolderMap(prev => {
+        const next = { ...prev };
+        if (folderId) next[taskId] = folderId; else delete next[taskId];
+        return next;
+      });
+      if (wsId !== activeWs.id) setMeetings(prev => prev.filter(m => m.id !== taskId));
     }
   };
 
@@ -989,7 +1002,14 @@ export default function WorkspacePage({ allTasks, onSelectTask }: WorkspacePageP
 
       {/* Rename modal */}
       {showBrainMap && (
-        <BrainMapModal workspaceId={activeWs.id} workspaceName={activeWs.name} onClose={() => setShowBrainMap(false)} />
+        // A folder selected in the sidebar → SCOPED to that project; workspace level → AGGREGATE.
+        <BrainMapModal
+          workspaceId={activeWs.id}
+          workspaceName={activeWs.name}
+          folderId={activeFolder?.id ?? null}
+          folderName={activeFolder?.name}
+          onClose={() => setShowBrainMap(false)}
+        />
       )}
 
       {showProposals && (

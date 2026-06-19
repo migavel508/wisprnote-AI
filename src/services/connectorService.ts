@@ -76,17 +76,20 @@ export async function disconnectConnector(id: string, workspaceId?: string): Pro
 // ── Project mapping: scope a workspace's brain to its exact Jira project + GitHub repos ──
 export interface ProjectMapping { jiraProject: string | null; githubRepos: string[] }
 
-export async function getProjectMapping(workspaceId: string): Promise<ProjectMapping> {
+const folderQs = (folderId?: string | null) => (folderId ? `&folder=${encodeURIComponent(folderId)}` : '');
+
+/** Mapping for a FOLDER (project) — or, with no folderId, the workspace default. */
+export async function getProjectMapping(workspaceId: string, folderId?: string | null): Promise<ProjectMapping> {
   try {
-    const r = await authed(`/connectors/routing?workspace=${encodeURIComponent(workspaceId)}`, { method: 'GET' });
+    const r = await authed(`/connectors/routing?workspace=${encodeURIComponent(workspaceId)}${folderQs(folderId)}`, { method: 'GET' });
     if (!r.ok) return { jiraProject: null, githubRepos: [] };
     return await r.json();
   } catch { return { jiraProject: null, githubRepos: [] }; }
 }
 
-/** Set the Jira project or the GitHub repos a workspace maps to. */
-export async function setProjectMapping(workspaceId: string, m: { source: 'jira' | 'github'; projectKey?: string; repos?: string[] }): Promise<void> {
-  await authed(`/connectors/routing?workspace=${encodeURIComponent(workspaceId)}`, { method: 'POST', body: JSON.stringify(m) }).catch(() => {});
+/** Set the Jira project or GitHub repos a FOLDER (project) maps to — or the workspace default. */
+export async function setProjectMapping(workspaceId: string, m: { source: 'jira' | 'github'; projectKey?: string; repos?: string[] }, folderId?: string | null): Promise<void> {
+  await authed(`/connectors/routing?workspace=${encodeURIComponent(workspaceId)}${folderQs(folderId)}`, { method: 'POST', body: JSON.stringify(m) }).catch(() => {});
 }
 
 /** Connect a PAT-based connector (e.g. GitHub) by storing a validated token server-side. */
