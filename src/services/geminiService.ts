@@ -5,7 +5,7 @@ import { getChatModel, type ChatModelDef } from './chatModels';
 import { MODELS, chain } from '../config/models';
 import { AudioBatch, blobToBase64, BlobReadError } from "./audioService";
 import { logger } from '../lib/logger';
-import { formatDisplayName } from '../lib/displayName';
+import { buildSpeakerInstructions, type AudioSourceKind } from './speakerLabeling';
 import { parseDateRange, detectOffTrack, type ParsedDateRange } from './queryDates';
 import { buildMeetingCard, hasOffTrackTopic, type KGLite } from './meetingEvidence';
 
@@ -492,7 +492,7 @@ export interface ProcessResult {
   endTime: number;
 }
 
-export async function processAudioBatch(batch: AudioBatch, prompt: string): Promise<ProcessResult> {
+export async function processAudioBatch(batch: AudioBatch, prompt: string, audioSource: AudioSourceKind = 'upload'): Promise<ProcessResult> {
   let base64Data: string;
   try {
     base64Data = await blobToBase64(batch.blob);
@@ -503,18 +503,6 @@ export async function processAudioBatch(batch: AudioBatch, prompt: string): Prom
     throw new BlobReadError(`Unexpected blob read failure: ${(blobErr as Error).message}`);
   }
   
-  // ─── Fetch User Identity ──────────────────────────────────────────────────
-  let userName = "the user";
-  try {
-    const { getSession } = await import('./awsAuthService');
-    const session = await getSession();
-    if (session?.user) {
-      userName = formatDisplayName(session.user.email, session.user.name, 'the user');
-    }
-  } catch (e) {
-    log.warn('get_user_session_failed', { error: e instanceof Error ? e : undefined });
-  }
-
   // Calculate overlap info for the prompt
   const overlapInfo = batch.overlapStart && batch.overlapStart > 0
     ? `\nNOTE: The first ~${batch.overlapStart} seconds of this chunk overlap with the previous chunk for continuity. This is intentional to ensure no content is lost at boundaries.`
@@ -535,12 +523,12 @@ HANDLING SILENCE AND NOISE:
 - If someone coughs, clears throat, or makes non-verbal sounds, you may note [cough] or [clears throat] but do not invent words.
 - Low audio quality or distant speech should be marked as [inaudible] rather than guessed.
 
-FORMATTING RULES & SPEAKER ID:
+FORMATTING RULES:
 - Output ONLY the exact words spoken in the audio
 - Do NOT use bullet points or markdown formatting - just plain text paragraphs
-- Include speaker labels if multiple speakers are detected.
-- IMPORTANT IDENTITY RULE: The primary user of this app is named "${userName}". If the speaker refers to themselves as "me" or "I" and you need to assign a speaker label, or if someone addresses them by name, use "${userName}:" as the speaker label.
 - Preserve natural speech patterns including filler words (um, uh, etc.) if present
+
+${buildSpeakerInstructions(audioSource)}
 
 This is part ${batch.index + 1} of ${batch.total} of the audio recording (from ${Math.floor(batch.startTime)}s to ${Math.floor(batch.endTime)}s).${overlapInfo}
 
@@ -699,21 +687,11 @@ export async function deleteFromFileAPI(name: string): Promise<void> {
 export async function transcribeViaFileAPI(
   fileUri: string,
   mimeType: string,
-  prompt: string
+  prompt: string,
+  audioSource: AudioSourceKind = 'upload'
 ): Promise<string> {
   if (getProvider() === 'openrouter') {
     throw new Error('File API not available with OpenRouter — falling back to batch processing');
-  }
-  // ─── Fetch User Identity ──────────────────────────────────────────────────
-  let userName = "the user";
-  try {
-    const { getSession } = await import('./awsAuthService');
-    const session = await getSession();
-    if (session?.user) {
-      userName = formatDisplayName(session.user.email, session.user.name, 'the user');
-    }
-  } catch (e) {
-    log.warn('get_user_session_failed', { error: e instanceof Error ? e : undefined });
   }
 
   const transcriptionPrompt = `You are a professional transcription service. Your ONLY task is to transcribe ALL spoken words in this audio accurately and completely.
@@ -730,12 +708,12 @@ HANDLING SILENCE AND NOISE:
 - If someone coughs, clears throat, or makes non-verbal sounds, you may note [cough] or [clears throat] but do not invent words.
 - Low audio quality or distant speech should be marked as [inaudible] rather than guessed.
 
-FORMATTING RULES & SPEAKER ID:
+FORMATTING RULES:
 - Output ONLY the exact words spoken in the audio
 - Do NOT use bullet points or markdown formatting - just plain text paragraphs
-- Include speaker labels if multiple speakers are detected (e.g., "Speaker 1:", "Speaker 2:")
-- IMPORTANT IDENTITY RULE: The primary user of this app is named "${userName}". If the speaker refers to themselves as "me" or "I" and you need to assign a speaker label, or if someone addresses them by name, use "${userName}:" as the speaker label.
 - Preserve natural speech patterns including filler words (um, uh, etc.) if present
+
+${buildSpeakerInstructions(audioSource)}
 
 COMPLETENESS:
 - This is a COMPLETE audio file. Transcribe EVERYTHING from start to finish.
@@ -756,6 +734,99 @@ Now transcribe the complete audio verbatim. If no speech is present, return empt
     }],
   });
   return response.text ?? '';
+}
+
+// ─── Speaker name resolution ───────────────────────────────────────────────────
+//
+// After a batch/upload transcript is assembled with neutral "Speaker N" labels,
+// this pass upgrades a label to a real NAME *only* when that person is explicitly
+// identified in the spoken audio (self-introduction, or unambiguously addressed by
+// name). It is intentionally conservative: anything uncertain stays "Speaker N",
+// and it can NEVER inject the app/account user's name — it has no access to it and
+// works purely from spoken content. Failure is non-fatal: the original transcript
+// is returned unchanged on any error.
+const SPEAKER_LABEL_RE = /\bSpeaker\s+\d+\b/;
+
+export async function resolveSpeakerNames(transcript: string): Promise<string> {
+  if (!transcript || !SPEAKER_LABEL_RE.test(transcript)) return transcript;
+
+  // Bound the model input: names are almost always established early, so a
+  // head-weighted view (+ a tail sample) keeps token cost predictable on long
+  // meetings while still seeing late introductions.
+  const sample = transcript.length > 12000
+    ? `${transcript.slice(0, 9000)}\n...\n${transcript.slice(-3000)}`
+    : transcript;
+
+  const instruction = `You are given a meeting transcript whose speakers are labeled "Speaker 1", "Speaker 2", etc.
+Your job: map a "Speaker N" label to a real NAME ONLY when the audio explicitly identifies who that speaker is.
+
+STRICT RULES:
+- Only map a speaker if their name is clearly established in the dialogue — e.g. they introduce themselves ("Hi, I'm Sarah", "This is John from sales"), or another speaker addresses THAT speaker by name unambiguously.
+- Do NOT infer a name from someone merely saying "I" or "me".
+- Do NOT guess. If you are not confident which label a name belongs to, leave it out.
+- Never invent names. Never assign a generic placeholder. Omit anything uncertain.
+- Return ONLY speakers you can confidently name. It is correct and expected to return an empty list when no one is clearly identified.
+
+Return JSON of the form: { "mappings": [ { "speaker": "Speaker 2", "name": "Sarah" } ] }
+
+Transcript:
+${sample}`;
+
+  try {
+    const response = await generateContent({
+      model: MODELS.summary.primary,
+      contents: instruction,
+      config: {
+        responseMimeType: 'application/json',
+        responseSchema: {
+          type: Type.OBJECT,
+          properties: {
+            mappings: {
+              type: Type.ARRAY,
+              items: {
+                type: Type.OBJECT,
+                properties: {
+                  speaker: { type: Type.STRING, description: 'The exact existing label, e.g. "Speaker 2"' },
+                  name: { type: Type.STRING, description: 'The real name spoken in the audio' },
+                },
+                required: ['speaker', 'name'],
+              },
+            },
+          },
+          required: ['mappings'],
+        },
+      },
+    });
+
+    const parsed = JSON.parse(response.text || '{}');
+    const mappings: Array<{ speaker?: string; name?: string }> = Array.isArray(parsed?.mappings) ? parsed.mappings : [];
+    if (mappings.length === 0) return transcript;
+
+    let out = transcript;
+    const applied: Record<string, string> = {};
+    for (const m of mappings) {
+      const label = (m?.speaker || '').trim();
+      const name = (m?.name || '').trim();
+      // Guards: the label must be a real "Speaker N" token, the name must be a
+      // plausible non-empty proper name, and the label must actually exist.
+      if (!/^Speaker\s+\d+$/.test(label)) continue;
+      if (!name || name.length > 60 || /speaker\s*\d/i.test(name)) continue;
+      const num = label.match(/\d+/)?.[0];
+      if (!num) continue;
+      // Match "Speaker N" not followed by another digit (so "Speaker 1" ≠ "Speaker 10").
+      const re = new RegExp(`\\bSpeaker\\s+${num}\\b(?!\\d)`, 'g');
+      if (!re.test(out)) continue;
+      out = out.replace(re, name);
+      applied[label] = name;
+    }
+    if (Object.keys(applied).length > 0) {
+      log.info('speaker_names_resolved', { count: Object.keys(applied).length });
+    }
+    return out;
+  } catch (e) {
+    log.warn('resolve_speaker_names_failed', { error: e instanceof Error ? e : undefined });
+    return transcript; // non-fatal — keep neutral labels
+  }
 }
 
 export async function generateSummary(text: string): Promise<string> {

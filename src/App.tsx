@@ -60,7 +60,9 @@ import {
   deleteFromFileAPI,
   transcribeViaFileAPI,
   isFileApiDisabledByFailures,
+  resolveSpeakerNames,
 } from './services/geminiService';
+import { reconcileLeadingSpeaker, type AudioSourceKind } from './services/speakerLabeling';
 import {
   retrieveForSingleMeeting,
   scoreMeetingCandidate,
@@ -404,6 +406,10 @@ export default function App() {
   /** False until the first `getSession()` finishes — avoids flashing the login screen on cold start when Cognito already has tokens. */
   const [isAuthSessionResolved, setIsAuthSessionResolved] = useState(false);
   const [file, setFile] = useState<File | null>(null);
+  // Where the current `file` came from. Drives neutral-vs-channel speaker labeling
+  // in batch transcription. All batch/upload sources label neutrally (Speaker N);
+  // the enum is threaded so the policy stays explicit and centralised.
+  const fileSourceRef = useRef<AudioSourceKind>('upload');
   const [prompt, setPrompt] = useState('');
   const [status, setStatus] = useState<Status>('idle');
   const [batches, setBatches] = useState<BatchStatus[]>([]);
@@ -1719,6 +1725,7 @@ export default function App() {
         mediaRecorder.onstop = () => {
           const audioBlob = new Blob(audioChunksRef.current, { type: 'audio/webm' });
           const audioFile = new File([audioBlob], `Recording_${new Date().toISOString().replace(/[:.]/g, '-')}.webm`, { type: 'audio/webm' });
+          fileSourceRef.current = 'mic-only';
           setFile(audioFile);
           stream.getTracks().forEach(track => track.stop());
         };
@@ -1851,6 +1858,7 @@ export default function App() {
         setIsPaused(false);
         pausedBatchSegmentsRef.current = [];
         if (audioFile) {
+          fileSourceRef.current = 'native-batch';
           setFile(audioFile);
         } else {
           setError('No audio captured.');
@@ -4072,6 +4080,7 @@ export default function App() {
     if (selectedFile) {
       // Free-tier gate: block uploading a new meeting once the quota is used up.
       if (!requireMeetingQuota()) { e.target.value = ''; return; }
+      fileSourceRef.current = 'upload';
       setFile(selectedFile);
       setError(null);
       setStatus('idle');
@@ -4085,12 +4094,19 @@ export default function App() {
       return transcriptions.join('\n\n');
     }
 
+    // Chunked path: speakers are numbered independently per chunk, so we reconcile
+    // them at each seam (see reconcileLeadingSpeaker). Surface that we chunked so a
+    // residual numbering wobble isn't mistaken for a silent failure.
+    log.info('transcript_stitch_chunked', { chunks: transcriptions.length });
+
     const result: string[] = [transcriptions[0]];
-    
+
     for (let i = 1; i < transcriptions.length; i++) {
-      const prev = transcriptions[i - 1];
+      // Anchor against the transcript assembled so far (not the raw neighbour) so
+      // speaker remappings chain consistently across multiple seams.
+      const prev = result[result.length - 1];
       const curr = transcriptions[i];
-      
+
       if (!prev || !curr) {
         result.push(curr || '');
         continue;
@@ -4100,10 +4116,10 @@ export default function App() {
       // Take the last ~200 chars of prev and first ~200 chars of curr
       const prevEnd = prev.slice(-300).toLowerCase();
       const currStart = curr.slice(0, 300).toLowerCase();
-      
+
       // Find the longest common substring
       let bestOverlap = 0;
-      
+
       // Look for phrases of at least 20 chars that appear in both
       for (let len = Math.min(100, currStart.length); len >= 20; len--) {
         const phrase = currStart.slice(0, len);
@@ -4113,16 +4129,13 @@ export default function App() {
           break;
         }
       }
-      
-      if (bestOverlap > 20) {
-        // Skip the overlapping portion from the current chunk
-        result.push(curr.slice(bestOverlap).trim());
-      } else {
-        // No significant overlap found, just append
-        result.push(curr);
-      }
+
+      // Drop the duplicated overlap from the current chunk, then align its leading
+      // speaker number to the numbering already established (overlap anchor).
+      const trimmed = bestOverlap > 20 ? curr.slice(bestOverlap).trim() : curr;
+      result.push(reconcileLeadingSpeaker(prev, trimmed));
     }
-    
+
     return result.filter(t => t.trim()).join('\n\n');
   };
 
@@ -4168,7 +4181,7 @@ export default function App() {
           await waitForFileActive(name);
 
           // Transcribe via File API (single call for entire file)
-          fullTranscription = await transcribeViaFileAPI(uri, currentFile.type || 'audio/mpeg', prompt);
+          fullTranscription = await transcribeViaFileAPI(uri, currentFile.type || 'audio/mpeg', prompt, fileSourceRef.current);
 
           // Clean up uploaded file
           await deleteFromFileAPI(name);
@@ -4344,7 +4357,7 @@ export default function App() {
               toProcess.map(async ({ batch, originalIndex }) => {
                 await acquireBatchSlot();
                 try {
-                  const result = await processAudioBatch(batch, prompt);
+                  const result = await processAudioBatch(batch, prompt, fileSourceRef.current);
                   results[originalIndex] = { ...results[originalIndex], status: 'completed', result: result.text };
                 } catch (err: any) {
                   if (err instanceof BlobReadError || err?.isBlobError) {
@@ -4471,6 +4484,17 @@ export default function App() {
 
       if (!fullTranscription.trim()) {
         throw new Error('Transcription returned empty — please check the audio file and try again.');
+      }
+
+      // Upgrade neutral "Speaker N" labels to real names ONLY where the audio
+      // explicitly identifies a speaker. Conservative + non-fatal: on any failure
+      // or uncertainty the neutral labels are kept, and it can never inject the
+      // account user's name. (Realtime transcripts skip this — they're already
+      // labeled by channel.)
+      try {
+        fullTranscription = await resolveSpeakerNames(fullTranscription);
+      } catch (e) {
+        log.warn('speaker_name_resolution_skipped', { error: e instanceof Error ? e : undefined });
       }
 
       // ── Post-processing with visible milestones ──────────────────────────────

@@ -7,7 +7,7 @@ import {
   type ConnectorStatus,
 } from '../../services/connectorService';
 import { getJiraMeta } from '../../services/jiraActionService';
-import { getWorkspaces, type Workspace } from '../../services/workspaceService';
+import { getWorkspaces, getFolders, type Workspace, type Folder } from '../../services/workspaceService';
 import { useConnectorOAuth, setPendingConnector } from './useConnectorOAuth';
 
 /**
@@ -117,34 +117,47 @@ export default function ConnectionsTab({ fixedWorkspaceId, embedded }: Connectio
 
   useEffect(() => { void refresh(); }, [refresh]);
 
-  // Project mapping: scope this workspace's brain to its exact Jira project + GitHub repos.
+  // Project mapping: scope each PROJECT (folder) to its own Jira project + GitHub repos.
+  // mapFolderId = null → the workspace-wide default ("unfiled"); a folder id → that project.
   const [jiraProject, setJiraProject] = useState('');
   const [repoText, setRepoText] = useState('');
   const [jiraProjects, setJiraProjects] = useState<Array<{ key: string; name: string }>>([]);
   const [savingMap, setSavingMap] = useState(false);
   const [mapSaved, setMapSaved] = useState(false);
+  const [folders, setFolders] = useState<Folder[]>([]);
+  const [mapFolderId, setMapFolderId] = useState<string | null>(null);
 
+  // Load this workspace's folders (projects) for the mapping target picker.
+  useEffect(() => {
+    if (!workspaceId) { setFolders([]); return; }
+    let cancelled = false;
+    void getFolders(workspaceId).then((f) => { if (!cancelled) setFolders(f); }).catch(() => {});
+    setMapFolderId(null);   // reset to workspace default when switching workspace
+    return () => { cancelled = true; };
+  }, [workspaceId]);
+
+  // Load the mapping for the currently-selected target (folder or workspace default).
   useEffect(() => {
     if (!isConnectorsEnabled() || !workspaceId) return;
     let cancelled = false;
-    void getProjectMapping(workspaceId).then((m) => {
+    void getProjectMapping(workspaceId, mapFolderId).then((m) => {
       if (cancelled) return;
       setJiraProject(m.jiraProject || '');
       setRepoText((m.githubRepos || []).join(', '));
     });
     void getJiraMeta(workspaceId).then((m) => { if (!cancelled && m.connected) setJiraProjects(m.projects); }).catch(() => {});
     return () => { cancelled = true; };
-  }, [workspaceId]);
+  }, [workspaceId, mapFolderId]);
 
   const saveMapping = useCallback(async () => {
     if (!workspaceId) return;
     setSavingMap(true); setMapSaved(false);
-    if (jiraProject) await setProjectMapping(workspaceId, { source: 'jira', projectKey: jiraProject });
+    if (jiraProject) await setProjectMapping(workspaceId, { source: 'jira', projectKey: jiraProject }, mapFolderId);
     const repos = repoText.split(',').map((s) => s.trim()).filter(Boolean);
-    await setProjectMapping(workspaceId, { source: 'github', repos });
+    await setProjectMapping(workspaceId, { source: 'github', repos }, mapFolderId);
     setSavingMap(false); setMapSaved(true);
     setTimeout(() => setMapSaved(false), 2500);
-  }, [workspaceId, jiraProject, repoText]);
+  }, [workspaceId, jiraProject, repoText, mapFolderId]);
 
   // Finish the OAuth round-trip when the deep-link callback fires.
   const onOAuthDone = useCallback((id: string, ok: boolean) => {
@@ -226,9 +239,19 @@ export default function ConnectionsTab({ fixedWorkspaceId, embedded }: Connectio
         <div className="mb-8 rounded-xl border border-app-border bg-app-panel p-4">
           <div className="text-[12.5px] font-semibold text-app-fg mb-1">Project mapping</div>
           <p className="text-[11.5px] text-app-fg-subtle leading-relaxed mb-3">
-            Tell the brain which project this workspace IS, so it links the right meetings, tickets and repos —
-            and ignores everything else. Without this, the brain pulls in every repo you touch.
+            Map each <strong>project (folder)</strong> to its own Jira project + GitHub repos, so the brain keeps
+            every project's meetings, tickets and code separate — and a meeting only ever links to the right
+            project. Pick a folder below, or “Workspace default” for anything not in a folder.
           </p>
+          {/* Which project (folder) this mapping is for — folder = a project; default = unfiled. */}
+          <div className="mb-3">
+            <span className="text-[10px] font-mono font-medium text-app-fg-label uppercase tracking-[0.1em] mb-1 block">Project (folder)</span>
+            <select value={mapFolderId ?? ''} onChange={(e) => setMapFolderId(e.target.value || null)}
+              className="w-full text-[12.5px] bg-app-canvas border border-app-border rounded-lg px-2.5 py-1.5 text-app-fg outline-none focus:border-app-accent">
+              <option value="">Workspace default (unfiled)</option>
+              {folders.map((f) => <option key={f.id} value={f.id}>{f.name}</option>)}
+            </select>
+          </div>
           <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
             {statusById['jira']?.connected && (
               <div>

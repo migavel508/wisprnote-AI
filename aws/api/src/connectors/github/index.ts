@@ -2,7 +2,7 @@ import { registerConnector, type KnowledgeItemInput } from '../registry';
 import { getToken } from '../../trust/broker';
 import { getMcpServer } from '../../mcp/registry';
 import { mcpCallTool } from '../../mcp/client';
-import { getGithubRepos } from '../routing';
+import { getAllMappedRepos } from '../routing';
 
 /**
  * GitHub connector — adapter over the official GitHub remote MCP. Each `sync` pulls the
@@ -37,7 +37,9 @@ registerConnector({
 
     const items: KnowledgeItemInput[] = [];
     let maxUpdated = cursor || '';
-    const repos = await getGithubRepos(userId, scope).catch(() => []);
+    // Pull repos mapped across ALL the workspace's folders (each item is folder-tagged at
+    // upsert by its repo), so every project's code is ingested — not just the default folder's.
+    const repos = await getAllMappedRepos(userId, scope).catch(() => []);
 
     const pushIssue = (it: any, isPrTool: boolean) => {
       const loc = locFromUrl(it.html_url);

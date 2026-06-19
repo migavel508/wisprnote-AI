@@ -112,6 +112,11 @@ async function migrateExisting(): Promise<void> {
   // diff during the alignment-verdict pass (no extra LLM call).
   await query(`ALTER TABLE knowledge_item        ADD COLUMN IF NOT EXISTS advisory_assessment TEXT`);
   await query(`ALTER TABLE knowledge_item        ADD COLUMN IF NOT EXISTS advisory_note TEXT`);
+  // Folder-scoped brain (docs/FOLDER_SCOPED_CONNECTORS.md): which PROJECT (folder) this item
+  // belongs to. NULL = unfiled / workspace-wide. Drives per-project sync, linking + views so a
+  // meeting never links to the wrong project's Jira/GitHub. Populated in later phases.
+  await query(`ALTER TABLE knowledge_item        ADD COLUMN IF NOT EXISTS folder_id UUID`);
+  await query(`CREATE INDEX IF NOT EXISTS knowledge_item_folder_idx ON knowledge_item (user_id, workspace_id, folder_id)`);
 
   // 2) Backfill NULLs: attach legacy connections/items to the user's default
   //    (earliest) workspace so they keep working in-place; sentinel if none.
