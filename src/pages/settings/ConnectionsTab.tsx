@@ -1,11 +1,15 @@
 import { useCallback, useEffect, useState } from 'react';
-import { Loader2, Check, X, ExternalLink } from 'lucide-react';
+import { Loader2, Check, X, ExternalLink, RefreshCw, FolderOpen } from 'lucide-react';
 import { CONNECTORS, CONNECTOR_CATEGORIES, type ConnectorDef } from '../../config/connectors';
 import {
   isConnectorsEnabled, listConnectors, getConnectorOAuthUrl, disconnectConnector, setConnectorToken,
   getProjectMapping, setProjectMapping,
   type ConnectorStatus,
 } from '../../services/connectorService';
+import {
+  listDevProjects, syncLocalSessions, getPathMappings, setPathMapping,
+  type DevProject, type SyncSummary,
+} from '../../services/localSessionsService';
 import { getJiraMeta } from '../../services/jiraActionService';
 import { getWorkspaces, getFolders, type Workspace, type Folder } from '../../services/workspaceService';
 import { useConnectorOAuth, setPendingConnector } from './useConnectorOAuth';
@@ -20,14 +24,16 @@ import { useConnectorOAuth, setPendingConnector } from './useConnectorOAuth';
 const isTauri = typeof window !== 'undefined' && !!(window as any).__TAURI_INTERNALS__;
 
 function ConnectorCard({
-  c, connected, busy, onConnect, onDisconnect,
+  c, connected, busy, onConnect, onDisconnect, onLocalSetup,
 }: {
   c: ConnectorDef; connected: boolean; busy: boolean;
   onConnect: (id: string) => void; onDisconnect: (id: string) => void;
+  onLocalSetup: (c: ConnectorDef) => void;
 }) {
   const Icon = c.icon;
   const enabled = isConnectorsEnabled();
   const actionable = enabled && c.status === 'live';
+  const isLocal = c.via === 'local';
 
   return (
     <div className="rounded-xl border border-app-border bg-app-panel p-4 flex flex-col gap-3 transition-colors hover:border-app-border-strong">
@@ -60,7 +66,20 @@ function ConnectorCard({
         ))}
       </div>
 
-      {connected ? (
+      {isLocal ? (
+        <button
+          onClick={() => actionable && onLocalSetup(c)} disabled={!actionable}
+          className={`mt-1 w-full py-2 rounded-lg text-[12px] font-medium transition-colors flex items-center justify-center gap-2 ${
+            actionable
+              ? (connected
+                  ? 'bg-app-chip text-app-fg-muted border border-app-border hover:text-app-fg'
+                  : 'bg-app-accent text-app-accent-fg hover:bg-app-accent-hover')
+              : 'bg-app-chip text-app-fg-subtle border border-app-border cursor-not-allowed'
+          }`}
+        >
+          {actionable ? (connected ? 'Manage projects' : 'Set up') : 'Set up — coming soon'}
+        </button>
+      ) : connected ? (
         <button
           onClick={() => onDisconnect(c.id)} disabled={busy}
           className="mt-1 w-full py-2 rounded-lg text-[12px] font-medium bg-app-chip text-app-fg-muted border border-app-border hover:text-app-fg transition-colors disabled:opacity-50"
@@ -172,6 +191,55 @@ export default function ConnectionsTab({ fixedWorkspaceId, embedded }: Connectio
   const [patToken, setPatToken] = useState('');
   const [patBusy, setPatBusy] = useState(false);
   const [patError, setPatError] = useState<string | null>(null);
+
+  // Local dev-session (Claude Code / Codex) setup — machine-local path→folder mapping + sync.
+  const [localOpen, setLocalOpen] = useState(false);
+  const [localLoading, setLocalLoading] = useState(false);
+  const [devProjects, setDevProjects] = useState<DevProject[]>([]);
+  const [localMap, setLocalMap] = useState<Record<string, string>>({});
+  const [localBusy, setLocalBusy] = useState(false);
+  const [localSummary, setLocalSummary] = useState<SyncSummary | null>(null);
+
+  // Keep the card's "configured" badge in sync with the stored mapping for this workspace.
+  useEffect(() => { setLocalMap(workspaceId ? getPathMappings(workspaceId) : {}); }, [workspaceId]);
+
+  const openLocalSetup = useCallback(async (_c: ConnectorDef) => {
+    if (!workspaceId) return;
+    setLocalSummary(null);
+    setLocalMap(getPathMappings(workspaceId));
+    void getFolders(workspaceId).then(setFolders).catch(() => {});
+    setLocalOpen(true);
+    setLocalLoading(true);
+    const ps = await listDevProjects();
+    setDevProjects(ps);
+    setLocalLoading(false);
+  }, [workspaceId]);
+
+  const assignLocalFolder = useCallback((path: string, folderId: string | null) => {
+    if (!workspaceId) return;
+    setPathMapping(workspaceId, path, folderId);
+    setLocalMap(getPathMappings(workspaceId));
+  }, [workspaceId]);
+
+  const runLocalSync = useCallback(async () => {
+    if (!workspaceId) return;
+    setLocalBusy(true);
+    try { setLocalSummary(await syncLocalSessions(workspaceId)); }
+    finally { setLocalBusy(false); }
+  }, [workspaceId]);
+
+  const localConfigured = Object.keys(localMap).length > 0;
+  const basename = (p: string) => p.replace(/\/+$/, '').split('/').filter(Boolean).pop() || p;
+  // Group detected projects by cwd (a path may have both Claude Code AND Codex sessions).
+  const projectRows = Object.values(
+    devProjects.reduce((acc, p) => {
+      const e = acc[p.cwd] || (acc[p.cwd] = { cwd: p.cwd, sessionCount: 0, tools: [] as string[] });
+      e.sessionCount += p.sessionCount;
+      const label = p.source === 'claude-code' ? 'Claude Code' : 'Codex';
+      if (!e.tools.includes(label)) e.tools.push(label);
+      return acc;
+    }, {} as Record<string, { cwd: string; sessionCount: number; tools: string[] }>),
+  ).sort((a, b) => b.sessionCount - a.sessionCount);
 
   const onConnect = useCallback(async (id: string) => {
     const def = CONNECTORS.find((c) => c.id === id);
@@ -293,10 +361,11 @@ export default function ConnectionsTab({ fixedWorkspaceId, embedded }: Connectio
                   <ConnectorCard
                     key={c.id}
                     c={c}
-                    connected={!!statusById[c.id]?.connected}
+                    connected={c.via === 'local' ? localConfigured : !!statusById[c.id]?.connected}
                     busy={busyId === c.id}
                     onConnect={onConnect}
                     onDisconnect={onDisconnect}
+                    onLocalSetup={openLocalSetup}
                   />
                 ))}
               </div>
@@ -333,6 +402,58 @@ export default function ConnectionsTab({ fixedWorkspaceId, embedded }: Connectio
               <button onClick={() => setPatFor(null)} disabled={patBusy} className="px-3 py-1.5 rounded-lg text-[12.5px] text-app-fg hover:bg-app-nav-hover-bg disabled:opacity-50">Cancel</button>
               <button onClick={submitPat} disabled={patBusy || !patToken.trim()} className="px-3.5 py-1.5 rounded-lg text-[12.5px] font-semibold bg-app-accent text-app-accent-fg hover:bg-app-accent-hover disabled:opacity-50 flex items-center gap-1.5">
                 {patBusy ? <Loader2 size={13} className="animate-spin" /> : <Check size={13} strokeWidth={2.5} />} Connect
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
+
+      {localOpen && (
+        <div className="fixed inset-0 z-[9999] flex items-center justify-center bg-black/30 backdrop-blur-sm" onClick={() => !localBusy && setLocalOpen(false)}>
+          <div className="bg-app-canvas rounded-2xl border border-app-divider shadow-xl w-[580px] max-w-[94vw] max-h-[82vh] flex flex-col p-5" onClick={(e) => e.stopPropagation()}>
+            <div className="flex items-center justify-between mb-1">
+              <h3 className="text-[15px] font-semibold text-app-fg">Local dev sessions</h3>
+              <button onClick={() => !localBusy && setLocalOpen(false)} className="w-7 h-7 flex items-center justify-center rounded-md text-app-fg-subtle hover:bg-app-nav-hover-bg hover:text-app-fg"><X size={15} /></button>
+            </div>
+            <p className="text-[12px] text-app-fg-subtle leading-relaxed mb-3">
+              Map each local project to a workspace folder. Only mapped projects are read into the brain — and your
+              transcripts never leave this machine; only a short, redacted summary of each session is uploaded.
+            </p>
+            <div className="flex-1 overflow-y-auto -mx-1 px-1">
+              {localLoading ? (
+                <div className="py-10 flex items-center justify-center gap-2 text-[12.5px] text-app-fg-subtle"><Loader2 size={14} className="animate-spin" /> Scanning local sessions…</div>
+              ) : projectRows.length === 0 ? (
+                <p className="py-10 text-center text-[12.5px] text-app-fg-subtle">No Claude Code or Codex sessions found on this machine.</p>
+              ) : (
+                <div className="space-y-1.5">
+                  {projectRows.map((p) => (
+                    <div key={p.cwd} className="flex items-center gap-3 rounded-lg border border-app-border bg-app-panel px-3 py-2">
+                      <FolderOpen size={15} className="text-app-fg-subtle flex-shrink-0" />
+                      <div className="min-w-0 flex-1">
+                        <div className="text-[12.5px] text-app-fg truncate">{basename(p.cwd)}</div>
+                        <div className="text-[10.5px] text-app-fg-subtle truncate">{p.cwd}</div>
+                      </div>
+                      <span className="text-[10px] text-app-fg-subtle whitespace-nowrap">{p.tools.join(' · ')} · {p.sessionCount}</span>
+                      <select value={localMap[p.cwd] || ''} onChange={(e) => assignLocalFolder(p.cwd, e.target.value || null)}
+                        className="text-[12px] bg-app-canvas border border-app-border rounded-lg px-2 py-1 text-app-fg outline-none focus:border-app-accent max-w-[170px]">
+                        <option value="">— Don’t ingest —</option>
+                        {folders.map((f) => <option key={f.id} value={f.id}>{f.name}</option>)}
+                      </select>
+                    </div>
+                  ))}
+                </div>
+              )}
+            </div>
+            <div className="flex items-center justify-between gap-3 mt-3 pt-3 border-t border-app-border">
+              <div className="text-[11.5px] text-app-fg-subtle min-w-0">
+                {localSummary ? (
+                  <>Uploaded {localSummary.upserted} session{localSummary.upserted === 1 ? '' : 's'} from {localSummary.mappedProjects} project{localSummary.mappedProjects === 1 ? '' : 's'}.
+                  {(localSummary.skippedCompressed > 0 || localSummary.skippedLarge > 0) && <> Skipped {localSummary.skippedCompressed} compressed, {localSummary.skippedLarge} oversized.</>}</>
+                ) : folders.length === 0 ? 'Create a folder in this workspace first, then map projects to it.' : 'Folders come from this workspace. Changes save automatically.'}
+              </div>
+              <button onClick={runLocalSync} disabled={localBusy || !localConfigured}
+                className="px-3.5 py-1.5 rounded-lg text-[12.5px] font-semibold bg-app-accent text-app-accent-fg hover:bg-app-accent-hover disabled:opacity-50 flex items-center gap-1.5 whitespace-nowrap">
+                {localBusy ? <Loader2 size={13} className="animate-spin" /> : <RefreshCw size={13} />} Sync now
               </button>
             </div>
           </div>

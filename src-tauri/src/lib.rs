@@ -6,6 +6,7 @@ use std::sync::Mutex;
 
 mod audio_device;
 mod deepgram_transcriber;
+mod dev_sessions;
 mod device_monitor;
 mod logger;
 #[cfg(target_os = "macos")]
@@ -218,6 +219,21 @@ fn stop_realtime_audio(
     detect.paused.store(false, std::sync::atomic::Ordering::SeqCst);
     let mut recorder = state.realtime_recorder.lock().map_err(|e| e.to_string())?;
     recorder.stop()
+}
+
+/// Pause realtime recording: release the mic but keep the WebSocket warm. Instant —
+/// no teardown/rebuild of the streaming pipeline.
+#[tauri::command]
+fn pause_realtime_audio(state: tauri::State<AppState>) -> Result<(), String> {
+    let recorder = state.realtime_recorder.lock().map_err(|e| e.to_string())?;
+    recorder.pause()
+}
+
+/// Resume realtime recording: rebuild only the mic capture; the warm socket continues.
+#[tauri::command]
+fn resume_realtime_audio(state: tauri::State<AppState>) -> Result<(), String> {
+    let recorder = state.realtime_recorder.lock().map_err(|e| e.to_string())?;
+    recorder.resume()
 }
 
 /// Check if realtime recording is active
@@ -860,6 +876,8 @@ pub fn run() {
             get_system_audio_size,
             start_realtime_audio,
             stop_realtime_audio,
+            pause_realtime_audio,
+            resume_realtime_audio,
             is_realtime_recording,
             list_audio_devices,
             get_default_input,
@@ -879,6 +897,8 @@ pub fn run() {
             clear_overlay_hit_bounds,
             focus_main_window,
             set_recording_active,
+            dev_sessions::scan_dev_sessions,
+            dev_sessions::list_dev_projects,
             logger::write_logs
         ])
         .run(tauri::generate_context!())

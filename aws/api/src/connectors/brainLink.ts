@@ -33,7 +33,7 @@ const CAND_MIN_SIM = 0.35;           // candidate-gen floor — LOW on purpose: 
 
 export interface BrainLinkResult { workspaces: number; provenance: number; reference: number; semantic: number; llm: number }
 
-const VERDICT_SYS = `You are a technical lead reviewing work against intent. You are given an INTENT — either a MEETING (a decision/discussion) or a JIRA TASK (work to be done) — and candidate WORK ITEMS (Jira issues, GitHub commits/PRs) that may fulfil it. JUDGE alignment. Be STRICT — only include items that clearly relate; most intents relate to 0-4 items.
+const VERDICT_SYS = `You are a technical lead reviewing work against intent. You are given an INTENT — a MEETING (a decision/discussion), a JIRA TASK (work to be done), or a DEV SESSION (a Claude Code / Codex AI coding session that DID work) — and candidate ITEMS (meetings, Jira issues, GitHub commits/PRs, or dev sessions) that may relate to it. JUDGE which candidates genuinely relate to the intent. When the intent is a DEV SESSION, the candidates are the meeting/task that planned it and the commits it produced — judge whether each is about the SAME work. Be STRICT — only include items that clearly relate; most intents relate to 0-4 items.
 For each related item give:
 - "relation": "discussed"|"implements"|"resulted_in"|"related"
 - "verdict": how well the work item matches what the intent wanted — "aligned" (does what was asked), "partial" (related but incomplete/differs somewhat), "divergent" (claims to relate but the actual work goes a different direction than intended), "unrelated" (not actually connected — drop it).
@@ -86,7 +86,7 @@ async function callGemini(model: string, sys: string, user: string, key: string)
  *  brainVerdict registry). Candidates carry the REAL diff summary (Tier 2) for commits, so
  *  the judgment is grounded in actual code, not fluff messages. */
 async function judgeAlignment(
-  intent: { kind: 'MEETING' | 'JIRA TASK'; title: string | null; body: string | null },
+  intent: { kind: 'MEETING' | 'JIRA TASK' | 'DEV SESSION'; title: string | null; body: string | null },
   candidates: Array<{ id: string; source: string; text: string }>,
 ): Promise<Array<{ id: string; relation: string; verdict: Verdict; rationale: string; assessment: string | null; suggestion: string | null }>> {
   if (!candidates.length) return [];
@@ -243,10 +243,11 @@ export async function runBrainLink(opts?: BrainLinkOpts): Promise<BrainLinkResul
         //      — i.e. we read the actual commit diff to judge whether it implements the intent.
         //   3. VERDICT (Tier 3): ONE batched Sonnet→Gemini call → verdict+rationale stored
         //      DIRECTLY on the edge (the brain map colours + explains the line).
-        if (self.source === 'meeting' || self.source === 'jira') {
+        if (self.source === 'meeting' || self.source === 'jira' || self.source === 'claude-code' || self.source === 'codex') {
           if (llmUsed >= llmBudget) continue;   // budget hit (or 0 = fast path) → leave unmarked for a later tick
           llmUsed++;
           const isTask = self.source === 'jira';
+          const isSession = self.source === 'claude-code' || self.source === 'codex';
           // FOLDER SCOPING — but asymmetric, because a meeting and a task have different shapes:
           //  • A JIRA TASK is single-project: its implementing commits MUST be in its own folder
           //    → hard folder gate (prevents task→wrong-repo links).
@@ -256,37 +257,56 @@ export async function runBrainLink(opts?: BrainLinkOpts): Promise<BrainLinkResul
           //    project. Cross-project + unfiled meetings therefore link to every project they
           //    actually discuss; the similarity floor + strict verdict keep out projects they don't.
           const intentFolder = itemById.get(String(self.id))?.folder_id ?? null;
-          const candSources = isTask ? ['github'] : ['jira', 'github'];
-          const candK = isTask ? CAND_K : 10;   // meetings may legitimately touch several projects
+          // A DEV SESSION (Claude Code / Codex) is its own intent: it links OUTWARD to the work it
+          // relates to — the meeting that planned it, the Jira task it implemented, the commits it
+          // produced. (Modelling it as an intent — not a candidate — means a freshly-synced session
+          // links to ALREADY-linked meetings/tasks without re-running them.)
+          const candSources = isSession ? ['meeting', 'jira', 'github'] : isTask ? ['github'] : ['jira', 'github'];
+          const candK = (isTask || isSession) ? CAND_K : 10;   // meetings may legitimately touch several projects
           const mv = await embedTexts([[self.title, (self.body || '').slice(0, 1500)].filter(Boolean).join('\n')]).catch(() => null);
           const hits = mv?.[0] ? await queryNearestItems(userId, workspaceId, mv[0], candK * 4, candSources).catch(() => null) : null;
-          const candIds = (hits || [])
+          const candIds: string[] = (hits || [])
             .filter((h) => {
               if (h.id === String(self.id) || h.similarity < CAND_MIN_SIM) return false;
               const it = itemById.get(h.id);
               if (!it) return false;
-              if (isTask && (it.folder_id ?? null) !== intentFolder) return false;   // task → own project only
-              return true;   // meeting → any project its content relates to
+              // Single-project intents (task, session) restrict CODE/TICKET candidates to their own
+              // folder; meetings span projects and are exempt (an unfiled meeting may match either).
+              if ((isTask || isSession) && it.source !== 'meeting' && (it.folder_id ?? null) !== intentFolder) return false;
+              return true;
             })
             .slice(0, candK)
             .map((h) => h.id);
+          // GUARANTEE the project's OWN items are judged. A dev session and the meeting / Jira task /
+          // commits FILED IN ITS FOLDER are the same project, so they must always be candidates —
+          // otherwise an ad-hoc similarity search can rank cross-project meetings higher and the
+          // session never even considers its own project's meeting. The strict verdict still decides.
+          if (isSession && intentFolder) {
+            for (const [iid, it] of itemById) {
+              if (candIds.length >= candK + 8) break;
+              if (iid === String(self.id) || candIds.includes(iid)) continue;
+              if ((it.folder_id ?? null) !== intentFolder) continue;
+              if (it.source !== 'meeting' && it.source !== 'jira' && it.source !== 'github') continue;
+              candIds.push(iid);
+            }
+          }
           const cands: Array<{ id: string; source: string; text: string }> = [];
           for (const cid of candIds) {
             const it = itemById.get(cid);
             if (!it) continue;
-            let text = it.enriched_summary || it.fingerprint || it.title || '';
+            let text = it.enriched_summary || it.fingerprint || it.body || it.title || '';
             if (it.type === 'commit' && !it.enriched_summary) {
               const s = await enrichCommit(userId, workspaceId, cid).catch(() => null);   // Tier 2: read the real diff
               if (s) text = s;
             }
             cands.push({ id: cid, source: it.source, text });
           }
-          const links = await judgeAlignment({ kind: isTask ? 'JIRA TASK' : 'MEETING', title: self.title, body: self.body }, cands);
+          const links = await judgeAlignment({ kind: isSession ? 'DEV SESSION' : isTask ? 'JIRA TASK' : 'MEETING', title: self.title, body: self.body }, cands);
           for (const l of links) {
             // Verdict + rationale stored ON the edge → the line is coloured & explains itself.
             if (await insertEdge({ userId, workspaceId, srcKind: 'item', srcId: String(self.id), dstKind: 'item', dstId: l.id, relation: l.relation, origin: 'llm', confidence: 0.9, evidence: l.verdict, verdict: l.verdict, rationale: l.rationale })) result.llm++;
             // Keep the reasoning ledger too (history) for meeting intents.
-            if (!isTask) await insertReasoning({ userId, workspaceId, meetingId: String(self.id), implId: l.id, verdict: l.verdict, rationale: l.rationale, tags: [l.verdict, l.relation] }).catch(() => {});
+            if (!isTask && !isSession) await insertReasoning({ userId, workspaceId, meetingId: String(self.id), implId: l.id, verdict: l.verdict, rationale: l.rationale, tags: [l.verdict, l.relation] }).catch(() => {});
             // Co-architect advisory: store the code read on the COMMIT itself (diff-grounded).
             if (l.assessment && itemById.get(l.id)?.type === 'commit') {
               await query(`UPDATE knowledge_item SET advisory_assessment=$2, advisory_note=$3 WHERE id=$1`, [l.id, l.assessment, l.suggestion]).catch(() => {});

@@ -703,19 +703,20 @@ export default function WorkspacePage({ allTasks, onSelectTask }: WorkspacePageP
               <span className="ml-0.5 min-w-[16px] h-4 px-1 rounded-full bg-app-accent text-app-accent-fg text-[10px] font-semibold flex items-center justify-center">{proposals.length}</span>
             </button>
           )}
-          {!isPrivate && !activeFolder && (
+          {!isPrivate && (
             <button
               onClick={() => setShowBrainMap(true)}
               className="flex items-center gap-1.5 px-2.5 py-1 rounded-md text-[12px] text-app-fg-subtle hover:bg-app-nav-hover-bg hover:text-app-fg transition-colors"
-              title="See meetings, Jira and GitHub linked as one graph"
+              title={activeFolder ? 'This project as one graph — meetings, Jira, GitHub and dev sessions, linked' : 'See meetings, Jira and GitHub linked as one graph'}
             >
-              <BrainCircuit size={12} strokeWidth={1.7} /> Brain map
+              <BrainCircuit size={12} strokeWidth={1.7} /> {activeFolder ? 'Project brain' : 'Brain map'}
             </button>
           )}
-          {!isPrivate && !activeFolder && (
+          {!isPrivate && (
             <button
               onClick={() => setShowIntegrations(true)}
               className="flex items-center gap-1.5 px-2.5 py-1 rounded-md text-[12px] text-app-fg-subtle hover:bg-app-nav-hover-bg hover:text-app-fg transition-colors"
+              title={activeFolder ? 'Map this project to its Jira project + GitHub repos' : undefined}
             >
               <Cable size={12} strokeWidth={1.7} /> Integrations
             </button>

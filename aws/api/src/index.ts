@@ -290,6 +290,9 @@ export const handler = async (event: APIGatewayProxyEvent): Promise<APIGatewayPr
       // nodes), then embed all new/changed items into the unified index. Bounded; best-effort.
       let ingested = 0; let embedded = 0;
       try { const { ingestMeetings } = await import('./connectors/meetingIngest'); ingested = (await ingestMeetings()).ingested; } catch (e: any) { console.error('meeting_ingest_failed', e?.message); }
+      // Keep folder tags fresh: a meeting FILED into a folder after ingestion gets its folder_id
+      // here (and its project's dev sessions are re-opened to link to it). Idempotent + bounded.
+      try { const { backfillItemFolders } = await import('./connectors/sync'); await backfillItemFolders(); } catch (e: any) { console.error('backfill_folders_failed', e?.message); }
       try { const { embedKnowledgeItems } = await import('./connectors/embed'); embedded = (await embedKnowledgeItems(96)).embedded; } catch (e: any) { console.error('brain_embed_failed', e?.message); }
       return { statusCode: 200, body: JSON.stringify({ ...r, ingested, embedded }) } as APIGatewayProxyResult;
     } catch (err: any) {
@@ -309,7 +312,10 @@ export const handler = async (event: APIGatewayProxyEvent): Promise<APIGatewayPr
       const { fingerprintCommits, backfillCommitSummaries } = await import('./connectors/github/enrich');
       const fp = await fingerprintCommits(20);                 // Tier 1: cheap, all commits
       const bf = await backfillCommitSummaries(6).catch(() => ({ enriched: 0, remaining: 0 }));   // Tier 2 drip, capped
-      return { statusCode: 200, body: JSON.stringify({ ...fp, backfill: bf }) } as APIGatewayProxyResult;
+      // Local dev sessions (Claude Code / Codex): lazy distill drip on the same cheap Flash tier.
+      let sessions = { distilled: 0, remaining: 0 };
+      try { const { distillSessions } = await import('./connectors/local/ingest'); sessions = await distillSessions(6); } catch (e: any) { console.error('session_distill_failed', e?.message); }
+      return { statusCode: 200, body: JSON.stringify({ ...fp, backfill: bf, sessions }) } as APIGatewayProxyResult;
     } catch (err: any) {
       console.error('brain_enrich_failed', JSON.stringify({ message: err?.message }));
       return { statusCode: 500, body: 'brain-enrich-error' } as APIGatewayProxyResult;
@@ -688,6 +694,16 @@ async function handleConnectors(method: string, segments: string[], userId: stri
     return ok(result);
   }
 
+  // POST /connectors/local/ingest?workspace= { sessions: SessionDigest[] } → ingest local Claude
+  // Code / Codex session digests (read + redacted on the desktop). Fast upsert (no LLM); the
+  // brain-enrich cron distills them lazily. The client sends only sessions whose cwd maps to a
+  // connected folder, attaching folderId per session.
+  if (method === 'POST' && id === 'local' && segments[2] === 'ingest') {
+    const sessions = parseBody(event)?.sessions;
+    const { ingestLocalSessions } = await import('./connectors/local/ingest');
+    return ok(await ingestLocalSessions(userId, qsWorkspace, Array.isArray(sessions) ? sessions : []));
+  }
+
   // GET /connectors/routing?workspace=[&folder=] → the (folder→workspace-fallback) project mapping.
   if (method === 'GET' && id === 'routing') {
     return ok(await getMapping(userId, qsWorkspace, event.queryStringParameters?.folder || null));
@@ -947,11 +963,30 @@ async function handleBrain(method: string, segments: string[], userId: string, e
     // Meetings are now knowledge_item rows (source='meeting'), so this single query covers
     // every brain node — meetings, Jira, GitHub. Scoping NODES by folder is enough: the client
     // drops any edge whose endpoints aren't both present, so only intra-project edges render.
-    const items = await query<any>(
-      `SELECT id, source, type, title, source_id, links, status FROM knowledge_item
-        WHERE user_id=$1 AND workspace_id=$2 AND ($3::uuid IS NULL OR folder_id=$3) LIMIT 2000`,
-      [userId, ws, folder],
-    ).catch(() => []);
+    // Workspace (aggregate) → every item. Folder (project) → the CONNECTED SUBGRAPH: items tagged
+    // to this project PLUS any item directly linked to one of them. So a meeting filed elsewhere
+    // that discusses this project, an as-yet-untagged commit, or a dev session all show CONNECTED —
+    // accurate lineage beats a strict tag filter (which would orphan cross-project nodes + drop edges).
+    const items = folder
+      ? await query<any>(
+          `WITH core AS (
+             SELECT id FROM knowledge_item WHERE user_id=$1 AND workspace_id=$2 AND folder_id=$3
+           ), nbr AS (
+             SELECT DISTINCT (CASE WHEN e.src_id = c.id::text THEN e.dst_id ELSE e.src_id END) AS oid
+               FROM brain_edge e JOIN core c ON (e.src_id = c.id::text OR e.dst_id = c.id::text)
+              WHERE e.user_id=$1 AND e.workspace_id=$2
+           )
+           SELECT id, source, type, title, source_id, links, status FROM knowledge_item
+            WHERE user_id=$1 AND workspace_id=$2
+              AND (id IN (SELECT id FROM core) OR id::text IN (SELECT oid FROM nbr))
+            LIMIT 2000`,
+          [userId, ws, folder],
+        ).catch(() => [])
+      : await query<any>(
+          `SELECT id, source, type, title, source_id, links, status FROM knowledge_item
+            WHERE user_id=$1 AND workspace_id=$2 LIMIT 2000`,
+          [userId, ws],
+        ).catch(() => []);
     const nodes: any[] = items.map((i: any) => ({ id: `item:${i.id}`, kind: 'item', source: i.source, type: i.type, title: i.title || i.source_id, url: i.links?.url ?? null, status: i.status ?? null }));
     // Reasoning lives ON the edge (verdict + rationale colour & explain the line — no more
     // floating reasoning nodes). Backfill verdicts from the brain_reasoning ledger so already-

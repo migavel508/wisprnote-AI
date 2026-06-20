@@ -17,7 +17,7 @@ import { folderResolverFor, WS_DEFAULT } from './routing';
 const SOURCE_CAP = 25;     // connected (workspace,source) pairs per tick
 const TIME_BUDGET_MS = 24_000;
 
-async function upsertItem(userId: string, workspaceId: string, it: KnowledgeItemInput, folderId: string | null): Promise<void> {
+export async function upsertItem(userId: string, workspaceId: string, it: KnowledgeItemInput, folderId: string | null): Promise<void> {
   // Read the prior row first so we can OBSERVE state changes (status transitions, brand-new
   // commits) and record them as events — the brain mirrors mutations, it doesn't just snapshot.
   const prior = await queryOne<{ id: string; status: string | null }>(
@@ -124,17 +124,31 @@ export async function backfillItemFolders(cap = 1000): Promise<{ tagged: number;
     }
   }
   // Meetings: tag folder from task_folders (their project membership), for all workspaces at once.
-  const mt = await queryOne<{ n: string }>(
+  // This is how a meeting FILED INTO A FOLDER (after it was first ingested) gets its folder_id — so
+  // it shows in that project's scoped view and becomes a candidate for the project's dev sessions.
+  const updRows = await query<{ id: string; workspace_id: string; folder_id: string }>(
     `WITH upd AS (
        UPDATE knowledge_item ki SET folder_id = sub.folder_id
          FROM (SELECT tf.task_id::text AS source_id, f.workspace_id, tf.folder_id
                  FROM task_folders tf JOIN folders f ON f.id = tf.folder_id) sub
         WHERE ki.source='meeting' AND ki.type='meeting' AND ki.source_id = sub.source_id
           AND ki.workspace_id = sub.workspace_id AND ki.folder_id IS DISTINCT FROM sub.folder_id
-        RETURNING 1)
-     SELECT count(*)::text n FROM upd`,
-  ).catch(() => ({ n: '0' }));
-  const meetingsTagged = Number(mt?.n ?? 0);
+        RETURNING ki.id, ki.workspace_id, sub.folder_id)
+     SELECT id::text AS id, workspace_id::text AS workspace_id, folder_id::text AS folder_id FROM upd`,
+  ).catch(() => []);
+  const meetingsTagged = updRows.length;
+  // A meeting just JOINED a project → re-open that folder's dev sessions so they re-link to it.
+  // (Sessions link OUTWARD to meetings; a session linked before the meeting was filed would never
+  // connect to it otherwise. Bounded: only fires for folders whose membership actually changed.)
+  const pairs = new Map<string, { ws: string; fid: string }>();
+  for (const r of updRows) pairs.set(`${r.workspace_id}:${r.folder_id}`, { ws: r.workspace_id, fid: r.folder_id });
+  for (const { ws, fid } of pairs.values()) {
+    await query(
+      `DELETE FROM brain_link_state WHERE workspace_id=$1 AND item_id IN (
+         SELECT id FROM knowledge_item WHERE workspace_id=$1 AND folder_id=$2 AND source IN ('claude-code','codex'))`,
+      [ws, fid],
+    ).catch(() => {});
+  }
   console.log('backfill_item_folders', JSON.stringify({ tagged, meetingsTagged, workspaces: wss.length }));
   return { tagged: tagged + meetingsTagged, workspaces: wss.length };
 }
