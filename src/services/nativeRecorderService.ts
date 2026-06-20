@@ -100,6 +100,18 @@ export async function stopRealtimeRecording(): Promise<string> {
   return await tauriInvoke<string>('stop_realtime_audio');
 }
 
+/** Pause realtime recording: releases the mic but keeps the Deepgram socket warm.
+ *  Near-instant — no pipeline teardown/rebuild. Throws on an older binary that lacks
+ *  the command, so callers can fall back to stop/start emulation. */
+export async function pauseRealtimeRecording(): Promise<void> {
+  await tauriInvoke<void>('pause_realtime_audio');
+}
+
+/** Resume realtime recording: rebuilds only the mic capture; the warm socket continues. */
+export async function resumeRealtimeRecording(): Promise<void> {
+  await tauriInvoke<void>('resume_realtime_audio');
+}
+
 export async function isRealtimeRecording(): Promise<boolean> {
   if (!isTauri()) return false;
   try {

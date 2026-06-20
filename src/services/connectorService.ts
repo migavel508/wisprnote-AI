@@ -92,6 +92,17 @@ export async function setProjectMapping(workspaceId: string, m: { source: 'jira'
   await authed(`/connectors/routing?workspace=${encodeURIComponent(workspaceId)}${folderQs(folderId)}`, { method: 'POST', body: JSON.stringify(m) }).catch(() => {});
 }
 
+/** Upload compact, redacted local dev-session digests (Claude Code / Codex) to the brain.
+ *  The desktop reads + redacts them locally; only the digest crosses the wire. */
+export async function ingestLocalSessions(workspaceId: string, sessions: unknown[]): Promise<{ upserted: number; skipped: number }> {
+  if (!sessions.length) return { upserted: 0, skipped: 0 };
+  const r = await authed(`/connectors/local/ingest?workspace=${encodeURIComponent(workspaceId)}`, {
+    method: 'POST', body: JSON.stringify({ sessions }),
+  });
+  if (!r.ok) throw new Error(`Local session ingest failed (${r.status})`);
+  return await r.json();
+}
+
 /** Connect a PAT-based connector (e.g. GitHub) by storing a validated token server-side. */
 export async function setConnectorToken(id: string, token: string, workspaceId?: string): Promise<{ connected: boolean; error?: string }> {
   const qs = workspaceId ? `?workspace=${encodeURIComponent(workspaceId)}` : '';

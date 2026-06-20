@@ -505,6 +505,10 @@ pub mod macos {
 
     pub struct RealtimeRecorder {
         is_recording: Arc<AtomicBool>,
+        // When set mid-recording, the capture session tears down the CoreAudio devices
+        // (mic released) but the Deepgram WebSocket is kept warm (see record_realtime).
+        // Flipping it is instant — no teardown/rebuild of the streaming pipeline.
+        paused: Arc<AtomicBool>,
         transcripts: Arc<Mutex<Vec<String>>>,
         join_handle: Option<std::thread::JoinHandle<()>>,
     }
@@ -513,6 +517,7 @@ pub mod macos {
         pub fn new() -> Self {
             Self {
                 is_recording: Arc::new(AtomicBool::new(false)),
+                paused: Arc::new(AtomicBool::new(false)),
                 transcripts: Arc::new(Mutex::new(Vec::new())),
                 join_handle: None,
             }
@@ -520,6 +525,24 @@ pub mod macos {
 
         pub fn is_recording(&self) -> bool {
             self.is_recording.load(Ordering::Relaxed)
+        }
+
+        /// Pause: release the mic (capture torn down) but keep the socket warm. Instant.
+        pub fn pause(&self) -> Result<(), String> {
+            if !self.is_recording.load(Ordering::Relaxed) {
+                return Err("Not recording".to_string());
+            }
+            self.paused.store(true, Ordering::Relaxed);
+            Ok(())
+        }
+
+        /// Resume: rebuild only the capture; the warm socket continues. Instant.
+        pub fn resume(&self) -> Result<(), String> {
+            if !self.is_recording.load(Ordering::Relaxed) {
+                return Err("Not recording".to_string());
+            }
+            self.paused.store(false, Ordering::Relaxed);
+            Ok(())
         }
 
         pub fn start(
@@ -538,12 +561,14 @@ pub mod macos {
             }
 
             self.is_recording.store(true, Ordering::Relaxed);
+            self.paused.store(false, Ordering::Relaxed);
 
             let is_recording = self.is_recording.clone();
+            let paused = self.paused.clone();
             let transcripts = self.transcripts.clone();
 
             let handle = std::thread::spawn(move || {
-                if let Err(e) = record_realtime(is_recording.clone(), transcripts, api_key, keyterms, language, app_handle) {
+                if let Err(e) = record_realtime(is_recording.clone(), paused, transcripts, api_key, keyterms, language, app_handle) {
                     eprintln!("Realtime recording error: {}", e);
                     is_recording.store(false, Ordering::Relaxed);
                 }
@@ -559,6 +584,7 @@ pub mod macos {
             }
 
             self.is_recording.store(false, Ordering::Relaxed);
+            self.paused.store(false, Ordering::Relaxed);
 
             if let Some(handle) = self.join_handle.take() {
                 let _ = handle.join();
@@ -583,8 +609,34 @@ pub mod macos {
         }
     }
 
+    /// Drain every transcript currently queued from Deepgram: emit each to the
+    /// frontend and accumulate FINALs into the shared list (dedup consecutive dupes).
+    /// Returns true if at least one message was received (used to pace the stop drain).
+    fn drain_transcripts(
+        transcriber: &mut DeepgramTranscriber,
+        transcripts: &Arc<Mutex<Vec<String>>>,
+        app_handle: &tauri::AppHandle,
+    ) -> bool {
+        use tauri::Emitter;
+        let mut received = false;
+        while let Some(transcript) = transcriber.try_recv_transcript() {
+            received = true;
+            let _ = app_handle.emit("realtime-transcript", &transcript);
+            if transcript.contains("[FINAL") {
+                if let Ok(mut t) = transcripts.lock() {
+                    let should_push = t.last().map(|prev| prev != &transcript).unwrap_or(true);
+                    if should_push {
+                        t.push(transcript);
+                    }
+                }
+            }
+        }
+        received
+    }
+
     fn record_realtime(
         is_recording: Arc<AtomicBool>,
+        paused: Arc<AtomicBool>,
         transcripts: Arc<Mutex<Vec<String>>>,
         api_key: String,
         keyterms: Option<Vec<String>>,
@@ -592,34 +644,55 @@ pub mod macos {
         app_handle: tauri::AppHandle,
     ) -> Result<(), anyhow::Error> {
         use crate::device_monitor;
+        use tauri::Emitter;
 
         // Spawn device change monitor for this recording session
         let (dev_tx, dev_rx) = std::sync::mpsc::channel();
         let _dev_monitor = device_monitor::spawn_monitor(dev_tx);
 
+        // The Deepgram WebSocket lives for the WHOLE recording — created once here and
+        // kept warm across pauses. Its task runs on this runtime, so `_rt` (and the enter
+        // guard) MUST outlive the recording. Pause tears down only the CoreAudio capture
+        // (mic released); the socket stays open via its 5s KeepAlive, so resume just
+        // rebuilds capture — no new token, no handshake, no drain.
+        const TARGET_HZ: u32 = 16_000;
+        let _rt = tokio::runtime::Runtime::new()
+            .map_err(|e| anyhow::anyhow!("Failed to create tokio runtime: {}", e))?;
+        let _rt_guard = _rt.enter();
+        let mut transcriber =
+            DeepgramTranscriber::new(api_key.clone(), TARGET_HZ, keyterms.clone(), language.clone());
+
         const MAX_ERROR_RETRIES: u32 = 3;
         let mut error_count: u32 = 0;
 
-        // Outer loop: restarts capture when device changes
+        // Outer loop: drives capture sessions, idles while paused, restarts on device change.
         while is_recording.load(Ordering::Relaxed) {
+            // While paused the mic is released (no capture session). Keep the socket warm
+            // and forward any trailing finals (the last words spoken before the pause).
+            if paused.load(Ordering::Relaxed) {
+                drain_transcripts(&mut transcriber, &transcripts, &app_handle);
+                std::thread::sleep(std::time::Duration::from_millis(20));
+                continue;
+            }
+
             // Drain any residual device events before starting a new session
             while dev_rx.try_recv().is_ok() {}
 
             match record_realtime_session(
                 &is_recording,
+                &paused,
                 &transcripts,
-                &api_key,
-                &keyterms,
-                &language,
+                &mut transcriber,
                 &app_handle,
                 &dev_rx,
             ) {
-                Ok(()) => break,
+                // A session ends when we pause or stop — loop back and let the pause
+                // branch / while-condition decide which it was.
+                Ok(()) => continue,
                 Err(e) => {
                     let msg = format!("{}", e);
                     if msg.contains("device_change") && is_recording.load(Ordering::Relaxed) {
                         eprintln!("Realtime recording: device changed, restarting capture...");
-                        use tauri::Emitter;
                         let _ = app_handle.emit("audio-device-restart", "restarting");
                         error_count = 0;
                         std::thread::sleep(std::time::Duration::from_millis(2000));
@@ -628,19 +701,35 @@ pub mod macos {
                         error_count += 1;
                         eprintln!("Realtime recording error (attempt {}/{}): {}", error_count, MAX_ERROR_RETRIES, e);
                         if error_count >= MAX_ERROR_RETRIES {
-                            use tauri::Emitter;
                             let _ = app_handle.emit("recording-error", format!("Recording failed after {} attempts: {}", MAX_ERROR_RETRIES, e));
                             is_recording.store(false, Ordering::Relaxed);
-                            return Err(e);
+                            break;
                         }
                         let backoff = std::time::Duration::from_millis(2000 * (error_count as u64));
                         std::thread::sleep(backoff);
                         continue;
                     } else {
-                        return Err(e);
+                        break;
                     }
                 }
             }
+        }
+
+        // Final stop: close the input so Deepgram flushes its trailing FINALs, then drain
+        // them ADAPTIVELY — exit as soon as ~400ms passes with nothing new, capped at 1.5s.
+        // (Replaces the old fixed 3.5s wait that ran in full on every stop AND every pause.)
+        transcriber.close_input();
+        let drain_cap = std::time::Instant::now() + std::time::Duration::from_millis(1500);
+        let mut last_recv = std::time::Instant::now();
+        loop {
+            if drain_transcripts(&mut transcriber, &transcripts, &app_handle) {
+                last_recv = std::time::Instant::now();
+            }
+            let now = std::time::Instant::now();
+            if now >= drain_cap || now.duration_since(last_recv) >= std::time::Duration::from_millis(400) {
+                break;
+            }
+            std::thread::sleep(std::time::Duration::from_millis(20));
         }
 
         eprintln!("Realtime recording stopped");
@@ -649,14 +738,12 @@ pub mod macos {
 
     fn record_realtime_session(
         is_recording: &Arc<AtomicBool>,
+        paused: &Arc<AtomicBool>,
         transcripts: &Arc<Mutex<Vec<String>>>,
-        api_key: &str,
-        keyterms: &Option<Vec<String>>,
-        language: &Option<String>,
+        transcriber: &mut DeepgramTranscriber,
         app_handle: &tauri::AppHandle,
         dev_rx: &std::sync::mpsc::Receiver<crate::device_monitor::DeviceChange>,
     ) -> Result<(), anyhow::Error> {
-        use tauri::Emitter;
 
         // CoreAudio name → CPAL mic (Bluetooth / HFP safe).
         let mic_ca = resolve_capture_input_device()?;
@@ -724,163 +811,123 @@ pub mod macos {
         std::thread::sleep(std::time::Duration::from_millis(500));
         while dev_rx.try_recv().is_ok() {}
 
-        // Create a dedicated tokio runtime for Deepgram WebSocket communication
-        let rt = tokio::runtime::Runtime::new()
-            .map_err(|e| anyhow::anyhow!("Failed to create tokio runtime: {}", e))?;
+        // Stream to Deepgram at 16 kHz, not the tap's native rate (~48 kHz). nova-3 is a
+        // 16 kHz model, so this is no accuracy loss but ~1/3 the upload bytes — the single
+        // biggest lever against latency/stutter/drop-outs in long meetings on a shared uplink.
+        const TARGET_HZ: u32 = 16_000;
+        let mut downsampler = StereoDownsampler::new(sample_rate, TARGET_HZ);
+        let mut device_changed = false;
+        // Per-chunk source buffers (mic + system, at tap rate) and the resampled,
+        // interleaved 16 kHz output staged before send.
+        let mut mic_buf: Vec<f32> = Vec::with_capacity(CHUNK_SIZE);
+        let mut sys_buf: Vec<f32> = Vec::with_capacity(CHUNK_SIZE);
+        let mut out_mic: Vec<f32> = Vec::with_capacity(CHUNK_SIZE);
+        let mut out_sys: Vec<f32> = Vec::with_capacity(CHUNK_SIZE);
+        // Half-duplex gate state: how many more chunks to keep the mic muted after the
+        // system last went active (hangover catches the echo/reverb tail + avoids chatter).
+        let mut mic_mute_hangover: i32 = 0;
+        const SYS_VAD_FLOOR: f32 = 0.01;   // system RMS above this ⇒ a participant is talking
+        const HANGOVER_CHUNKS: i32 = 8;    // ~250 ms at ~33 ms/chunk
 
-        let device_changed = std::sync::Arc::new(AtomicBool::new(false));
-        let device_changed_clone = device_changed.clone();
-
-        rt.block_on(async {
-            // Stream to Deepgram at 16 kHz, not the tap's native rate (~48 kHz). nova-3
-            // is a 16 kHz model, so this is no accuracy loss but ~1/3 the upload bytes —
-            // the single biggest lever against the latency/stutter/drop-outs that show up
-            // in long meetings on a shared uplink.
-            const TARGET_HZ: u32 = 16_000;
-            let mut downsampler = StereoDownsampler::new(sample_rate, TARGET_HZ);
-            let mut transcriber = DeepgramTranscriber::new(api_key.to_string(), TARGET_HZ, keyterms.clone(), language.clone());
-            // Per-chunk source buffers (mic + system, at tap rate) and the resampled,
-            // interleaved 16 kHz output staged before send.
-            let mut mic_buf: Vec<f32> = Vec::with_capacity(CHUNK_SIZE);
-            let mut sys_buf: Vec<f32> = Vec::with_capacity(CHUNK_SIZE);
-            let mut out_mic: Vec<f32> = Vec::with_capacity(CHUNK_SIZE);
-            let mut out_sys: Vec<f32> = Vec::with_capacity(CHUNK_SIZE);
-            // Half-duplex gate state: how many more chunks to keep the mic muted after the
-            // system last went active (hangover catches the echo/reverb tail + avoids chatter).
-            let mut mic_mute_hangover: i32 = 0;
-            const SYS_VAD_FLOOR: f32 = 0.01;   // system RMS above this ⇒ a participant is talking
-            const HANGOVER_CHUNKS: i32 = 8;    // ~250 ms at ~33 ms/chunk
-
-            while is_recording.load(Ordering::Relaxed) {
-                // Only react to actual input device changes (e.g. Bluetooth headset connected).
-                // Ignore DeviceListChanged — we trigger those ourselves when creating aggregate devices.
-                if let Ok(change) = dev_rx.try_recv() {
-                    match change {
-                        crate::device_monitor::DeviceChange::DefaultInputChanged => {
-                            eprintln!("Realtime: input device changed, signaling restart...");
-                            device_changed_clone.store(true, Ordering::Relaxed);
-                            break;
-                        }
-                        _ => {}
+        // Capture runs until we STOP or PAUSE. On pause this loop exits → the CoreAudio
+        // devices (this fn's locals) drop → the mic is released — while the WebSocket
+        // (owned by the caller) stays warm. The trailing-final close + drain on a true
+        // stop happens in record_realtime, not here, so the socket survives pauses.
+        while is_recording.load(Ordering::Relaxed) && !paused.load(Ordering::Relaxed) {
+            // Only react to actual input device changes (e.g. Bluetooth headset connected).
+            // Ignore DeviceListChanged — we trigger those ourselves when creating aggregate devices.
+            if let Ok(change) = dev_rx.try_recv() {
+                match change {
+                    crate::device_monitor::DeviceChange::DefaultInputChanged => {
+                        eprintln!("Realtime: input device changed, signaling restart...");
+                        device_changed = true;
+                        break;
                     }
+                    _ => {}
                 }
-
-                // Collect one chunk of mic + system frames (tap is the master clock).
-                while mic_buf.len() < CHUNK_SIZE {
-                    match system_consumer.try_pop() {
-                        Some(s) => {
-                            let m = mic_follower.next_mic_for_system_tick(
-                                &mut mic_consumer,
-                                mic_cpal_hz,
-                                sample_rate,
-                            );
-                            mic_buf.push(m);
-                            sys_buf.push(s);
-                        }
-                        None => break,
-                    }
-                }
-
-                // HALF-DUPLEX SOURCE GATING. The mic also picks up the participant's voice from
-                // the speakers (acoustic echo). Decide purely from the CLEAN system signal: if a
-                // participant is talking (system RMS above floor), mute the mic for this chunk so
-                // that voice stays only on ch1 (Participant) and never duplicates onto ch0 (You).
-                // A hangover keeps the mic muted briefly after the system goes quiet (reverb tail).
-                // Trade-off: true simultaneous speech favours the participant side. No echo canceller.
-                if mic_buf.len() >= CHUNK_SIZE {
-                    let sys_sq: f32 = sys_buf.iter().map(|s| s * s).sum();
-                    let sys_rms = (sys_sq / sys_buf.len() as f32).sqrt();
-                    if sys_rms > SYS_VAD_FLOOR {
-                        mic_mute_hangover = HANGOVER_CHUNKS;
-                    } else if mic_mute_hangover > 0 {
-                        mic_mute_hangover -= 1;
-                    }
-                    let mic_gain = if mic_mute_hangover > 0 { 0.0 } else { 1.0 };
-
-                    // Downsample (tap rate → 16 kHz) and interleave in one pass. The mic
-                    // gate is applied pre-resample so the gated participant echo never
-                    // reaches ch0 (You). A partial output window is carried in the
-                    // downsampler across chunks, so nothing is lost at boundaries.
-                    out_mic.clear();
-                    out_sys.clear();
-                    for i in 0..mic_buf.len() {
-                        downsampler.push(mic_buf[i] * mic_gain, sys_buf[i], &mut out_mic, &mut out_sys);
-                    }
-                    if !out_mic.is_empty() {
-                        let mut frame = Vec::with_capacity(out_mic.len() * 2);
-                        for i in 0..out_mic.len() {
-                            frame.push(out_mic[i]); // ch0 — you (gated)
-                            frame.push(out_sys[i]); // ch1 — participants
-                        }
-                        let _ = transcriber.send_audio(frame);
-                    }
-                    mic_buf.clear();
-                    sys_buf.clear();
-                }
-
-                // Poll for transcripts and emit to frontend
-                while let Some(transcript) = transcriber.try_recv_transcript() {
-                    let _ = app_handle.emit("realtime-transcript", &transcript);
-
-                    // Accumulate FINAL transcripts
-                    if transcript.contains("[FINAL") {
-                        if let Ok(mut t) = transcripts.lock() {
-                            let should_push = t.last().map(|prev| prev != &transcript).unwrap_or(true);
-                            if should_push {
-                                t.push(transcript.clone());
-                            }
-                        }
-                    }
-                }
-
-                tokio::time::sleep(std::time::Duration::from_millis(10)).await;
             }
 
-            // Flush any partial chunk (interleaved, mic gated by the last hangover state), then
-            // CLOSE the input so Deepgram flushes its trailing FINAL results — the last words you
-            // spoke (still shown as faded interim). Without closing first, those finals never
-            // arrive and the words are lost on stop.
-            if !mic_buf.is_empty() {
+            // Collect one chunk of mic + system frames (tap is the master clock).
+            while mic_buf.len() < CHUNK_SIZE {
+                match system_consumer.try_pop() {
+                    Some(s) => {
+                        let m = mic_follower.next_mic_for_system_tick(
+                            &mut mic_consumer,
+                            mic_cpal_hz,
+                            sample_rate,
+                        );
+                        mic_buf.push(m);
+                        sys_buf.push(s);
+                    }
+                    None => break,
+                }
+            }
+
+            // HALF-DUPLEX SOURCE GATING. The mic also picks up the participant's voice from
+            // the speakers (acoustic echo). Decide purely from the CLEAN system signal: if a
+            // participant is talking (system RMS above floor), mute the mic for this chunk so
+            // that voice stays only on ch1 (Participant) and never duplicates onto ch0 (You).
+            // A hangover keeps the mic muted briefly after the system goes quiet (reverb tail).
+            // Trade-off: true simultaneous speech favours the participant side. No echo canceller.
+            if mic_buf.len() >= CHUNK_SIZE {
+                let sys_sq: f32 = sys_buf.iter().map(|s| s * s).sum();
+                let sys_rms = (sys_sq / sys_buf.len() as f32).sqrt();
+                if sys_rms > SYS_VAD_FLOOR {
+                    mic_mute_hangover = HANGOVER_CHUNKS;
+                } else if mic_mute_hangover > 0 {
+                    mic_mute_hangover -= 1;
+                }
                 let mic_gain = if mic_mute_hangover > 0 { 0.0 } else { 1.0 };
+
+                // Downsample (tap rate → 16 kHz) and interleave in one pass. The mic
+                // gate is applied pre-resample so the gated participant echo never
+                // reaches ch0 (You). A partial output window is carried in the
+                // downsampler across chunks, so nothing is lost at boundaries.
                 out_mic.clear();
                 out_sys.clear();
                 for i in 0..mic_buf.len() {
-                    let s = *sys_buf.get(i).unwrap_or(&0.0);
-                    downsampler.push(mic_buf[i] * mic_gain, s, &mut out_mic, &mut out_sys);
+                    downsampler.push(mic_buf[i] * mic_gain, sys_buf[i], &mut out_mic, &mut out_sys);
                 }
                 if !out_mic.is_empty() {
                     let mut frame = Vec::with_capacity(out_mic.len() * 2);
                     for i in 0..out_mic.len() {
-                        frame.push(out_mic[i]);
-                        frame.push(out_sys[i]);
+                        frame.push(out_mic[i]); // ch0 — you (gated)
+                        frame.push(out_sys[i]); // ch1 — participants
                     }
                     let _ = transcriber.send_audio(frame);
                 }
+                mic_buf.clear();
+                sys_buf.clear();
             }
-            transcriber.close_input();
 
-            // Drain the flushed finals for up to ~3.5s (covers Deepgram's CloseStream flush).
-            let drain_until = tokio::time::Instant::now() + std::time::Duration::from_millis(3500);
-            loop {
-                while let Some(transcript) = transcriber.try_recv_transcript() {
-                    let _ = app_handle.emit("realtime-transcript", &transcript);
-                    if transcript.contains("[FINAL") {
-                        if let Ok(mut t) = transcripts.lock() {
-                            let should_push = t.last().map(|prev| prev != &transcript).unwrap_or(true);
-                            if should_push {
-                                t.push(transcript);
-                            }
-                        }
-                    }
-                }
-                if tokio::time::Instant::now() >= drain_until {
-                    break;
-                }
-                tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+            // Poll for transcripts → emit + accumulate finals.
+            drain_transcripts(transcriber, transcripts, app_handle);
+
+            std::thread::sleep(std::time::Duration::from_millis(10));
+        }
+
+        // Flush any partial chunk (interleaved, mic gated by the last hangover state) so the
+        // last words before a pause/stop reach Deepgram. We do NOT close the input here — the
+        // socket stays warm across pauses; only a true stop (record_realtime) closes + drains.
+        if !mic_buf.is_empty() {
+            let mic_gain = if mic_mute_hangover > 0 { 0.0 } else { 1.0 };
+            out_mic.clear();
+            out_sys.clear();
+            for i in 0..mic_buf.len() {
+                let s = *sys_buf.get(i).unwrap_or(&0.0);
+                downsampler.push(mic_buf[i] * mic_gain, s, &mut out_mic, &mut out_sys);
             }
-        });
+            if !out_mic.is_empty() {
+                let mut frame = Vec::with_capacity(out_mic.len() * 2);
+                for i in 0..out_mic.len() {
+                    frame.push(out_mic[i]);
+                    frame.push(out_sys[i]);
+                }
+                let _ = transcriber.send_audio(frame);
+            }
+        }
 
-        if device_changed.load(Ordering::Relaxed) {
+        if device_changed {
             return Err(anyhow::anyhow!("device_change"));
         }
 

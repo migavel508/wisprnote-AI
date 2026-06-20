@@ -18,6 +18,8 @@ const SOURCE_HUE: Record<string, { light: string; dark: string }> = {
   meeting: { light: '#7d951f', dark: '#b9d96a' },  // brand green (the "home" source)
   jira: { light: '#5a7fb5', dark: '#7aa6da' },     // muted blue
   github: { light: '#8b6fb0', dark: '#ab8fd4' },   // muted violet
+  'claude-code': { light: '#b06a3d', dark: '#d79b6e' }, // warm clay — local dev sessions
+  codex: { light: '#3d8a82', dark: '#6ec3b8' },         // teal — local dev sessions
 };
 // Verdict hues — the saturated, meaningful signal (kept distinct from the olive meeting green).
 const VERDICT_HUE: Record<string, { light: string; dark: string }> = {

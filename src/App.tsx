@@ -131,6 +131,8 @@ import {
   isSystemAudioRecording,
   startRealtimeRecording,
   stopRealtimeRecording,
+  pauseRealtimeRecording,
+  resumeRealtimeRecording,
   isRealtimeRecording,
   listenForTranscripts,
   RecordingMode,
@@ -1795,11 +1797,20 @@ export default function App() {
           }
         } else if (mode === 'realtime') {
           isRealtimePausedRef.current = true;
-          // Persist the faded text INSTANTLY as a committed line so pause never erases it.
+          // Commit the faded interim so the last words before the pause are kept.
           commitPendingInterim();
-          const partialTranscript = await safeStopRealtimeRecording();
-          if (partialTranscript.trim()) {
-            pausedRealtimeTranscriptRef.current.push(partialTranscript.trim());
+          // Warm pause: release the mic but keep the Deepgram socket alive — near-instant,
+          // no teardown. The continuous transcript keeps accumulating via events, so there's
+          // no per-pause partial to stash. Fall back to the old stop/start emulation on a
+          // binary that predates the command.
+          try {
+            await pauseRealtimeRecording();
+          } catch (cmdErr) {
+            log.warn('realtime_warm_pause_unavailable', { error: cmdErr instanceof Error ? cmdErr : undefined });
+            const partialTranscript = await safeStopRealtimeRecording();
+            if (partialTranscript.trim()) {
+              pausedRealtimeTranscriptRef.current.push(partialTranscript.trim());
+            }
           }
         } else if (mediaRecorderRef.current && mediaRecorderRef.current.state === 'recording') {
           mediaRecorderRef.current.pause();
@@ -1837,15 +1848,23 @@ export default function App() {
             await startSystemAudioRecording();
           }
         } else if (mode === 'realtime') {
-          // Short-lived token from the authed backend; real key never bundled.
-          const apiKey = await getDeepgramToken();
-          if (!unlistenRef.current) {
-            await attachRealtimeTranscriptListener();
+          // Warm resume: rebuild only the mic capture; the socket is still open — no token
+          // re-fetch, no handshake, no reconnect gap. Fall back to a full re-start on a
+          // binary without the command.
+          try {
+            await resumeRealtimeRecording();
+          } catch (cmdErr) {
+            log.warn('realtime_warm_resume_unavailable', { error: cmdErr instanceof Error ? cmdErr : undefined });
+            // Short-lived token from the authed backend; real key never bundled.
+            const apiKey = await getDeepgramToken();
+            if (!unlistenRef.current) {
+              await attachRealtimeTranscriptListener();
+            }
+            if (!realtimeEngineActiveRef.current && !(await isRealtimeRecording())) {
+              await startRealtimeRecording(apiKey, extractDeepgramKeyterms(prompt));
+            }
+            realtimeEngineActiveRef.current = true;
           }
-          if (!realtimeEngineActiveRef.current && !(await isRealtimeRecording())) {
-            await startRealtimeRecording(apiKey, extractDeepgramKeyterms(prompt));
-          }
-          realtimeEngineActiveRef.current = true;
           isRealtimePausedRef.current = false;
         } else if (mediaRecorderRef.current && mediaRecorderRef.current.state === 'paused') {
           mediaRecorderRef.current.resume();

@@ -73,13 +73,13 @@ export const CONNECTORS: ConnectorDef[] = [
     scopes: ['Read files & docs'],
   },
   {
-    id: 'claude-code', name: 'Claude Code', category: 'Dev & AI', access: 'Read', status: 'soon',
+    id: 'claude-code', name: 'Claude Code', category: 'Dev & AI', access: 'Read', status: 'live',
     via: 'local', docs: 'https://docs.claude.com/claude-code', icon: SquareTerminal,
     description: 'Bring your local Claude Code sessions in as engineering context.',
     scopes: ['Read local sessions'],
   },
   {
-    id: 'codex', name: 'Codex', category: 'Dev & AI', access: 'Read', status: 'soon',
+    id: 'codex', name: 'Codex', category: 'Dev & AI', access: 'Read', status: 'live',
     via: 'local', docs: 'https://platform.openai.com/docs', icon: Braces,
     description: 'Bring OpenAI Codex sessions in as additional context.',
     scopes: ['Read sessions'],
