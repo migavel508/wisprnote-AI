@@ -293,6 +293,8 @@ export const handler = async (event: APIGatewayProxyEvent): Promise<APIGatewayPr
       // Keep folder tags fresh: a meeting FILED into a folder after ingestion gets its folder_id
       // here (and its project's dev sessions are re-opened to link to it). Idempotent + bounded.
       try { const { backfillItemFolders } = await import('./connectors/sync'); await backfillItemFolders(); } catch (e: any) { console.error('backfill_folders_failed', e?.message); }
+      // Keep each connector's tool catalog (+ classification) fresh for the trust plane.
+      try { const { discoverAllConnectorTools } = await import('./mcp/toolPlane'); await discoverAllConnectorTools(25); } catch (e: any) { console.error('tool_discovery_failed', e?.message); }
       try { const { embedKnowledgeItems } = await import('./connectors/embed'); embedded = (await embedKnowledgeItems(96)).embedded; } catch (e: any) { console.error('brain_embed_failed', e?.message); }
       return { statusCode: 200, body: JSON.stringify({ ...r, ingested, embedded }) } as APIGatewayProxyResult;
     } catch (err: any) {
@@ -342,7 +344,12 @@ export const handler = async (event: APIGatewayProxyEvent): Promise<APIGatewayPr
     }
     try {
       const r = await runJiraAgentSweep();
-      return { statusCode: 200, body: JSON.stringify(r) } as APIGatewayProxyResult;
+      // Reconciliation loop: cross-tool gaps (commit shipped→ticket not moved; code diverged
+      // from intent) → proposed Jira actions into the SAME HITL queue. Propose-only.
+      let reconcile = { workspaces: 0, proposed: 0 };
+      try { const { runReconcileSweep } = await import('./connectors/jira/reconcile'); reconcile = await runReconcileSweep(); }
+      catch (e: any) { console.error('reconcile_sweep_failed', e?.message); }
+      return { statusCode: 200, body: JSON.stringify({ ...r, reconcile }) } as APIGatewayProxyResult;
     } catch (err: any) {
       console.error('jira_agent_sweep_failed', JSON.stringify({ message: err?.message }));
       return { statusCode: 500, body: 'jira-agent-sweep-error' } as APIGatewayProxyResult;
@@ -731,10 +738,44 @@ async function handleConnectors(method: string, segments: string[], userId: stri
     return ok({ ok: true, mapping: await getMapping(userId, qsWorkspace, folder) });
   }
 
+  // Custom connectors — user-added remote MCP servers. GET list · POST create · DELETE remove.
+  // Once created + connected, they flow through the SAME tool plane (discovery/permission/gate).
+  if (id === 'custom') {
+    const { createCustomConnector, listCustomConnectors, deleteCustomConnector } = await import('./mcp/customConnectors');
+    if (method === 'GET') return ok({ connectors: await listCustomConnectors(userId, qsWorkspace) });
+    if (method === 'POST' && !segments[2]) {
+      const b = parseBody(event);
+      const name = String(b.name || '').trim();
+      const url = String(b.url || '').trim();
+      if (!name || !/^https:\/\//i.test(url)) return badRequest('A name and an https Remote MCP server URL are required.');
+      // Probe: does the server require auth? An unauthenticated tools/list either works (no-auth) or 401s.
+      let needsAuth = true;
+      try { await mcpListTools({ id: 'probe', url, transport: 'streamable-http' } as any, ''); needsAuth = false; } catch { needsAuth = true; }
+      const row = await createCustomConnector(userId, qsWorkspace, {
+        name, url, oauthClientId: b.oauthClientId ? String(b.oauthClientId) : null,
+        oauthClientSecret: b.oauthClientSecret ? String(b.oauthClientSecret) : null,
+        mode: b.mode === 'managed' ? 'managed' : 'individual', auth: needsAuth ? 'oauth' : 'none',
+      });
+      if (!needsAuth) {
+        // No-auth server → connected immediately; discover its tools now.
+        await storeToken(userId, row.slug, { access_token: '' }, null, null, qsWorkspace).catch(() => {});
+        try { const { discoverConnectorTools } = await import('./mcp/toolPlane'); await discoverConnectorTools(userId, qsWorkspace, row.slug); } catch { /* fills on the sync cron */ }
+      }
+      return ok({ slug: row.slug, name: row.name, needsAuth });
+    }
+    if (method === 'DELETE' && segments[2]) {
+      await deleteCustomConnector(userId, qsWorkspace, segments[2]).catch(() => {});
+      await deleteToken(userId, segments[2], qsWorkspace).catch(() => {});
+      return ok({ ok: true });
+    }
+    return notFound();
+  }
+
   // POST /connectors/{id}/pat?workspace= { token } → connect via a Personal Access Token
   // (for MCP servers whose OAuth lacks DCR, e.g. GitHub). Validated against the live server.
   if (method === 'POST' && id && segments[2] === 'pat') {
-    const server = getMcpServer(id);
+    const { getServerConfig } = await import('./mcp/customConnectors');
+    const server = await getServerConfig(userId, qsWorkspace, id);
     if (!server?.url) return badRequest('connector has no MCP endpoint');
     const token = String(parseBody(event).token || '').trim();
     if (!token) return badRequest('token required');
@@ -744,15 +785,19 @@ async function handleConnectors(method: string, segments: string[], userId: stri
       return ok({ connected: false, error: `Token was rejected by ${id}. Check the token and its scopes.`, detail: String(e?.message || '').slice(0, 160) });
     }
     await storeToken(userId, id, { access_token: token }, null, server.scopes ?? null, qsWorkspace);
+    // Registration: discover + classify this connector's tools so the trust plane has its catalog.
+    try { const { discoverConnectorTools } = await import('./mcp/toolPlane'); await discoverConnectorTools(userId, qsWorkspace, id); } catch { /* catalog also fills on the sync cron */ }
     return ok({ connected: true });
   }
 
-  // POST /connectors/{id}/oauth-url { workspace } → discover + DCR + PKCE authorize URL.
+  // POST /connectors/{id}/oauth-url { workspace } → discover → (pre-registered client OR DCR) → PKCE URL.
   if (method === 'POST' && id && segments[2] === 'oauth-url') {
-    const server = getMcpServer(id);
-    if (!server || !server.url) return badRequest('connector has no MCP endpoint');
     const workspaceId = String(parseBody(event).workspace || ACCOUNT_SCOPE);
-    const { authorizeUrl, inflight } = await beginMcpOAuth(server, CONNECTOR_REDIRECT_URI);
+    const { getServerConfig, getCustomConnectorOAuthClient } = await import('./mcp/customConnectors');
+    const server = await getServerConfig(userId, workspaceId, id);
+    if (!server || !server.url) return badRequest('connector has no MCP endpoint');
+    const customClient = id.startsWith('custom-') ? await getCustomConnectorOAuthClient(userId, workspaceId, id).catch(() => null) : null;
+    const { authorizeUrl, inflight } = await beginMcpOAuth(server, CONNECTOR_REDIRECT_URI, customClient || undefined);
     await query(
       `INSERT INTO oauth_state (state, user_id, source, workspace_id, inflight) VALUES ($1,$2,$3,$4,$5)
        ON CONFLICT (state) DO UPDATE SET inflight=EXCLUDED.inflight, workspace_id=EXCLUDED.workspace_id, created_at=NOW()`,
@@ -787,7 +832,28 @@ async function handleConnectors(method: string, segments: string[], userId: stri
       row.workspace_id || ACCOUNT_SCOPE,
     );
     await query(`DELETE FROM oauth_state WHERE state=$1`, [state]);
+    // Registration: discover + classify this connector's tools so the trust plane has its catalog.
+    try { const { discoverConnectorTools } = await import('./mcp/toolPlane'); await discoverConnectorTools(userId, row.workspace_id || ACCOUNT_SCOPE, id); } catch { /* catalog also fills on the sync cron */ }
     return ok({ connected: true });
+  }
+
+  // GET /connectors/{id}/tools?workspace= → the discovered tool catalog + each tool's RESOLVED
+  // permission (allow|ask|deny). Powers the per-tool permission editor (the connector card UI).
+  if (method === 'GET' && id && segments[2] === 'tools') {
+    const { listConnectorTools } = await import('./mcp/toolPlane');
+    return ok({ tools: await listConnectorTools(userId, qsWorkspace, id) });
+  }
+  // POST /connectors/{id}/tool-permission?workspace= { tool, behavior } → set/clear a per-tool
+  // (or connector-wide tool='*') allow|ask|deny rule. Per-tool governance = the trust plane.
+  if (method === 'POST' && id && segments[2] === 'tool-permission') {
+    const b = parseBody(event);
+    const tool = String(b.tool || '').trim();
+    if (!tool) return badRequest('tool required');
+    const behavior = b.behavior == null ? null : String(b.behavior);
+    if (behavior && !['allow', 'ask', 'deny'].includes(behavior)) return badRequest('behavior must be allow|ask|deny');
+    const { setToolPermission } = await import('./mcp/toolPlane');
+    await setToolPermission(userId, qsWorkspace, id, tool, behavior as any);
+    return ok({ ok: true });
   }
 
   return notFound();

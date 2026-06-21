@@ -6,6 +6,7 @@ import {
   CalendarDays,
   Bell,
   Plug,
+  Headphones,
   CircleHelp,
   Building2,
   Users,
@@ -18,6 +19,7 @@ import type { AuthSession } from '../services/awsAuthService';
 import PreferencesTab from './settings/PreferencesTab';
 import BillingTab from './settings/BillingTab';
 import ConnectionsTab from './settings/ConnectionsTab';
+import AudioDevicesPage from './AudioDevicesPage';
 import { formatDisplayName, formatDisplayInitials } from '../lib/displayName';
 
 export type SettingsTab =
@@ -26,6 +28,7 @@ export type SettingsTab =
   | 'calendar'
   | 'notifications'
   | 'connectors'
+  | 'devices'
   | 'help'
   | 'workspace-general'
   | 'team'
@@ -45,6 +48,7 @@ const PERSONAL_ITEMS: { id: SettingsTab; label: string; icon: typeof User }[] = 
   { id: 'calendar', label: 'Calendar', icon: CalendarDays },
   { id: 'notifications', label: 'Notifications', icon: Bell },
   { id: 'connectors', label: 'Connectors', icon: Plug },
+  { id: 'devices', label: 'Devices', icon: Headphones },
   { id: 'help', label: 'Get help', icon: CircleHelp },
 ];
 
@@ -60,7 +64,7 @@ function ComingSoon({ title }: { title: string }) {
   return (
     <div className="max-w-[680px] mx-auto px-8 pb-16">
       <h1 className="text-[28px] font-serif text-app-fg tracking-[-0.02em] pt-2 mb-1">{title}</h1>
-      <div className="mt-10 rounded-2xl border border-dashed border-app-divider px-6 py-10 text-center">
+      <div className="mt-10 rounded-xl border border-dashed border-app-divider px-6 py-10 text-center">
         <div className="text-[13px] text-app-fg-subtle tracking-[-0.01em]">
           This section is coming next. Phase 3 will build it out.
         </div>
@@ -75,6 +79,7 @@ const TAB_TITLES: Record<SettingsTab, string> = {
   calendar: 'Calendar',
   notifications: 'Notifications',
   connectors: 'Connectors',
+  devices: 'Devices',
   help: 'Get help',
   'workspace-general': 'General',
   team: 'Team',
@@ -97,7 +102,7 @@ function NavButton({
   return (
     <button
       onClick={onClick}
-      className={`w-full flex items-center gap-2.5 px-2.5 py-[7px] text-[13px] rounded-xl transition-all duration-200 ${
+      className={`w-full flex items-center gap-2.5 px-2.5 py-[7px] text-[13px] rounded-lg transition-all duration-200 ${
         active
           ? 'bg-app-nav-active-bg text-app-nav-active-fg font-medium shadow-sm'
           : 'text-app-nav-fg hover:bg-app-nav-hover-bg hover:text-app-nav-fg-hover'
@@ -179,7 +184,7 @@ export default function SettingsPage({ session, onClose, onSignOut }: SettingsPa
         <div className="px-2.5 pb-4">
           <button
             onClick={onSignOut}
-            className="w-full flex items-center gap-2.5 px-2.5 py-[7px] text-[13px] rounded-xl text-red-600 dark:text-red-400 hover:bg-red-50 dark:hover:bg-red-950/30 transition-all duration-200"
+            className="w-full flex items-center gap-2.5 px-2.5 py-[7px] text-[13px] rounded-lg text-red-600 dark:text-red-400 hover:bg-red-50 dark:hover:bg-red-950/30 transition-all duration-200"
           >
             <LogOut size={15} strokeWidth={1.5} className="flex-shrink-0" />
             <span className="tracking-[-0.01em] font-medium">Sign out</span>
@@ -194,7 +199,7 @@ export default function SettingsPage({ session, onClose, onSignOut }: SettingsPa
           <button
             onClick={onClose}
             title="Back"
-            className="w-8 h-8 rounded-full bg-app-canvas border border-app-divider flex items-center justify-center text-app-fg-muted hover:text-app-fg hover:border-app-fg-subtle/40 transition-colors"
+            className="w-8 h-8 rounded-lg bg-app-canvas border border-app-divider flex items-center justify-center text-app-fg-muted hover:text-app-fg hover:border-app-fg-subtle/40 transition-colors"
           >
             <Home size={13} strokeWidth={1.8} />
           </button>
@@ -210,6 +215,8 @@ export default function SettingsPage({ session, onClose, onSignOut }: SettingsPa
             <BillingTab session={session} />
           ) : tab === 'connectors' ? (
             <ConnectionsTab />
+          ) : tab === 'devices' ? (
+            <AudioDevicesPage />
           ) : (
             <ComingSoon title={TAB_TITLES[tab]} />
           )}

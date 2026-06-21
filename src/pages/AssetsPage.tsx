@@ -139,7 +139,7 @@ export default function AssetsPage({
                 {!selectedAsset ? (
                   <div className="flex-1 flex flex-col items-center justify-center text-center">
                     <Sparkles className="w-12 h-12 mb-4 opacity-10" />
-                    <h3 className="text-lg font-serif italic opacity-30">Asset Preview</h3>
+                    <h3 className="text-lg font-serif font-semibold opacity-30">Asset Preview</h3>
                     <p className="text-xs opacity-30 mt-2">Generate or select an asset to see its structure here</p>
                   </div>
                 ) : (

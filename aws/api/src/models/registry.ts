@@ -15,7 +15,7 @@
  * file. Keep cross-runtime choices intentionally aligned.
  */
 
-export type Provider = 'gemini' | 'anthropic' | 'deepgram';
+export type Provider = 'gemini' | 'anthropic' | 'deepgram' | 'openai' | 'openrouter';
 
 export interface ModelSpec {
   provider: Provider;
@@ -44,6 +44,11 @@ export const MODELS = {
   chatGemini: { provider: 'gemini', primary: 'gemini-2.5-flash' },
   /** Audio transcription — Deepgram (ai.ts: /ai/transcribe, deepgram-token, metering). */
   transcription: { provider: 'deepgram', primary: 'nova-3' },
+  /** AGENTIC CHAT loop — the default tool-use model. Claude via DIRECT Anthropic API
+   *  (NOT OpenRouter). The loop is model-agnostic via the agentTurn provider abstraction;
+   *  this is just the default when the user hasn't picked a model. Strong tool-use +
+   *  cost-reasonable (matches chatClaude); the user can pick GPT/Gemini in the picker. */
+  agentChat: { provider: 'anthropic', primary: 'claude-sonnet-4-6' },
 } as const satisfies Record<string, ModelSpec>;
 
 export type ModelKey = keyof typeof MODELS;

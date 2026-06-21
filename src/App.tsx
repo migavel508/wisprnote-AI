@@ -10,7 +10,6 @@ import {
   ChevronLeft,
   Play,
   Layers,
-  Clock,
   FileText,
   History,
   BookOpen,
@@ -19,7 +18,6 @@ import {
   MoreHorizontal,
   Trash2,
   ExternalLink,
-  MessageSquare,
   Send,
   Image as ImageIcon,
   PanelLeftClose,
@@ -29,17 +27,19 @@ import {
   Users,
   Mail,
   Share2,
-  Network,
   Circle,
   X,
   Mic,
   StopCircle,
   PauseCircle,
   PlayCircle,
-  AudioLines,
+  House,
   PenLine,
 } from 'lucide-react';
-import WindowToggleIcon from './components/WindowToggleIcon';
+import ChatIcon from './components/ChatIcon';
+import MeetingsIcon from './components/MeetingsIcon';
+import GraphSparkleIcon from './components/GraphSparkleIcon';
+import SpacesPage from './pages/SpacesPage';
 import { motion, AnimatePresence } from 'motion/react';
 import Markdown from 'react-markdown';
 import remarkGfm from 'remark-gfm';
@@ -158,6 +158,8 @@ import {
   emitRecordingIndicatorState,
   setMeetingPrompt,
   listenForMeetingPromptStart,
+  listenForOpenChatFromIndicator,
+  focusMainWindow,
 } from './services/micDetectionService';
 import type { Entitlements } from './services/awsService';
 import ChatPage from './pages/ChatPage';
@@ -193,7 +195,7 @@ declare global {
   }
 }
 
-type View = 'process' | 'history' | 'notes' | 'chat' | 'knowledge' | 'notebooks' | 'audio-devices' | 'shared' | 'workspace' | 'people' | 'settings';
+type View = 'process' | 'history' | 'notes' | 'chat' | 'knowledge' | 'notebooks' | 'audio-devices' | 'shared' | 'workspace' | 'people' | 'settings' | 'spaces';
 type Status = 'idle' | 'splitting' | 'processing' | 'finalizing' | 'completed' | 'error';
 type NoteTab = 'transcription' | 'summary' | 'notes';
 
@@ -289,12 +291,12 @@ function MobileBottomNav({ currentView, onViewChange, status }: {
   onViewChange: (view: MobileView) => void;
   status: string;
 }) {
-  const tabs: { id: MobileView; label: string; icon: typeof AudioLines }[] = [
-    { id: 'process', label: 'Record', icon: AudioLines },
+  const tabs: { id: MobileView; label: string; icon: typeof House }[] = [
+    { id: 'process', label: 'Home', icon: House },
     { id: 'notes', label: 'Notes', icon: PenLine },
-    { id: 'chat', label: 'Chat', icon: MessageSquare },
-    { id: 'history', label: 'History', icon: Clock },
-    { id: 'knowledge', label: 'Graph', icon: Network },
+    { id: 'chat', label: 'Chat', icon: ChatIcon },
+    { id: 'history', label: 'History', icon: MeetingsIcon },
+    { id: 'knowledge', label: 'Graph', icon: GraphSparkleIcon },
   ];
 
   return (
@@ -347,6 +349,7 @@ export default function App() {
     if (path === '/workspace') return 'workspace';
     if (path === '/people') return 'people';
     if (path.startsWith('/settings')) return 'settings';
+    if (path.startsWith('/spaces')) return 'spaces';
     return 'process';
   };
   
@@ -381,6 +384,9 @@ export default function App() {
         break;
       case 'settings':
         navigate('/settings');
+        break;
+      case 'spaces':
+        navigate('/spaces');
         break;
     }
   };
@@ -626,6 +632,29 @@ export default function App() {
       } catch { /* not in Tauri / API unavailable */ }
     })();
     return () => { cancelled = true; if (unlisten) unlisten(); };
+  }, []);
+
+  // macOS desktop draws native traffic-light controls over the top-left of the window
+  // (tauri titleBarStyle "Overlay"), so the sidebar header must inset below them. Windows
+  // (and the web build) have no such controls — their layout is left exactly as-is.
+  // Seed from navigator synchronously (no first-paint flash on the common case), then confirm
+  // with the AUTHORITATIVE Rust `get_os_platform` (compile-time OS) — navigator UA can't be relied on.
+  const [isMacDesktop, setIsMacDesktop] = useState<boolean>(() =>
+    typeof navigator !== 'undefined'
+    && !!(window as any).__TAURI_INTERNALS__
+    && /mac/i.test((navigator as any).userAgentData?.platform || navigator.platform || navigator.userAgent || ''),
+  );
+  useEffect(() => {
+    if (!(window as any).__TAURI_INTERNALS__) { setIsMacDesktop(false); return; }
+    let cancelled = false;
+    (async () => {
+      try {
+        const { invoke } = await import('@tauri-apps/api/core');
+        const os = await invoke<string>('get_os_platform');
+        if (!cancelled) setIsMacDesktop(os === 'macos');
+      } catch { /* keep the navigator-based seed */ }
+    })();
+    return () => { cancelled = true; };
   }, []);
 
   // Compact (narrow) window → default to the icon rail (closed); the user can
@@ -1377,6 +1406,7 @@ export default function App() {
       void setRecordingIndicator(true);
     } else {
       void setRecordingActive(false); // re-enable normal App Nap when idle
+      void emitRecordingIndicatorState({ recording: false, paused: false, seconds: 0, label: null });
       void setRecordingIndicator(false);
       void setDetectionPaused(false);
     }
@@ -1388,13 +1418,32 @@ export default function App() {
   useEffect(() => {
     const isTauri = !!(window as any).__TAURI_INTERNALS__;
     if (!isTauri || !isRecording) return;
+    const recent = realtimeTranscriptRef.current.slice(-5);
+    const interim = interimTranscriptRef.current.trim();
+    const transcript = [...recent, interim].filter(Boolean).join('\n');
     void emitRecordingIndicatorState({
       recording: true,
       paused: isPaused,
       seconds: recordingTime,
       label: pendingMeetingLabelRef.current,
+      transcript,
     });
-  }, [isRecording, isPaused, recordingTime]);
+  }, [isRecording, isPaused, recordingTime, interimTranscript, realtimeTranscript]);
+
+  // The indicator's hover panel can request "open chat" — focus the main window
+  // and jump to the standalone all-meetings chat.
+  useEffect(() => {
+    const isTauri = !!(window as any).__TAURI_INTERNALS__;
+    if (!isTauri) return;
+    let unlisten: (() => void) | undefined;
+    let cancelled = false;
+    listenForOpenChatFromIndicator(() => {
+      void focusMainWindow();
+      setSelectedTask(null);
+      setCurrentView('chat');
+    }).then((fn) => { if (cancelled) fn(); else unlisten = fn; });
+    return () => { cancelled = true; unlisten?.(); };
+  }, []);
 
   // The meeting-detection prompt overlay is shown directly from Rust the moment
   // a meeting is detected (not throttled like a backgrounded WebView). Here we
@@ -4752,7 +4801,7 @@ export default function App() {
   }
 
   return (
-    <div className="h-screen w-screen bg-app-canvas text-app-fg font-[system-ui] selection:bg-app-fg selection:text-app-panel flex flex-col overflow-hidden">
+    <div id="app-shell" className="h-full w-full bg-app-canvas text-app-fg selection:bg-app-fg selection:text-app-panel flex flex-col overflow-hidden relative">
       {/* Free-tier meeting limit → upgrade prompt (portal) */}
       <FreeLimitModal
         open={showLimitModal}
@@ -4876,21 +4925,9 @@ export default function App() {
           sits next to the traffic lights (reference layout). */}
       <div
         data-tauri-drag-region
-        className="relative z-[80] flex flex-shrink-0 h-[38px] items-center bg-app-canvas"
+        className={`absolute ${isSidebarOpen && !isCompactMode ? 'left-[200px]' : 'left-[52px]'} right-0 top-0 z-[80] flex h-[38px] items-center bg-transparent`}
         style={{ WebkitUserSelect: 'none', userSelect: 'none' }}
       >
-        {/* Reserve space for the traffic lights, then the sidebar toggle. In
-            fullscreen the lights are hidden, so collapse the gap and let the
-            toggle sit at the top-left corner. */}
-        <div className={`flex-shrink-0 ${isFullscreen ? 'w-2' : 'w-[78px]'}`} />
-        <button
-          onClick={() => setIsSidebarOpen(!isSidebarOpen)}
-          data-tauri-drag-region="false"
-          className="w-8 h-8 flex items-center justify-center text-app-fg-subtle hover:text-app-fg hover:bg-app-nav-active-bg rounded-lg transition-all duration-200"
-          title="Toggle sidebar"
-        >
-          <WindowToggleIcon open={isSidebarOpen} size={19} strokeWidth={1.8} />
-        </button>
       </div>
 
       {/* Full-window Settings — renders as a top-level overlay (its own nav +
@@ -4911,6 +4948,26 @@ export default function App() {
               session={session}
               onClose={() => setCurrentView('process')}
               onSignOut={() => { clearUserState(); signOut(); }}
+            />
+          </motion.div>
+        )}
+      </AnimatePresence>
+
+      {/* Full-window Spaces — workspace/space management, reached from the
+          sidebar "Spaces" arrow. Renders as a top-level overlay like Settings. */}
+      <AnimatePresence>
+        {currentView === 'spaces' && (
+          <motion.div
+            key="spaces-overlay"
+            initial={{ opacity: 0 }}
+            animate={{ opacity: 1 }}
+            exit={{ opacity: 0 }}
+            transition={{ duration: 0.18 }}
+            className="fixed inset-0 z-[90] bg-app-panel"
+          >
+            <SpacesPage
+              onClose={() => setCurrentView('process')}
+              onOpenSpace={(ws) => { setWorkspaceSelection(ws.id, null); setCurrentView('workspace'); }}
             />
           </motion.div>
         )}
@@ -4943,6 +5000,7 @@ export default function App() {
           onSignOut={() => { clearUserState(); signOut(); }}
           status={status}
           isCompactMode={isCompactMode}
+          macInset={isMacDesktop && !isFullscreen}
         />
       </div>
 
@@ -4952,10 +5010,8 @@ export default function App() {
           region, padding, rounded panel + border) instead of the bare mobile
           fallback — the inner layout looks identical to the wide window. */}
       <div className="flex-1 flex flex-col overflow-hidden relative min-h-0">
-        {/* The shared global top bar already provides the drag region + top
-            spacing, so the content starts right beneath it (no extra top gap). */}
-        <div className={`flex-1 flex overflow-hidden ${isCompactMode ? 'pr-2.5 pl-1.5 pb-2.5 pt-1' : 'p-0 md:pr-2.5 md:pl-1.5 md:pb-2.5 md:pt-1'}`}>
-        <main className={`flex-1 bg-app-panel w-full relative overflow-y-auto shadow-sm text-app-fg ${isCompactMode ? 'rounded-3xl border border-app-border' : 'rounded-none md:rounded-3xl md:border md:border-app-border'}`}>
+        <div className={`flex-1 flex overflow-hidden pr-2.5 pl-1.5 pb-2.5 ${isMacDesktop && !isFullscreen ? 'pt-[14px]' : 'pt-2.5'}`}>
+        <main className={`flex-1 bg-app-panel w-full relative overflow-y-auto shadow-sm text-app-fg ${isCompactMode ? 'rounded-3xl border border-app-border' : 'rounded-3xl border border-app-border'}`}>
           <AnimatePresence mode="wait">
             {currentView === 'process' && (
               <motion.div 

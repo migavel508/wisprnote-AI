@@ -89,14 +89,23 @@ async function dcrRegister(regEndpoint: string, redirectUri: string, scope: stri
   return { client_id: j.client_id, client_secret: j.client_secret ?? null };
 }
 
-/** Begin the flow: discover → DCR → build the PKCE authorize URL. */
-export async function beginMcpOAuth(server: McpServer, redirectUri: string): Promise<{ authorizeUrl: string; inflight: OAuthInflight }> {
+/** Begin the flow: discover → (pre-registered client OR DCR) → build the PKCE authorize URL.
+ *  `providedClient` = a custom connector's own OAuth app (Advanced settings); when present we
+ *  skip Dynamic Client Registration and use it — supporting servers that don't advertise DCR. */
+export async function beginMcpOAuth(server: McpServer, redirectUri: string, providedClient?: { clientId: string; clientSecret?: string | null }): Promise<{ authorizeUrl: string; inflight: OAuthInflight }> {
   if (!server.url) throw new Error(`MCP server ${server.id} has no endpoint`);
   const meta = await discoverMcpAuth(server.url);
-  if (!meta.registration_endpoint) throw new Error(`MCP server ${server.id} does not advertise DCR (registration_endpoint)`);
 
   const scope = [...new Set([...(server.scopes ?? []), 'offline_access'])].join(' ');
-  const { client_id, client_secret } = await dcrRegister(meta.registration_endpoint, redirectUri, scope);
+  let client_id: string; let client_secret: string | null;
+  if (providedClient?.clientId) {
+    client_id = providedClient.clientId;
+    client_secret = providedClient.clientSecret ?? null;
+  } else {
+    if (!meta.registration_endpoint) throw new Error(`${server.id} doesn't support automatic registration — add an OAuth Client ID in Advanced settings.`);
+    const reg = await dcrRegister(meta.registration_endpoint, redirectUri, scope);
+    client_id = reg.client_id; client_secret = reg.client_secret;
+  }
 
   const codeVerifier = b64url(randomBytes(32));
   const codeChallenge = b64url(createHash('sha256').update(codeVerifier).digest());

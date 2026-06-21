@@ -284,8 +284,22 @@ async function findTransitionId(ctx: JiraCtx, issueKey: string, status: string |
   return null;
 }
 
+// Map our Jira ops → the underlying Atlassian MCP tool name, so the trust gate keys off the
+// SAME tool identity the permission catalog discovered.
+const JIRA_OP_TOOL: Record<JiraOp, string> = {
+  create: 'createJiraIssue', update: 'editJiraIssue', assign: 'editJiraIssue',
+  comment: 'addCommentToJiraIssue', transition: 'transitionJiraIssue', close: 'transitionJiraIssue',
+};
+
 export async function executeJiraAction(userId: string, workspaceId: string, p: JiraActionProposal, opts: { audit?: boolean } = {}): Promise<JiraActionResult> {
   const doAudit = opts.audit !== false;
+  // TRUST GATE — same chokepoint as the generic executor: a tool set to "never" can't run.
+  const { resolvePermission } = await import('../../mcp/toolPlane');
+  const gateTool = JIRA_OP_TOOL[p.operation];
+  if (gateTool) {
+    const perm = await resolvePermission(userId, workspaceId, 'jira', gateTool).catch(() => null);
+    if (perm?.behavior === 'deny') return { ok: false, operation: p.operation, message: `Blocked by policy — “${gateTool}” is set to never run.` };
+  }
   const ctx = await context(userId, workspaceId);
   if (!ctx) return { ok: false, operation: p.operation, message: 'Jira is not connected in this workspace.' };
   const link = (key: string) => ctx.siteUrl ? `${ctx.siteUrl}/browse/${key}` : undefined;

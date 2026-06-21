@@ -12,6 +12,7 @@ import {
 import { recordTokenUsage, recordAudioUsage } from './usage';
 import { handleChatAgent } from './chatAgent';
 import { MODELS } from './models/registry';
+import { runAgentTurn, providerFor } from './chat/agentTurn';
 
 /**
  * Authenticated AI proxy. Every route sits BEHIND verifyToken (see the router in
@@ -163,6 +164,68 @@ async function routeAI(
     return handleChatAgent(userId, body);
   }
 
+  if (sub === 'agent-turn') {
+    // AGENTIC CHAT loop — ONE tool-capable model turn, provider-abstracted.
+    // The client orchestrates the loop (plan → tool → gated exec → repeat); this
+    // endpoint just runs a single normalized turn for the chosen model so the
+    // provider key never leaves the server. (Phase 0 + 1.)
+    const model = String(body.model || MODELS.agentChat.primary);
+    if (!Array.isArray(body.messages)) return badRequest('messages required');
+    const provider = providerFor(model, body.provider);
+    try {
+      // Phase 1 — TOOL EXPOSURE. When a workspace is supplied, assemble the toolset
+      // server-side from the tool plane (built-ins + connected-connector tools, deny-filtered,
+      // namespaced mcp__connector__tool). The client never sees the raw catalog. Any tools the
+      // client passes explicitly are appended (de-duplicated by name).
+      let tools = Array.isArray(body.tools) ? [...body.tools] : [];
+      if (body.workspaceId && body.exposeConnectorTools !== false) {
+        const { buildAgentToolset } = await import('./chat/agentTools');
+        const { tools: built } = await buildAgentToolset(userId, String(body.workspaceId), { connectorTools: body.connectorTools !== false });
+        const seen = new Set(tools.map((t: any) => t?.name));
+        for (const t of built) if (!seen.has(t.name)) { tools.push(t); seen.add(t.name); }
+      }
+      let turn: Awaited<ReturnType<typeof runAgentTurn>> | undefined;
+      await traceAI(
+        { name: `${provider}.${model}`, kind: 'llm', provider, model, userId, input: { system: body.system, messages: body.messages, tools: tools.map((t: any) => t?.name) } },
+        async () => {
+          turn = await runAgentTurn({
+            model,
+            provider: body.provider,
+            system: body.system,
+            messages: body.messages,
+            tools,
+            maxOutputTokens: body.maxOutputTokens,
+            thinking: body.thinking,
+          });
+          const metrics: Record<string, number> = {};
+          if (typeof turn.usage?.input === 'number') metrics.input_tokens = turn.usage.input;
+          if (typeof turn.usage?.output === 'number') metrics.output_tokens = turn.usage.output;
+          return { status: 200, output: turn.text || `[${turn.toolCalls.length} tool call(s)]`, metrics };
+        }
+      );
+      void recordTokenUsage(userId, provider, model, { input_tokens: turn?.usage?.input, output_tokens: turn?.usage?.output } as any).catch(() => {});
+      return { statusCode: 200, headers: jsonHeaders(), body: JSON.stringify(turn) };
+    } catch (e: any) {
+      return serverError(`agent-turn failed: ${String(e?.message || e).slice(0, 300)}`);
+    }
+  }
+
+  if (sub === 'agent-exec') {
+    // AGENTIC CHAT loop — execute ONE tool the model requested (Phase 2, read-only).
+    // The client loop calls this between model turns; the gate lives here, server-side.
+    const workspaceId = String(body.workspaceId || '');
+    const toolName = String(body.toolName || body.name || '');
+    if (!workspaceId) return badRequest('workspaceId required');
+    if (!toolName) return badRequest('toolName required');
+    const { executeAgentTool } = await import('./chat/agentExec');
+    try {
+      const r = await executeAgentTool(userId, workspaceId, toolName, (body.args || body.input || {}) as any, { approved: body.approved === true });
+      return { statusCode: 200, headers: jsonHeaders(), body: JSON.stringify(r) };
+    } catch (e: any) {
+      return serverError(`agent-exec failed: ${String(e?.message || e).slice(0, 300)}`);
+    }
+  }
+
   if (sub === 'proxy') {
     const targetUrl = String(body.url || '');
     let parsed: URL;
@@ -188,6 +251,10 @@ async function routeAI(
       headers['Authorization'] = `Bearer ${secrets.OPENROUTER_API_KEY}`;
       headers['HTTP-Referer'] = 'https://wisprnote.com';
       headers['X-Title'] = 'WisprNote AI';
+    } else if (host === 'api.openai.com') {
+      // OpenAI (GPT) — DIRECT API key for the agentic chat loop.
+      if (!secrets.OPENAI_API_KEY) return serverError('OpenAI key not configured');
+      headers['Authorization'] = `Bearer ${secrets.OPENAI_API_KEY}`;
     } else if (host.endsWith('.turbopuffer.com')) {
       if (!secrets.TURBOPUFFER_API_KEY) return serverError('Turbopuffer key not configured');
       headers['Authorization'] = `Bearer ${secrets.TURBOPUFFER_API_KEY}`;

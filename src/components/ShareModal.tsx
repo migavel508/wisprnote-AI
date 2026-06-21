@@ -179,7 +179,7 @@ export default function ShareModal({ taskId, taskName, isOpen, onClose }: ShareM
             <h2 className="text-[16px] font-semibold text-[#1a1a1a] tracking-tight">Share Meeting</h2>
             <p className="text-[12px] text-[#1a1a1a]/40 truncate mt-0.5">{taskName}</p>
           </div>
-          <button onClick={onClose} className="p-1.5 rounded-lg hover:bg-[#f5f0eb] transition-colors -mr-1">
+          <button onClick={onClose} className="p-1.5 rounded-lg hover:bg-[#f0f0f0] transition-colors -mr-1">
             <X className="w-4 h-4 text-[#1a1a1a]/40" />
           </button>
         </div>
@@ -215,7 +215,7 @@ export default function ShareModal({ taskId, taskName, isOpen, onClose }: ShareM
               <button
                 onClick={() => handleCreateShare('restricted')}
                 disabled={saving}
-                className="w-full flex items-center gap-3 p-3.5 rounded-xl border border-[#e8e2da] hover:border-[#c4bab0] hover:bg-[#faf8f6] transition-all text-left"
+                className="w-full flex items-center gap-3 p-3.5 rounded-xl border border-[#e0e0e0] hover:border-[#c0c0c0] hover:bg-[#fafafa] transition-all text-left"
               >
                 <div className="w-9 h-9 rounded-lg bg-amber-50 flex items-center justify-center flex-shrink-0">
                   <Lock className="w-4 h-4 text-amber-600" />
@@ -231,7 +231,7 @@ export default function ShareModal({ taskId, taskName, isOpen, onClose }: ShareM
             <div className="space-y-4 pt-1">
               {/* Link + copy */}
               <div className="flex items-center gap-2">
-                <div className="flex-1 flex items-center gap-2 px-3 py-2 bg-[#f5f0eb] rounded-lg min-w-0">
+                <div className="flex-1 flex items-center gap-2 px-3 py-2 bg-[#f0f0f0] rounded-lg min-w-0">
                   <Link2 className="w-3.5 h-3.5 text-[#a89888] flex-shrink-0" />
                   <span className="text-[12px] text-[#1a1a1a]/60 truncate font-mono">
                     {getShareUrl(share.share_token)}
@@ -251,7 +251,7 @@ export default function ShareModal({ taskId, taskName, isOpen, onClose }: ShareM
               </div>
 
               {/* Access type toggle */}
-              <div className="flex items-center justify-between p-3 rounded-xl bg-[#faf8f6] border border-[#e8e2da]/60">
+              <div className="flex items-center justify-between p-3 rounded-xl bg-[#fafafa] border border-[#e0e0e0]/60">
                 <div className="flex items-center gap-2.5">
                   {share.access_type === 'public' ? (
                     <Globe className="w-4 h-4 text-emerald-600" />
@@ -289,7 +289,7 @@ export default function ShareModal({ taskId, taskName, isOpen, onClose }: ShareM
                         value={emailInput}
                         onChange={e => setEmailInput(e.target.value)}
                         onKeyDown={handleEmailKeyDown}
-                        className="w-full pl-9 pr-3 py-2 text-[12.5px] bg-[#f5f0eb] rounded-lg border-none outline-none placeholder:text-[#b5a99a] focus:ring-2 focus:ring-[#c4bab0]/50 transition-all"
+                        className="w-full pl-9 pr-3 py-2 text-[12.5px] bg-[#f0f0f0] rounded-lg border-none outline-none placeholder:text-[#b0b0b0] focus:ring-2 focus:ring-[#c4bab0]/50 transition-all"
                       />
                     </div>
                     <button
@@ -304,7 +304,7 @@ export default function ShareModal({ taskId, taskName, isOpen, onClose }: ShareM
                   {emails.length > 0 && (
                     <div className="space-y-1 max-h-32 overflow-y-auto">
                       {emails.map(entry => (
-                        <div key={entry.id} className="flex items-center justify-between px-3 py-1.5 rounded-lg hover:bg-[#faf8f6] group transition-colors">
+                        <div key={entry.id} className="flex items-center justify-between px-3 py-1.5 rounded-lg hover:bg-[#fafafa] group transition-colors">
                           <div className="flex items-center gap-2 min-w-0">
                             <div className="w-6 h-6 rounded-full bg-[#e8e2da] flex items-center justify-center flex-shrink-0">
                               <span className="text-[10px] font-bold text-[#5c5147] uppercase">
@@ -320,7 +320,7 @@ export default function ShareModal({ taskId, taskName, isOpen, onClose }: ShareM
                           </div>
                           <button
                             onClick={() => handleRemoveEmail(entry.email)}
-                            className="p-1 rounded opacity-0 group-hover:opacity-100 hover:bg-red-50 transition-all"
+                            className="p-1 rounded-lg opacity-0 group-hover:opacity-100 hover:bg-red-50 transition-all"
                           >
                             <Trash2 className="w-3 h-3 text-red-400" />
                           </button>
@@ -332,7 +332,7 @@ export default function ShareModal({ taskId, taskName, isOpen, onClose }: ShareM
               )}
 
               {/* Active toggle + danger zone */}
-              <div className="pt-2 border-t border-[#e8e2da]/60">
+              <div className="pt-2 border-t border-[#e0e0e0]/60">
                 <button
                   onClick={handleToggleActive}
                   disabled={saving}

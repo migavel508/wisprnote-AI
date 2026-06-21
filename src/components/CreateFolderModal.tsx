@@ -14,8 +14,9 @@ import {
 } from 'lucide-react';
 import type { Workspace } from '../services/workspaceService';
 import { isDefaultWorkspace } from '../services/workspaceService';
+import { EMOJI_GROUPS } from '../data/emojiData';
 
-const ICON_COLORS = [
+export const ICON_COLORS = [
   { id: 'gray',   value: '#6b7280' },
   { id: 'black',  value: '#1f2937' },
   { id: 'purple', value: '#a78bfa' },
@@ -26,7 +27,7 @@ const ICON_COLORS = [
   { id: 'red',    value: '#dc2626' },
 ];
 
-const ICON_LIBRARY: { name: string; Icon: typeof Star }[] = [
+export const ICON_LIBRARY: { name: string; Icon: typeof Star }[] = [
   { name: 'star', Icon: Star }, { name: 'heart', Icon: Heart }, { name: 'sparkles', Icon: Sparkles },
   { name: 'bookmark', Icon: Bookmark }, { name: 'zap', Icon: Zap }, { name: 'hash', Icon: Hash },
   { name: 'file', Icon: FileText }, { name: 'folder', Icon: FolderIcon }, { name: 'briefcase', Icon: Briefcase },
@@ -50,13 +51,6 @@ const ICON_LIBRARY: { name: string; Icon: typeof Star }[] = [
   { name: 'sun', Icon: Sun }, { name: 'flag', Icon: Flag }, { name: 'gift', Icon: Gift },
   { name: 'music', Icon: Music }, { name: 'puzzle', Icon: Puzzle }, { name: 'lock', Icon: LockIcon },
   { name: 'ticket', Icon: Ticket }, { name: 'trophy', Icon: Trophy },
-];
-
-const EMOJI_LIBRARY = [
-  '😀','😃','😄','😁','😆','😅','🤣','😂','🙂','🙃','😉','😊','😇','🥰','😍','🤩','😘',
-  '😗','☺️','😚','😙','🥲','😋','😛','😜','🤪','😝','🤑','🤗','🤭','🤫','🤔','🤐',
-  '🔥','💼','🚀','🎯','📊','🔬','🏗️','🌱','⚡','🎨','📌','📎','📁','🗂️','📅','📈','📉','💡',
-  '✅','❌','⭐','🌟','💎','🏆','🎁','🎉','🎈','💬','📝','✏️','🖋️','📚','📖','🔖','📰',
 ];
 
 export interface FolderDraft {
@@ -127,9 +121,13 @@ export default function CreateFolderModal({ workspaces, defaultWorkspaceId, onCl
     try { await onCreate(draft); } finally { setSaving(false); }
   };
 
-  const filteredEmojis = emojiSearch
-    ? EMOJI_LIBRARY.filter(e => e.includes(emojiSearch))
-    : EMOJI_LIBRARY;
+  const emojiQuery = emojiSearch.trim().toLowerCase();
+  const emojiGroups = emojiQuery
+    ? (() => {
+        const hits = EMOJI_GROUPS.flatMap(g => g.emojis).filter(e => e.n.includes(emojiQuery));
+        return hits.length ? [{ name: 'Results', emojis: hits }] : [];
+      })()
+    : EMOJI_GROUPS;
 
   return (
     <div
@@ -232,21 +230,29 @@ export default function CreateFolderModal({ workspaces, defaultWorkspaceId, onCl
                       placeholder="Search emoji…"
                       className="w-full px-2.5 py-1.5 mb-2 text-[12px] bg-app-nav-hover-bg rounded-lg outline-none text-app-fg placeholder:text-app-fg-subtle"
                     />
-                    <div className="text-[10px] font-mono uppercase tracking-wider text-app-fg-subtle px-1 mb-1.5">
-                      Smileys & emotion
-                    </div>
-                    <div className="grid grid-cols-9 gap-1 max-h-[200px] overflow-y-auto">
-                      {filteredEmojis.map(e => (
-                        <button
-                          key={e}
-                          onClick={() => setEmoji(e)}
-                          className={`w-8 h-8 rounded-md flex items-center justify-center text-[18px] transition-colors ${
-                            emoji === e ? 'bg-app-nav-active-bg' : 'hover:bg-app-nav-hover-bg'
-                          }`}
-                        >
-                          {e}
-                        </button>
+                    <div className="max-h-[230px] overflow-y-auto pr-0.5">
+                      {emojiGroups.map(g => (
+                        <div key={g.name} className="mb-2">
+                          <div className="text-[10px] font-mono uppercase tracking-wider text-app-fg-subtle px-1 mb-1 sticky top-0 bg-app-canvas py-0.5">{g.name}</div>
+                          <div className="grid grid-cols-9 gap-1">
+                            {g.emojis.map(em => (
+                              <button
+                                key={em.c}
+                                title={em.n}
+                                onClick={() => setEmoji(em.c)}
+                                className={`w-8 h-8 rounded-md flex items-center justify-center text-[18px] transition-colors ${
+                                  emoji === em.c ? 'bg-app-nav-active-bg' : 'hover:bg-app-nav-hover-bg'
+                                }`}
+                              >
+                                {em.c}
+                              </button>
+                            ))}
+                          </div>
+                        </div>
                       ))}
+                      {emojiGroups.length === 0 && (
+                        <div className="text-[12px] text-app-fg-subtle px-1 py-4 text-center">No emojis found</div>
+                      )}
                     </div>
                   </div>
                 )}

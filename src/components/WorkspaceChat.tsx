@@ -12,6 +12,9 @@ import { saveChatMessage, getWorkspaceChatThreads, getChatHistoryByThread, type 
 import { serverChat, isServerChatEnabled } from '../services/aiProxyService';
 import JiraActionCard from './JiraActionCard';
 import McpActionCard from './McpActionCard';
+import AgentApprovalCard, { type ApprovalDecision } from './AgentApprovalCard';
+import AgentTimeline, { type TraceItem } from './AgentTimeline';
+import { runAgentLoop, type AgentLoopEvent, type PendingApproval } from '../services/agentLoopService';
 import type { JiraActionProposal, JiraMeta, McpWriteProposal } from '../services/jiraActionService';
 
 type SearchFilters = { recent_days?: number; start_ms?: number; end_ms?: number; off_track?: boolean };
@@ -20,7 +23,7 @@ type SearchFilters = { recent_days?: number; start_ms?: number; end_ms?: number;
 const card = (m: SearchableMeeting, content: string) =>
   buildMeetingCard({ title: m.title, createdAt: m.createdAt, attendees: m.attendees, kg: m.kg, content });
 
-interface Msg { role: 'user' | 'model'; text: string; proposal?: JiraActionProposal; jiraMeta?: JiraMeta; mcpProposals?: McpWriteProposal[] }
+interface Msg { role: 'user' | 'model'; text: string; proposal?: JiraActionProposal; jiraMeta?: JiraMeta; mcpProposals?: McpWriteProposal[]; trace?: TraceItem[] }
 
 // Workspace-oriented quick prompts (the reference's recipe chips).
 const RECIPES: { label: string; prompt: string }[] = [
@@ -62,6 +65,13 @@ export default function WorkspaceChat({
   // the UI as steps while the answer is being assembled.
   const [plan, setPlan] = useState<string[]>([]);
   const [steps, setSteps] = useState<AgentSearchStep[]>([]);
+  // Agentic loop (Phases 2–4): an opt-in mode that PLANS, calls connected tools, and ACTS with
+  // human approval — the orchestration-plane chat. When off, the existing chat path is unchanged.
+  const [agentMode, setAgentMode] = useState(false);
+  const [liveTrace, setLiveTrace] = useState<TraceItem[]>([]);
+  const [pendingApproval, setPendingApproval] = useState<{ req: PendingApproval; resolve: (ok: boolean) => void } | null>(null);
+  // Tools the user chose "Allow for this task" on — auto-approved for the rest of this run.
+  const allowSetRef = useRef<Set<string>>(new Set());
 
   const textareaRef = useRef<HTMLTextAreaElement>(null);
   const modelRef = useRef<HTMLDivElement>(null);
@@ -170,6 +180,14 @@ export default function WorkspaceChat({
     };
   };
 
+  // Map the picked chat model → the loop's provider+model. Anthropic models run direct on Anthropic;
+  // everything else (incl. "Auto") runs on Gemini direct. (OpenAI/OpenRouter entries are locked
+  // until their keys are provisioned, so they can't be selected here.)
+  const loopModelFor = (m: ChatModelDef): { provider: 'anthropic' | 'gemini'; model: string } =>
+    m.provider === 'anthropic'
+      ? { provider: 'anthropic', model: m.providerModel || 'claude-sonnet-4-6' }
+      : { provider: 'gemini', model: m.providerModel || 'gemini-3-flash-preview' };
+
   const send = async (raw?: string) => {
     const text = (raw ?? input).trim();
     if (!text || isChatting) return;
@@ -179,6 +197,8 @@ export default function WorkspaceChat({
     setIsChatting(true);
     setPlan([]);
     setSteps([]);
+    setLiveTrace([]);
+    allowSetRef.current = new Set();
     void saveChatMessage({ role: 'user', text, thread_id: tid, workspace_id: workspaceId }).catch(() => {});
 
     const history = messages.map((m) => ({ role: m.role, parts: [{ text: m.text }] }));
@@ -187,7 +207,44 @@ export default function WorkspaceChat({
       let proposal: JiraActionProposal | undefined;
       let jMeta: JiraMeta | undefined;
       let mcpProps: McpWriteProposal[] | undefined;
-      if (isServerChatEnabled()) {
+      let traceItems: TraceItem[] | undefined;
+      if (agentMode) {
+        // ORCHESTRATION-PLANE loop: plan → call connected tools (gated) → act with approval. Each
+        // model turn + tool exec is a separate request; an approval pause is just an awaited promise.
+        const lm = loopModelFor(activeModel);
+        const prior = messages.map((m) => ({
+          role: (m.role === 'user' ? 'user' : 'assistant') as 'user' | 'assistant',
+          content: [{ type: 'text' as const, text: m.text }],
+        }));
+        // Build the trace as the loop streams events (mutated locally + mirrored to state so it
+        // renders live; the final copy is attached to the model message so it persists).
+        const localTrace: TraceItem[] = [];
+        const result = await runAgentLoop(text, {
+          workspaceId,
+          provider: lm.provider,
+          model: lm.model,
+          onStep: (ev: AgentLoopEvent) => {
+            if (ev.kind === 'assistant_text') { if (ev.text.trim()) localTrace.push({ kind: 'text', text: ev.text }); }
+            else if (ev.kind === 'plan') {
+              const i = localTrace.findIndex((t) => t.kind === 'task');
+              if (i >= 0) localTrace[i] = { kind: 'task', todos: ev.todos };
+              else localTrace.push({ kind: 'task', todos: ev.todos });
+            } else if (ev.kind === 'tool_call') {
+              localTrace.push({ kind: 'tool', id: ev.id, name: ev.name, connector: ev.connector, args: ev.args, status: 'running' });
+            } else if (ev.kind === 'tool_result') {
+              const t = localTrace.find((x) => x.kind === 'tool' && x.id === ev.id) as Extract<TraceItem, { kind: 'tool' }> | undefined;
+              if (t) { t.status = 'done'; t.result = ev.content; t.ok = ev.ok; }
+            }
+            setLiveTrace([...localTrace]);
+          },
+          onApprovalRequest: (req) =>
+            allowSetRef.current.has(req.name)
+              ? Promise.resolve(true)
+              : new Promise<boolean>((resolve) => setPendingApproval({ req, resolve })),
+        }, prior);
+        answer = result.text;
+        traceItems = [...localTrace];
+      } else if (isServerChatEnabled()) {
         // SERVER-SIDE agent: retrieval + synthesis run in the Lambda, tenant-
         // isolated and bounded (the corpus never leaves the server).
         setPlan([`Searching ${workspaceName} on the server…`]);
@@ -212,7 +269,7 @@ export default function WorkspaceChat({
           onToolCallDone: (s) => setSteps((prev) => upsertStep(prev, s)),
         });
       }
-      setMessages((prev) => [...prev, { role: 'model', text: answer, proposal, jiraMeta: jMeta, mcpProposals: mcpProps }]);
+      setMessages((prev) => [...prev, { role: 'model', text: answer, proposal, jiraMeta: jMeta, mcpProposals: mcpProps, trace: traceItems }]);
       void saveChatMessage({ role: 'model', text: answer, thread_id: tid, workspace_id: workspaceId }).catch(() => {});
       // Refresh the durable thread list so this conversation appears in History.
       getWorkspaceChatThreads(workspaceId).then(setThreads).catch(() => {});
@@ -220,6 +277,7 @@ export default function WorkspaceChat({
       setMessages((prev) => [...prev, { role: 'model', text: 'Sorry — something went wrong answering that. Please try again.' }]);
     } finally {
       setIsChatting(false);
+      setPendingApproval(null);
     }
   };
 
@@ -257,7 +315,7 @@ export default function WorkspaceChat({
           {messages.map((m, i) =>
             m.role === 'user' ? (
               <div key={i} className="flex justify-end">
-                <div className="max-w-[85%] bg-[#f5f2ef] dark:bg-app-chip text-zinc-900 dark:text-app-fg px-4 py-2.5 rounded-3xl rounded-tr-md text-[13.5px]">
+                <div className="max-w-[85%] bg-[#f0f0f0] dark:bg-app-chip text-zinc-900 dark:text-app-fg px-4 py-2.5 rounded-3xl rounded-tr-md text-[13.5px]">
                   {m.text}
                 </div>
               </div>
@@ -271,6 +329,7 @@ export default function WorkspaceChat({
                     <span className="text-[12.5px] font-semibold text-zinc-800 dark:text-zinc-200">WisprNote AI</span>
                   </div>
                   <div className="pl-[34px] min-w-0">
+                    {m.trace && m.trace.length > 0 && <AgentTimeline trace={m.trace} />}
                     <Markdown remarkPlugins={[remarkGfm]} components={assistantMarkdownComponents as any}>{m.text}</Markdown>
                     {m.proposal && (
                       <JiraActionCard proposal={m.proposal} meta={m.jiraMeta} workspaceId={workspaceId} />
@@ -288,6 +347,8 @@ export default function WorkspaceChat({
               <div className="flex items-center gap-2 text-app-fg-muted font-medium mb-1.5">
                 <Loader2 className="w-3.5 h-3.5 animate-spin" /> Working on it…
               </div>
+              {/* Agent-mode live timeline — thought process, plan, and tool calls (Request/Response) */}
+              {agentMode && <AgentTimeline trace={liveTrace} live />}
               {plan.map((p, i) => (
                 <div key={`p${i}`} className="flex items-start gap-2 pl-0.5 py-0.5 text-app-fg-subtle">
                   <span className="mt-[3px] w-1 h-1 rounded-full bg-app-fg-subtle flex-shrink-0" /> {p}
@@ -307,6 +368,19 @@ export default function WorkspaceChat({
               ))}
             </div>
           )}
+          {/* Agent HITL — a write/ask tool is awaiting the user's approval. The loop is paused on a
+              promise this card resolves; nothing server-side is held open meanwhile. */}
+          {pendingApproval && (
+            <AgentApprovalCard
+              req={pendingApproval.req}
+              onDecide={(d: ApprovalDecision) => {
+                if (d === 'task') allowSetRef.current.add(pendingApproval.req.name);
+                pendingApproval.resolve(d !== 'deny');
+                setPendingApproval(null);
+              }}
+            />
+          )}
+
           {/* Say more */}
           {!isChatting && messages.length > 0 && messages[messages.length - 1].role === 'model' && (
             <button
@@ -321,7 +395,7 @@ export default function WorkspaceChat({
 
       {/* Input bar */}
       <div className="p-3 sm:p-4">
-        <div className="rounded-2xl border border-app-divider bg-app-canvas">
+        <div className="rounded-xl border border-app-divider bg-app-canvas">
           <textarea
             ref={textareaRef}
             value={input}
@@ -378,6 +452,17 @@ export default function WorkspaceChat({
                 </div>
               )}
             </div>
+
+            {/* Agent mode — plans, uses connected tools, acts with approval */}
+            <button
+              onClick={() => setAgentMode((v) => !v)}
+              title="Agent mode: plans, uses your connected tools (Jira, GitHub…), and takes actions with your approval"
+              className={`flex items-center gap-1 px-2 py-1 rounded-lg text-[12.5px] font-medium transition-colors ${
+                agentMode ? 'bg-app-accent/15 text-app-accent' : 'text-app-fg-muted hover:bg-app-nav-hover-bg'
+              }`}
+            >
+              <Sparkles className="w-3.5 h-3.5" /> Agent
+            </button>
 
             <div className="flex-1" />
 

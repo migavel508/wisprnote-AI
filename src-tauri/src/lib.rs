@@ -64,6 +64,14 @@ fn set_recording_active(active: bool) {
     let _ = active;
 }
 
+/// The OS this build is running on — "macos" | "windows" | "linux". Authoritative
+/// (compile-time), so the UI can reliably inset its header below the macOS traffic
+/// lights without depending on the webview's userAgent.
+#[tauri::command]
+fn get_os_platform() -> String {
+    std::env::consts::OS.to_string()
+}
+
 
 // Global state for the audio recorder
 struct AppState {
@@ -374,9 +382,12 @@ fn set_recording_indicator(app: tauri::AppHandle, visible: bool) -> Result<(), S
 /// hidden at startup so it can be converted to an NSPanel on the main thread and
 /// shown instantly later.
 fn build_recording_indicator_window(app: &tauri::AppHandle, visible: bool) -> Result<(), String> {
-    // Tight to anarlog's vertical pill (container 40×79). Right-edge, centered.
-    let width = 40.0_f64;
-    let height = 80.0_f64;
+    // Window is sized for the EXPANDED hover panel; the capsule sits at the right
+    // edge and the transcript/chat panel grows left into the transparent area.
+    // The passthrough poll keeps only the reported hit-rect interactive, so the
+    // large transparent region stays click-through. Right-edge, centered.
+    let width = 360.0_f64;
+    let height = 200.0_f64;
 
     let mut builder = tauri::WebviewWindowBuilder::new(
         app,
@@ -897,6 +908,7 @@ pub fn run() {
             clear_overlay_hit_bounds,
             focus_main_window,
             set_recording_active,
+            get_os_platform,
             dev_sessions::scan_dev_sessions,
             dev_sessions::list_dev_projects,
             logger::write_logs

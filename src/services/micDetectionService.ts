@@ -23,6 +23,8 @@ export interface RecordingIndicatorState {
   paused: boolean;
   seconds: number;
   label: string | null;
+  /** Recent transcript text (newline-joined) for the hover panel. */
+  transcript?: string;
 }
 
 /** Listen for "an app started using the mic past the threshold" events. */
@@ -208,6 +210,33 @@ export async function emitStopRecording(): Promise<void> {
   } catch {
     /* non-fatal */
   }
+}
+
+/** (Indicator window) Listen for the live mic level (0..1) from the capture
+ * pipeline, pushed at ~25 fps while recording. Drives the waveform reliably
+ * regardless of the overlay window's own microphone access. */
+export async function listenForAudioLevel(cb: (level: number) => void): Promise<() => void> {
+  if (!isTauri()) return () => {};
+  const { listen } = await import('@tauri-apps/api/event');
+  return listen<number>('audio-level', (e) => cb(typeof e.payload === 'number' ? e.payload : 0));
+}
+
+/** (Indicator window) Ask the main app to open chat (optionally pre-filled). */
+export async function emitOpenChatFromIndicator(prompt?: string): Promise<void> {
+  if (!isTauri()) return;
+  try {
+    const { emit } = await import('@tauri-apps/api/event');
+    await emit('recording-indicator-open-chat', { prompt: prompt ?? '' });
+  } catch { /* non-fatal */ }
+}
+
+/** (Main app) Listen for the indicator's "open chat" request. */
+export async function listenForOpenChatFromIndicator(
+  cb: (prompt: string) => void,
+): Promise<() => void> {
+  if (!isTauri()) return () => {};
+  const { listen } = await import('@tauri-apps/api/event');
+  return listen<{ prompt: string }>('recording-indicator-open-chat', (e) => cb(e.payload?.prompt ?? ''));
 }
 
 /** (Indicator window) Pause/resume the main app's recording via the tray channel. */

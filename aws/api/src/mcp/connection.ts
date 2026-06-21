@@ -24,11 +24,19 @@ export async function resolveMcpConnection(userId: string, workspaceId: string, 
     const ctx = await jiraContext(userId, workspaceId).catch(() => null);
     return ctx ? { connector: 'jira', server: ctx.server, token: ctx.at, cloudId: ctx.cloudId, siteUrl: ctx.siteUrl } : null;
   }
-  // Generic remote MCP (GitHub, …): server from the registry + the workspace's OAuth token.
-  const server = getMcpServer(connector);
+  // Generic remote MCP: server from the registry OR a user-added custom connector, + the
+  // workspace's OAuth token. (Custom connectors are looked up by slug; no-auth ones need no token.)
+  let server = getMcpServer(connector);
+  if (!server && connector.startsWith('custom-')) {
+    const { getCustomConnectorServer } = await import('./customConnectors');
+    server = await getCustomConnectorServer(userId, workspaceId, connector).catch(() => null) || undefined as any;
+  }
+  if (!server?.url) return null;
   const cred = await getToken(userId, connector, workspaceId).catch(() => null);
-  const token = (cred?.token as any)?.access_token;
-  return server?.url && token ? { connector, server, token } : null;
+  const token = ((cred?.token as any)?.access_token) ?? '';
+  // OAuth connectors need a token; no-auth custom servers connect with an empty token.
+  if (!token && server.auth !== 'none') return null;
+  return { connector, server, token };
 }
 
 /** Which connectors are connected in this workspace (from connector_credentials). */

@@ -457,22 +457,22 @@ export default function KnowledgePage({
               <span className="text-sm font-bold text-app-fg truncate group-hover:text-kg-accent transition-colors">
                 {relatedMeetingData.meetingTitle?.replace(/\.[^.]+$/, '') || 'Meeting'}
               </span>
-              <span className="text-[9px] px-2 py-0.5 bg-kg-accent-soft text-kg-accent rounded-md font-mono shrink-0 font-medium">
+              <span className="text-[9px] px-2 py-0.5 bg-kg-accent-soft text-kg-accent rounded-lg font-mono shrink-0 font-medium">
                 {related.totalScore.toFixed(1)} pts
               </span>
             </div>
             <div className="text-[10px] text-app-fg-subtle truncate flex items-center gap-1.5 flex-wrap">
               {related.relationships.length > 0 ? related.relationships.map((r, rIdx) => (
-                <span key={rIdx} className={`text-[8px] px-1.5 py-0.5 rounded font-mono ${REL_BADGE_COLORS[r.relationshipType] || 'bg-app-chip text-app-fg-muted'}`}>
+                <span key={rIdx} className={`text-[8px] px-1.5 py-0.5 rounded-lg font-mono ${REL_BADGE_COLORS[r.relationshipType] || 'bg-app-chip text-app-fg-muted'}`}>
                   {r.relationshipType}
                 </span>
               )) : (
-                <span className="text-[8px] px-1.5 py-0.5 rounded font-mono bg-kg-accent-soft text-kg-accent">
+                <span className="text-[8px] px-1.5 py-0.5 rounded-lg font-mono bg-kg-accent-soft text-kg-accent">
                   similar content
                 </span>
               )}
               {related.embeddingScore > 0 && (
-                <span className="flex items-center gap-1 bg-app-chip px-1.5 py-0.5 rounded text-app-fg-muted">
+                <span className="flex items-center gap-1 bg-app-chip px-1.5 py-0.5 rounded-lg text-app-fg-muted">
                   sim: {(related.embeddingScore * 100).toFixed(0)}%
                 </span>
               )}
@@ -495,9 +495,9 @@ export default function KnowledgePage({
                     Why Connected:
                   </span>
                   {related.relationships.map((r, rIdx) => (
-                    <div key={rIdx} className="p-2 bg-app-raised rounded border border-app-border">
+                    <div key={rIdx} className="p-2 bg-app-raised rounded-lg border border-app-border">
                       <div className="flex items-center gap-2 mb-1">
-                        <span className={`text-[8px] px-1.5 py-0.5 rounded font-mono font-medium ${REL_BADGE_COLORS[r.relationshipType] || 'bg-app-chip text-app-fg-muted'}`}>
+                        <span className={`text-[8px] px-1.5 py-0.5 rounded-lg font-mono font-medium ${REL_BADGE_COLORS[r.relationshipType] || 'bg-app-chip text-app-fg-muted'}`}>
                           {r.relationshipType}
                         </span>
                         <span className="text-[8px] text-app-fg-subtle font-mono">{r.confidence}</span>
@@ -507,7 +507,7 @@ export default function KnowledgePage({
                   ))}
                 </div>
               ) : (
-                <div className="mb-3 p-2 bg-kg-accent-soft rounded border border-kg-accent-border">
+                <div className="mb-3 p-2 bg-kg-accent-soft rounded-lg border border-kg-accent-border">
                   <span className="text-[9px] font-mono uppercase text-kg-accent block mb-1 flex items-center gap-1">
                     <Share2 className="w-3 h-3" />
                     Why Connected:
@@ -544,12 +544,12 @@ export default function KnowledgePage({
                   </span>
                   <div className="space-y-1.5">
                     {validRelTopics.map((topic: any, tIdx: number) => (
-                      <div key={tIdx} className="p-2 rounded bg-app-chip">
+                      <div key={tIdx} className="p-2 rounded-lg bg-app-chip">
                         <div className="flex items-start justify-between gap-2 mb-1">
                           <span className="text-[10px] font-semibold text-app-fg">
                             {topic.name}
                           </span>
-                          <span className={`text-[8px] px-1 py-0.5 rounded font-mono shrink-0 ${
+                          <span className={`text-[8px] px-1 py-0.5 rounded-lg font-mono shrink-0 ${
                             topic.status === 'resolved' ? 'bg-green-100 text-green-700' :
                             topic.status === 'off-track' ? 'bg-red-100 text-red-700' :
                             topic.status === 'revisited' ? 'bg-yellow-100 text-yellow-700' :
@@ -567,7 +567,7 @@ export default function KnowledgePage({
               {/* Decisions and Actions */}
               <div className="grid grid-cols-1 gap-2 mt-3">
                 {(relatedMeetingData.decisions || []).length > 0 && (
-                  <div className="bg-app-raised rounded p-2 border border-app-border">
+                  <div className="bg-app-raised rounded-lg p-2 border border-app-border">
                     <span className="text-[9px] font-mono uppercase text-app-fg-subtle block mb-1">Decisions</span>
                     <ul className="space-y-1">
                       {(relatedMeetingData.decisions || []).slice(0, 2).map((dec: any, dIdx: number) => (
@@ -578,7 +578,7 @@ export default function KnowledgePage({
                 )}
                 
                 {(relatedMeetingData.actionItems || []).length > 0 && (
-                  <div className="bg-app-raised rounded p-2 border border-app-border">
+                  <div className="bg-app-raised rounded-lg p-2 border border-app-border">
                     <span className="text-[9px] font-mono uppercase text-app-fg-subtle block mb-1">Actions</span>
                     <ul className="space-y-1">
                       {(relatedMeetingData.actionItems || []).slice(0, 2).map((action: any, aIdx: number) => (
@@ -617,7 +617,7 @@ export default function KnowledgePage({
       <div className="flex-none bg-app-panel border-b border-app-border px-3 sm:px-6 py-2.5 sm:py-4">
         <div className="flex items-center justify-between gap-2 sm:gap-4">
           <div className="min-w-0">
-            <h2 className="text-base sm:text-xl font-serif italic font-bold flex items-center gap-1.5 sm:gap-2">
+            <h2 className="text-base sm:text-xl font-serif font-semibold flex items-center gap-1.5 sm:gap-2">
               <Network className="w-4 sm:w-5 h-4 sm:h-5 flex-shrink-0" />
               <span className="truncate">Knowledge Graph</span>
             </h2>
@@ -772,7 +772,7 @@ export default function KnowledgePage({
               ) : (
                 <>
                   <Share2 className="w-16 h-16 text-app-fg-subtle/50 mb-6" />
-                  <h3 className="text-lg font-serif italic text-app-fg-subtle">No Graph Built Yet</h3>
+                  <h3 className="text-lg font-serif font-semibold text-app-fg-subtle">No Graph Built Yet</h3>
                   <p className="text-xs text-app-fg-subtle mt-2 max-w-md">
                     {historyLength === 0 
                       ? 'Process some audio files first, then come back to build your knowledge graph.'
@@ -791,7 +791,7 @@ export default function KnowledgePage({
                     <button
                       type="button"
                       onClick={() => setBrowsePanelOpen((v) => !v)}
-                      className={`px-2.5 py-1.5 text-[10px] font-mono uppercase tracking-wide rounded-md border flex items-center gap-1.5 transition-colors ${
+                      className={`px-2.5 py-1.5 text-[10px] font-mono uppercase tracking-wide rounded-lg border flex items-center gap-1.5 transition-colors ${
                         browsePanelOpen
                           ? 'bg-kg-accent text-kg-accent-fg border-kg-accent'
                           : 'border-app-border text-app-fg-muted bg-app-panel hover:bg-app-chip'
@@ -810,7 +810,7 @@ export default function KnowledgePage({
                           setEgoFocus(false);
                           setSelectedNode(null);
                         }}
-                        className={`px-2.5 py-1.5 text-[10px] font-mono uppercase tracking-wide rounded-md flex items-center gap-1.5 transition-colors ${
+                        className={`px-2.5 py-1.5 text-[10px] font-mono uppercase tracking-wide rounded-lg flex items-center gap-1.5 transition-colors ${
                           graphViewMode === 'overview' ? 'bg-app-chip shadow-sm text-kg-accent' : 'text-app-fg-subtle hover:text-app-fg'
                         }`}
                         title="Only meetings and cross-meeting links — clearest map"
@@ -821,7 +821,7 @@ export default function KnowledgePage({
                       <button
                         type="button"
                         onClick={() => setGraphViewMode('full')}
-                        className={`px-2.5 py-1.5 text-[10px] font-mono uppercase tracking-wide rounded-md flex items-center gap-1.5 transition-colors ${
+                        className={`px-2.5 py-1.5 text-[10px] font-mono uppercase tracking-wide rounded-lg flex items-center gap-1.5 transition-colors ${
                           graphViewMode === 'full' ? 'bg-app-chip shadow-sm text-kg-accent' : 'text-app-fg-subtle hover:text-app-fg'
                         }`}
                         title="Topics, people, decisions, and actions"
@@ -834,7 +834,7 @@ export default function KnowledgePage({
                       type="button"
                       disabled={graphViewMode === 'overview' || !selectedNode}
                       onClick={() => setEgoFocus(f => !f)}
-                      className={`px-2.5 py-1.5 text-[10px] font-mono uppercase tracking-wide rounded-md border flex items-center gap-1.5 transition-colors ${
+                      className={`px-2.5 py-1.5 text-[10px] font-mono uppercase tracking-wide rounded-lg border flex items-center gap-1.5 transition-colors ${
                         egoFocus && selectedNode
                           ? 'bg-kg-accent-soft border-kg-accent-border text-kg-accent'
                           : 'border-app-border text-app-fg-muted hover:bg-app-chip'
@@ -866,7 +866,7 @@ export default function KnowledgePage({
                       <span className="text-[9px] font-mono uppercase text-app-fg-subtle flex-shrink-0">Show:</span>
                       <button
                         onClick={() => setFilterType(null)}
-                        className={`px-2 py-0.5 text-[9px] rounded-md transition-colors ${
+                        className={`px-2 py-0.5 text-[9px] rounded-lg transition-colors ${
                           !filterType ? 'bg-kg-accent text-kg-accent-fg' : 'bg-app-panel border border-app-border text-app-fg-muted hover:bg-app-chip'
                         }`}
                       >
@@ -876,7 +876,7 @@ export default function KnowledgePage({
                         <button
                           key={nt.type}
                           onClick={() => setFilterType(filterType === nt.type ? null : nt.type)}
-                          className={`px-2 py-0.5 text-[9px] rounded-md transition-colors flex items-center gap-1 ${
+                          className={`px-2 py-0.5 text-[9px] rounded-lg transition-colors flex items-center gap-1 ${
                             filterType === nt.type ? 'bg-kg-accent text-kg-accent-fg' : 'bg-app-panel border border-app-border text-app-fg-muted hover:bg-app-chip'
                           }`}
                         >
@@ -1025,7 +1025,7 @@ export default function KnowledgePage({
                       graphData={displayGraphData}
                       width={kgDimensions.width}
                       height={kgDimensions.height}
-                      backgroundColor={themeResolved === 'dark' ? '#141414' : '#f4f2ec'}
+                      backgroundColor={themeResolved === 'dark' ? '#141414' : '#f2f2f2'}
                       nodeLabel={(node: any) => {
                         if (node.type === 'person') {
                           const tag = node.data?.isAttendee === true ? ' · attendee'
@@ -1143,11 +1143,9 @@ export default function KnowledgePage({
                         // non-finite values, and an uncaught throw here kills the canvas
                         // render loop (crashing the tab). Skip until the node is placed.
                         if (!Number.isFinite(node.x) || !Number.isFinite(node.y)) return;
-                        // Brand-aligned constellation: follows the app theme — warm
-                        // dark (#141414) in dark mode, warm cream (#f4f2ec) in light.
                         const isDark = themeResolved === 'dark';
                         const ACCENT = isDark ? '#b9d96a' : '#819c1f';
-                        const bg = isDark ? '#141414' : '#f4f2ec';
+                        const bg = isDark ? '#141414' : '#f2f2f2';
                         const isSel = selectedNode && node.id === selectedNode.id;
                         const isHover = hoveredNode && node.id === hoveredNode.id;
                         const dim = focus ? !focus.set.has(node.id) : false;
@@ -1297,14 +1295,14 @@ export default function KnowledgePage({
                 </div>
                 <button 
                   onClick={() => setSelectedNode(null)} 
-                  className="p-1 hover:bg-app-chip rounded text-app-fg-muted"
+                  className="p-1 hover:bg-app-chip rounded-lg text-app-fg-muted"
                 >
                   <X className="w-4 h-4" />
                 </button>
               </div>
               
               <div className="p-4 text-app-fg">
-                <h3 className="font-serif italic font-medium text-xl mb-4 leading-snug">{selectedNode.label}</h3>
+                <h3 className="font-serif font-semibold text-xl mb-4 leading-snug">{selectedNode.label}</h3>
                 
                 {selectedNode.type === 'meeting' && selectedNode.data && (
                   <div className="space-y-4">
@@ -1371,7 +1369,7 @@ export default function KnowledgePage({
                             <div key={i} className="p-2 bg-app-raised rounded-lg border border-app-border">
                               <div className="flex items-center justify-between mb-1">
                                 <span className="text-xs font-semibold text-app-fg">{t.name}</span>
-                                <span className={`text-[9px] px-1.5 py-0.5 rounded ${
+                                <span className={`text-[9px] px-1.5 py-0.5 rounded-lg ${
                                   t.status === 'resolved' ? 'bg-green-100 text-green-700' :
                                   t.status === 'off-track' ? 'bg-red-100 text-red-700' :
                                   t.status === 'ongoing' ? 'bg-blue-100 text-blue-700' : 'bg-purple-100 text-purple-700'
@@ -1392,7 +1390,7 @@ export default function KnowledgePage({
                         </h4>
                         <div className="flex flex-wrap gap-1">
                           {selectedNode.data.people.map((p: string, i: number) => (
-                            <span key={i} className="px-2 py-1 bg-cyan-50 dark:bg-cyan-950/50 text-cyan-700 dark:text-cyan-200 text-[10px] rounded border border-cyan-100/80 dark:border-cyan-800/40">{p}</span>
+                            <span key={i} className="px-2 py-1 bg-cyan-50 dark:bg-cyan-950/50 text-cyan-700 dark:text-cyan-200 text-[10px] rounded-lg border border-cyan-100/80 dark:border-cyan-800/40">{p}</span>
                           ))}
                         </div>
                       </div>
@@ -1405,7 +1403,7 @@ export default function KnowledgePage({
                         </h4>
                         <ul className="space-y-1">
                           {selectedNode.data.decisions.map((d: any, i: number) => (
-                            <li key={i} className="text-xs text-app-fg-muted bg-app-raised border border-app-border p-2 rounded">• {d.decision}</li>
+                            <li key={i} className="text-xs text-app-fg-muted bg-app-raised border border-app-border p-2 rounded-lg">• {d.decision}</li>
                           ))}
                         </ul>
                       </div>
@@ -1458,7 +1456,7 @@ export default function KnowledgePage({
 
                 {selectedNode.type === 'topic' && selectedNode.data && (
                   <div className="space-y-4">
-                    <div className={`px-2 py-1 rounded text-xs inline-block ${
+                    <div className={`px-2 py-1 rounded-lg text-xs inline-block ${
                       selectedNode.data.status === 'resolved' ? 'bg-green-100 text-green-700' :
                       selectedNode.data.status === 'off-track' ? 'bg-red-100 text-red-700' :
                       selectedNode.data.status === 'ongoing' ? 'bg-blue-100 text-blue-700' : 'bg-purple-100 text-purple-700'
@@ -1518,7 +1516,7 @@ export default function KnowledgePage({
                         <h4 className="text-[10px] font-mono uppercase text-app-fg-subtle mb-2">Present in:</h4>
                         <ul className="space-y-1">
                           {selectedNode.data.meetings.map((m: string, i: number) => (
-                            <li key={i} className="text-xs text-app-fg bg-app-raised p-2 rounded border border-app-border">
+                            <li key={i} className="text-xs text-app-fg bg-app-raised p-2 rounded-lg border border-app-border">
                               {m?.replace(/\.[^.]+$/, '')}
                             </li>
                           ))}

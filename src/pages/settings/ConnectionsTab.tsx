@@ -1,15 +1,17 @@
 import { useCallback, useEffect, useState } from 'react';
-import { Loader2, Check, X, ExternalLink, RefreshCw, FolderOpen } from 'lucide-react';
+import { Loader2, Check, X, ExternalLink, RefreshCw, FolderOpen, Plus, Plug, ChevronDown } from 'lucide-react';
 import { CONNECTORS, CONNECTOR_CATEGORIES, type ConnectorDef } from '../../config/connectors';
 import {
   isConnectorsEnabled, listConnectors, getConnectorOAuthUrl, disconnectConnector, setConnectorToken,
   getProjectMapping, setProjectMapping,
+  listCustomConnectors, createCustomConnector, deleteCustomConnector,
   type ConnectorStatus,
 } from '../../services/connectorService';
 import {
   listDevProjects, syncLocalSessions, getPathMappings, setPathMapping,
   type DevProject, type SyncSummary,
 } from '../../services/localSessionsService';
+import ConnectorToolsModal from '../../components/ConnectorToolsModal';
 import { getJiraMeta } from '../../services/jiraActionService';
 import { getWorkspaces, getFolders, type Workspace, type Folder } from '../../services/workspaceService';
 import { useConnectorOAuth, setPendingConnector } from './useConnectorOAuth';
@@ -24,11 +26,12 @@ import { useConnectorOAuth, setPendingConnector } from './useConnectorOAuth';
 const isTauri = typeof window !== 'undefined' && !!(window as any).__TAURI_INTERNALS__;
 
 function ConnectorCard({
-  c, connected, busy, onConnect, onDisconnect, onLocalSetup,
+  c, connected, busy, onConnect, onDisconnect, onLocalSetup, onManageTools,
 }: {
   c: ConnectorDef; connected: boolean; busy: boolean;
   onConnect: (id: string) => void; onDisconnect: (id: string) => void;
   onLocalSetup: (c: ConnectorDef) => void;
+  onManageTools: (c: ConnectorDef) => void;
 }) {
   const Icon = c.icon;
   const enabled = isConnectorsEnabled();
@@ -80,12 +83,21 @@ function ConnectorCard({
           {actionable ? (connected ? 'Manage projects' : 'Set up') : 'Set up — coming soon'}
         </button>
       ) : connected ? (
-        <button
-          onClick={() => onDisconnect(c.id)} disabled={busy}
-          className="mt-1 w-full py-2 rounded-lg text-[12px] font-medium bg-app-chip text-app-fg-muted border border-app-border hover:text-app-fg transition-colors disabled:opacity-50"
-        >
-          {busy ? 'Working…' : 'Disconnect'}
-        </button>
+        <div className="mt-1 flex items-center gap-1.5">
+          {/* Per-tool permission editor (the trust plane) — only for remote MCP connectors. */}
+          <button
+            onClick={() => onManageTools(c)}
+            className="flex-1 py-2 rounded-lg text-[12px] font-medium bg-app-accent text-app-accent-fg hover:bg-app-accent-hover transition-colors"
+          >
+            Tool permissions
+          </button>
+          <button
+            onClick={() => onDisconnect(c.id)} disabled={busy}
+            className="py-2 px-3 rounded-lg text-[12px] font-medium bg-app-chip text-app-fg-muted border border-app-border hover:text-app-fg transition-colors disabled:opacity-50"
+          >
+            {busy ? '…' : 'Disconnect'}
+          </button>
+        </div>
       ) : (
         <button
           onClick={() => actionable && onConnect(c.id)} disabled={!actionable || busy}
@@ -188,9 +200,23 @@ export default function ConnectionsTab({ fixedWorkspaceId, embedded }: Connectio
 
   // PAT-connect modal state (for connectors whose OAuth lacks DCR, e.g. GitHub).
   const [patFor, setPatFor] = useState<ConnectorDef | null>(null);
+  const [toolsFor, setToolsFor] = useState<ConnectorDef | null>(null);   // per-tool permission editor
   const [patToken, setPatToken] = useState('');
   const [patBusy, setPatBusy] = useState(false);
   const [patError, setPatError] = useState<string | null>(null);
+
+  // Custom connectors (user-added remote MCP servers — "Add custom connector").
+  const [customConns, setCustomConns] = useState<import('../../services/connectorService').CustomConnector[]>([]);
+  const [addOpen, setAddOpen] = useState(false);
+  const [addName, setAddName] = useState('');
+  const [addUrl, setAddUrl] = useState('');
+  const [addAdvOpen, setAddAdvOpen] = useState(false);
+  const [addClientId, setAddClientId] = useState('');
+  const [addClientSecret, setAddClientSecret] = useState('');
+  const [adding, setAdding] = useState(false);
+  const [addError, setAddError] = useState<string | null>(null);
+  const loadCustom = useCallback(() => { if (workspaceId) void listCustomConnectors(workspaceId).then(setCustomConns).catch(() => {}); else setCustomConns([]); }, [workspaceId]);
+  useEffect(() => { loadCustom(); }, [loadCustom]);
 
   // Local dev-session (Claude Code / Codex) setup — machine-local path→folder mapping + sync.
   const [localOpen, setLocalOpen] = useState(false);
@@ -272,8 +298,33 @@ export default function ConnectionsTab({ fixedWorkspaceId, embedded }: Connectio
 
   const onDisconnect = useCallback(async (id: string) => {
     setBusyId(id);
-    try { await disconnectConnector(id, workspaceId ?? undefined); await refresh(); } finally { setBusyId(null); }
-  }, [refresh, workspaceId]);
+    try {
+      // Custom connectors are removed entirely (delete the definition + its token); built-ins just disconnect.
+      if (id.startsWith('custom-')) { if (workspaceId) await deleteCustomConnector(workspaceId, id); loadCustom(); await refresh(); }
+      else { await disconnectConnector(id, workspaceId ?? undefined); await refresh(); }
+    } finally { setBusyId(null); }
+  }, [refresh, workspaceId, loadCustom]);
+
+  const submitAddCustom = useCallback(async () => {
+    if (!workspaceId || !addName.trim() || !addUrl.trim() || adding) return;
+    setAdding(true); setAddError(null);
+    try {
+      const r = await createCustomConnector(workspaceId, {
+        name: addName.trim(), url: addUrl.trim(),
+        oauthClientId: addClientId.trim() || undefined, oauthClientSecret: addClientSecret.trim() || undefined,
+      });
+      setAddOpen(false); setAddName(''); setAddUrl(''); setAddClientId(''); setAddClientSecret(''); setAddAdvOpen(false);
+      await refresh(); loadCustom();
+      if (r.needsAuth) onConnect(r.slug);   // server says auth needed → kick off the OAuth sign-in
+    } catch (e: any) { setAddError(e?.message || 'Could not add the connector.'); }
+    finally { setAdding(false); }
+  }, [workspaceId, addName, addUrl, addClientId, addClientSecret, adding, refresh, loadCustom, onConnect]);
+
+  // Map stored custom connectors → ConnectorDef so they render with the SAME card + connect/tools logic.
+  const customDefs: ConnectorDef[] = customConns.map((cc) => ({
+    id: cc.slug, name: cc.name, description: cc.url, category: 'Custom connectors',
+    access: 'Read + Write', status: 'live', via: 'mcp', docs: cc.url, icon: Plug, scopes: ['Custom MCP server'],
+  }));
 
   return (
     <div className={embedded ? '' : 'max-w-[820px] mx-auto px-8 pb-16'}>
@@ -366,12 +417,39 @@ export default function ConnectionsTab({ fixedWorkspaceId, embedded }: Connectio
                     onConnect={onConnect}
                     onDisconnect={onDisconnect}
                     onLocalSetup={openLocalSetup}
+                    onManageTools={setToolsFor}
                   />
                 ))}
               </div>
             </section>
           );
         })}
+
+        {isConnectorsEnabled() && workspaceId && (
+          <section>
+            <div className="flex items-center justify-between mb-3">
+              <div className="text-[9px] font-mono font-medium text-app-fg-label uppercase tracking-[0.12em]">Custom connectors</div>
+              <button onClick={() => { setAddError(null); setAddOpen(true); }} className="flex items-center gap-1.5 text-[11.5px] font-medium text-app-accent hover:opacity-80">
+                <Plus size={13} /> Add custom connector
+              </button>
+            </div>
+            {customDefs.length === 0 ? (
+              <p className="text-[12px] text-app-fg-subtle leading-relaxed">Connect any remote MCP server by URL — its tools are discovered automatically and governed by the same per-tool permissions.</p>
+            ) : (
+              <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
+                {customDefs.map((c) => (
+                  <ConnectorCard
+                    key={c.id} c={c}
+                    connected={!!statusById[c.id]?.connected}
+                    busy={busyId === c.id}
+                    onConnect={onConnect} onDisconnect={onDisconnect}
+                    onLocalSetup={openLocalSetup} onManageTools={setToolsFor}
+                  />
+                ))}
+              </div>
+            )}
+          </section>
+        )}
       </div>
 
       {patFor && (
@@ -454,6 +532,54 @@ export default function ConnectionsTab({ fixedWorkspaceId, embedded }: Connectio
               <button onClick={runLocalSync} disabled={localBusy || !localConfigured}
                 className="px-3.5 py-1.5 rounded-lg text-[12.5px] font-semibold bg-app-accent text-app-accent-fg hover:bg-app-accent-hover disabled:opacity-50 flex items-center gap-1.5 whitespace-nowrap">
                 {localBusy ? <Loader2 size={13} className="animate-spin" /> : <RefreshCw size={13} />} Sync now
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
+
+      {toolsFor && workspaceId && (
+        <ConnectorToolsModal
+          connectorId={toolsFor.id}
+          connectorName={toolsFor.name}
+          workspaceId={workspaceId}
+          onClose={() => setToolsFor(null)}
+        />
+      )}
+
+      {addOpen && (
+        <div className="fixed inset-0 z-[9999] flex items-center justify-center bg-black/30 backdrop-blur-sm" onClick={() => !adding && setAddOpen(false)}>
+          <div className="bg-app-canvas rounded-2xl border border-app-divider shadow-xl w-[560px] max-w-[94vw] max-h-[88vh] overflow-y-auto p-5" onClick={(e) => e.stopPropagation()}>
+            <div className="flex items-center justify-between mb-1">
+              <h3 className="text-[15px] font-semibold text-app-fg flex items-center gap-2">Add custom connector <span className="text-[9px] font-mono uppercase tracking-wider px-1.5 py-0.5 rounded bg-app-chip text-app-fg-subtle">Beta</span></h3>
+              <button onClick={() => !adding && setAddOpen(false)} className="w-7 h-7 flex items-center justify-center rounded-md text-app-fg-subtle hover:bg-app-nav-hover-bg hover:text-app-fg"><X size={15} /></button>
+            </div>
+            <p className="text-[12px] text-app-fg-subtle leading-relaxed mb-4">Connect to any remote MCP server. Its tools are discovered automatically and governed by per-tool permissions. Only add connectors from developers you trust.</p>
+
+            <input autoFocus value={addName} onChange={(e) => setAddName(e.target.value)} placeholder="Name"
+              className="w-full text-[13px] bg-app-panel border border-app-border rounded-lg px-3 py-2 text-app-fg outline-none focus:border-app-accent placeholder:text-app-fg-subtle mb-2.5" />
+            <input value={addUrl} onChange={(e) => setAddUrl(e.target.value)} placeholder="Remote MCP server URL (https://…)"
+              className="w-full text-[13px] bg-app-panel border border-app-border rounded-lg px-3 py-2 text-app-fg outline-none focus:border-app-accent placeholder:text-app-fg-subtle mb-3" />
+
+            <button onClick={() => setAddAdvOpen((v) => !v)} className="flex items-center gap-1 text-[12.5px] text-app-fg-muted hover:text-app-fg mb-2">
+              <ChevronDown size={14} className={`transition-transform ${addAdvOpen ? 'rotate-180' : ''}`} /> Advanced settings
+            </button>
+            {addAdvOpen && (
+              <div className="space-y-2.5 mb-3">
+                <input value={addClientId} onChange={(e) => setAddClientId(e.target.value)} placeholder="OAuth Client ID (optional)"
+                  className="w-full text-[13px] bg-app-panel border border-app-border rounded-lg px-3 py-2 text-app-fg outline-none focus:border-app-accent placeholder:text-app-fg-subtle" />
+                <input type="password" value={addClientSecret} onChange={(e) => setAddClientSecret(e.target.value)} placeholder="OAuth Client Secret (optional)"
+                  className="w-full text-[13px] bg-app-panel border border-app-border rounded-lg px-3 py-2 text-app-fg outline-none focus:border-app-accent placeholder:text-app-fg-subtle" />
+                <p className="text-[11px] text-app-fg-subtle leading-relaxed">Leave blank to auto-register (DCR). Provide a Client ID for servers that need a pre-registered OAuth app. No-auth servers connect on Add.</p>
+              </div>
+            )}
+
+            {addError && <p className="text-[11.5px] text-red-500 mb-2">{addError}</p>}
+            <div className="flex justify-end gap-2 mt-2">
+              <button onClick={() => setAddOpen(false)} disabled={adding} className="px-3 py-1.5 rounded-lg text-[12.5px] text-app-fg hover:bg-app-nav-hover-bg disabled:opacity-50">Cancel</button>
+              <button onClick={submitAddCustom} disabled={adding || !addName.trim() || !/^https:\/\//i.test(addUrl.trim())}
+                className="px-3.5 py-1.5 rounded-lg text-[12.5px] font-semibold bg-app-accent text-app-accent-fg hover:bg-app-accent-hover disabled:opacity-50 flex items-center gap-1.5">
+                {adding ? <Loader2 size={13} className="animate-spin" /> : <Plus size={13} />} Add
               </button>
             </div>
           </div>

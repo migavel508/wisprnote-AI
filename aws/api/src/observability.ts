@@ -164,6 +164,7 @@ export function providerFromHost(host: string): string {
   if (host === 'generativelanguage.googleapis.com') return 'gemini';
   if (host === 'api.anthropic.com') return 'anthropic';
   if (host === 'openrouter.ai') return 'openrouter';
+  if (host === 'api.openai.com') return 'openai';
   if (host.endsWith('.turbopuffer.com')) return 'turbopuffer';
   if (host === 'api.deepgram.com') return 'deepgram';
   return host;
