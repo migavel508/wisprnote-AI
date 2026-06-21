@@ -838,6 +838,47 @@ export default function WorkspacePage({ allTasks, onSelectTask }: WorkspacePageP
           )}
         </div>
 
+        {/* Folders in this space — click a card to open it. Only at the workspace
+            root (folders are one level deep). This is how you browse INTO folders. */}
+        {activeWs && !activeFolder && (
+          <div className="px-8 pt-5 max-w-[920px] mx-auto w-full">
+            <div className="flex items-center justify-between mb-2.5">
+              <span className="text-[12.5px] font-semibold text-app-fg tracking-[-0.01em]">Folders</span>
+              <button
+                onClick={() => setShowCreateFolder(true)}
+                className="flex items-center gap-1.5 px-2.5 py-1 rounded-md text-[12px] text-app-fg-subtle hover:bg-app-nav-hover-bg hover:text-app-fg transition-colors"
+              >
+                <FolderPlus size={12} strokeWidth={1.7} /> New folder
+              </button>
+            </div>
+            {folderCount === 0 ? (
+              <button
+                onClick={() => setShowCreateFolder(true)}
+                className="w-full flex items-center gap-3 p-4 rounded-2xl border border-dashed border-app-divider text-app-fg-subtle hover:border-app-fg-subtle/40 hover:text-app-fg transition-colors"
+              >
+                <FolderPlus size={18} strokeWidth={1.7} />
+                <span className="text-[12.5px]">No folders yet — create one to organise your notes.</span>
+              </button>
+            ) : (
+              <div className="grid grid-cols-2 sm:grid-cols-3 gap-2.5">
+                {(foldersByWs[activeWs.id] || []).map(f => (
+                  <button
+                    key={f.id}
+                    onClick={() => setWorkspaceSelection(activeWs.id, f.id)}
+                    className="flex items-center gap-3 p-3 rounded-2xl border border-app-divider bg-app-canvas hover:bg-app-nav-hover-bg hover:border-app-fg-subtle/30 transition-colors text-left"
+                  >
+                    <FolderGlyph folder={f} size={34} />
+                    <div className="min-w-0 flex-1">
+                      <div className="text-[13px] font-medium text-app-fg truncate tracking-[-0.01em]">{f.name}</div>
+                      <div className="text-[11px] text-app-fg-subtle truncate">{f.description || 'Open folder'}</div>
+                    </div>
+                  </button>
+                ))}
+              </div>
+            )}
+          </div>
+        )}
+
         {/* Workspace chat — scoped to this workspace's notes (+ its folders).
             Shown on the workspace home (not inside a single folder). */}
         {activeWs && !activeFolder && (

@@ -125,11 +125,13 @@ export default function WorkspaceSwitcher({
       <button
         ref={triggerRef}
         onClick={() => setOpen(v => !v)}
-        className="w-full flex items-center gap-2 px-2 py-1.5 rounded-xl text-app-nav-fg hover:bg-app-nav-hover-bg hover:text-app-nav-fg-hover transition-all duration-200"
+        className="w-full flex items-center gap-2 px-2 py-1.5 rounded-lg text-app-nav-fg hover:bg-app-nav-hover-bg hover:text-app-nav-fg-hover transition-all duration-200"
       >
-        <Avatar ws={active} size={22} />
+        <div className="w-[22px] h-[22px] rounded-full bg-app-chip flex items-center justify-center flex-shrink-0 text-[10px] font-semibold text-app-fg-muted">
+          {(session?.user?.name ?? session?.user?.email ?? '?').charAt(0).toUpperCase()}
+        </div>
         <span className="flex-1 text-left text-[12.5px] font-medium tracking-[-0.01em] truncate">
-          {active?.name ?? 'Personal'}
+          {formatDisplayName(session?.user?.email, session?.user?.name, 'Account')}
         </span>
         <ChevronsUpDown size={12} strokeWidth={1.8} className="text-app-fg-subtle flex-shrink-0" />
       </button>
@@ -197,9 +199,6 @@ export default function WorkspaceSwitcher({
 
           {/* Actions */}
           <div className="px-2 py-1.5">
-            <MenuItem icon={LayoutTemplate} label="Manage templates" onClick={handle(onManageTemplates)} />
-            <MenuItem icon={Smartphone} label="Get Granola for iPhone" onClick={handle(() => {})} />
-            <MenuItem icon={CircleHelp} label="Help Center" onClick={handle(onOpenHelp)} />
             <MenuItem icon={Settings} label="Settings" onClick={handle(onOpenSettings)} shortcut="⌘," />
           </div>
 

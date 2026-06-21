@@ -321,12 +321,12 @@ export default function HistoryPage({ history, onSelectTask, isLoading = false, 
         <div className="max-w-5xl mx-auto">
           <div className="flex flex-col sm:flex-row items-start sm:items-end justify-between gap-3 sm:gap-4 mb-4 sm:mb-6">
             <div>
-              <h2 className="text-[22px] sm:text-[32px] font-serif italic text-[#1a1a1a]/70 dark:text-app-fg/70 leading-tight">
-                All Meetings
+              <h2 className="text-[22px] sm:text-[30px] font-serif font-semibold text-app-fg leading-tight">
+                Meetings
               </h2>
               {!isLoading && history.length > 0 && (
-                <p className="text-[11px] sm:text-[12px] text-[#1a1a1a]/45 dark:text-app-fg/45 mt-0.5 sm:mt-1">
-                  {hasSearchQuery 
+                <p className="text-[11px] sm:text-[12px] text-app-fg-label mt-0.5 sm:mt-1">
+                  {hasSearchQuery
                     ? `${filteredHistory.length} meeting${filteredHistory.length !== 1 ? 's' : ''} matching "${searchQuery}"`
                     : `${totalCount || filteredHistory.length} meeting${(totalCount || filteredHistory.length) !== 1 ? 's' : ''}`
                   }
@@ -335,7 +335,7 @@ export default function HistoryPage({ history, onSelectTask, isLoading = false, 
             </div>
 
             {/* Search */}
-            <div className={`relative flex items-center gap-2 bg-[#1a1a1a]/[0.05] dark:bg-white/[0.06] rounded-full px-3 sm:px-4 py-2 sm:py-2.5 w-full sm:w-auto transition-all duration-200 border border-[#1a1a1a]/[0.06] dark:border-white/[0.08] ${
+            <div className={`relative flex items-center gap-2 bg-[#1a1a1a]/[0.05] dark:bg-white/[0.06] rounded-lg px-3 sm:px-4 py-2 sm:py-2.5 w-full sm:w-auto transition-all duration-200 border border-[#1a1a1a]/[0.06] dark:border-white/[0.08] ${
               searchQuery ? 'ring-1 ring-[#1a1a1a]/10 dark:ring-white/10' : 'hover:bg-[#1a1a1a]/[0.08] dark:hover:bg-white/[0.09]'
             }`}>
               <Search className="w-[15px] h-[15px] text-[#1a1a1a]/30 dark:text-app-fg/40 flex-shrink-0" />
@@ -353,7 +353,7 @@ export default function HistoryPage({ history, onSelectTask, isLoading = false, 
                     animate={{ opacity: 1, scale: 1 }}
                     exit={{ opacity: 0, scale: 0.8 }}
                     onClick={() => setSearchQuery('')}
-                    className="p-0.5 hover:bg-[#1a1a1a]/[0.06] dark:hover:bg-white/[0.08] rounded-full flex-shrink-0 transition-colors"
+                    className="p-0.5 hover:bg-[#1a1a1a]/[0.06] dark:hover:bg-white/[0.08] rounded-lg flex-shrink-0 transition-colors"
                   >
                     <X className="w-3.5 h-3.5 text-[#1a1a1a]/30 dark:text-app-fg/40" />
                   </motion.button>
@@ -386,35 +386,53 @@ export default function HistoryPage({ history, onSelectTask, isLoading = false, 
               <p className="text-[12px] text-[#1a1a1a]/35 dark:text-app-fg/35 mb-4">Try different search terms</p>
               <button 
                 onClick={() => setSearchQuery('')}
-                className="px-4 py-2 text-[12px] font-medium text-[#1a1a1a]/50 dark:text-app-fg/50 bg-[#1a1a1a]/[0.04] dark:bg-white/[0.06] hover:bg-[#1a1a1a]/[0.08] dark:hover:bg-white/[0.1] rounded-full transition-colors"
+                className="px-4 py-2 text-[12px] font-medium text-[#1a1a1a]/50 dark:text-app-fg/50 bg-[#1a1a1a]/[0.04] dark:bg-white/[0.06] hover:bg-[#1a1a1a]/[0.08] dark:hover:bg-white/[0.1] rounded-lg transition-colors"
               >
                 Clear Search
               </button>
             </div>
           ) : (
             <>
-              {/* Date-grouped list — workspace-style rows: icon · title/Me · workspace badge · time */}
+              {/* Date-grouped list */}
               <div className="-mx-1">
                 {groupHistoryByDate(visibleHistory).map(group => (
-                  <div key={group.label} className="mb-3">
-                    <div className="px-3 py-1.5 text-[11px] text-app-fg-subtle tracking-tight">{group.label}</div>
+                  <div key={group.label} className="mb-4">
+                    <div className="px-3 py-1.5 text-[10.5px] font-medium text-app-fg-label uppercase tracking-[0.08em]">{group.label}</div>
                     {group.items.map(task => {
+                      const durSecs = task.duration ?? 0;
+                      const durMins = Math.floor(durSecs / 60);
+                      const durRem = durSecs % 60;
+                      const durationStr = durMins > 0
+                        ? `${durMins}m${durRem > 0 ? ` ${durRem}s` : ''}`
+                        : durSecs > 0 ? `${durSecs}s` : '';
+
                       return (
                         <div
                           key={task.id}
                           onClick={() => handleSelectTask(task)}
-                          className="group flex items-center gap-3 px-3 py-2.5 rounded-xl hover:bg-app-nav-hover-bg cursor-pointer transition-colors"
+                          className="group flex items-start gap-3 px-3 py-2.5 rounded-xl hover:bg-app-nav-hover-bg cursor-pointer transition-colors"
                         >
-                          <div className="w-8 h-8 rounded-lg bg-app-nav-hover-bg flex items-center justify-center flex-shrink-0">
+                          <div className="mt-0.5 w-8 h-8 rounded-lg bg-app-nav-hover-bg flex items-center justify-center flex-shrink-0">
                             <FileText size={14} strokeWidth={1.7} className="text-app-fg-subtle" />
                           </div>
                           <div className="flex-1 min-w-0">
                             <p className="text-[13.5px] font-medium text-app-fg truncate leading-tight tracking-[-0.01em]">
                               {task.filename || 'Untitled'}
                             </p>
-                            <p className="text-[11px] text-app-fg-subtle mt-0.5">Me</p>
+                            {(durationStr || (task.attendees && task.attendees.length > 1)) && (
+                              <div className="flex items-center gap-2 mt-1">
+                                {durationStr && (
+                                  <span className="text-[10px] font-mono text-app-fg-label">{durationStr}</span>
+                                )}
+                                {task.attendees && task.attendees.length > 1 && (
+                                  <span className="text-[10px] text-app-fg-label">
+                                    {task.attendees.length} people
+                                  </span>
+                                )}
+                              </div>
+                            )}
                           </div>
-                          <div className="flex items-center gap-1.5 flex-shrink-0" onClick={e => e.stopPropagation()}>
+                          <div className="flex items-center gap-1.5 flex-shrink-0 mt-0.5" onClick={e => e.stopPropagation()}>
                             {task.id && (
                               <FolderPicker
                                 workspaces={workspaces}

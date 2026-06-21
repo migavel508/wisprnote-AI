@@ -1,5 +1,6 @@
 import { resolveMcpConnection } from './connection';
 import { mcpListTools, mcpCallTool } from './client';
+import { resolvePermission } from './toolPlane';
 import { recordAudit } from '../connectors/jira/audit';
 
 /**
@@ -21,6 +22,11 @@ export async function executeMcpWrite(userId: string, workspaceId: string, conne
   if (DELETE_VERB.test(tool) || !(WRITE_VERB.test(tool) || WRITE_SUFFIX.test(tool))) {
     return { ok: false, message: `"${tool}" is not an allowed write action.` };
   }
+  // TRUST GATE — every tool call crosses the permission engine. 'deny' (the user set this tool to
+  // "never") blocks even an approved card; 'allow'/'ask' proceed (the card IS the approval for ask).
+  const perm = await resolvePermission(userId, workspaceId, connector, tool).catch(() => null);
+  if (perm?.behavior === 'deny') return { ok: false, message: `Blocked by policy — “${tool}” is set to never run for this connector.` };
+
   const conn = await resolveMcpConnection(userId, workspaceId, connector);
   if (!conn) return { ok: false, message: `${connector} is not connected in this workspace.` };
 

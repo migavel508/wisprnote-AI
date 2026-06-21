@@ -829,6 +829,11 @@ pub mod macos {
         const SYS_VAD_FLOOR: f32 = 0.01;   // system RMS above this ⇒ a participant is talking
         const HANGOVER_CHUNKS: i32 = 8;    // ~250 ms at ~33 ms/chunk
 
+        // Throttle for the floating recording-indicator waveform: push the live mic
+        // level to the overlay window at ~25 fps. Computed in the capture pipeline so
+        // the waveform is reactive regardless of the overlay's own mic access.
+        let mut last_level_emit = std::time::Instant::now();
+
         // Capture runs until we STOP or PAUSE. On pause this loop exits → the CoreAudio
         // devices (this fn's locals) drop → the mic is released — while the WebSocket
         // (owned by the caller) stays warm. The trailing-final close + drain on a true
@@ -889,6 +894,24 @@ pub mod macos {
                     downsampler.push(mic_buf[i] * mic_gain, sys_buf[i], &mut out_mic, &mut out_sys);
                 }
                 if !out_mic.is_empty() {
+                    // Live waveform level for the floating indicator — peak across both
+                    // channels (you OR a participant), so the bars track whoever is
+                    // speaking. Throttled to ~25 fps.
+                    if last_level_emit.elapsed().as_millis() >= 40 {
+                        use tauri::Emitter;
+                        // Use the RAW (pre-gate) mic + system so the user's OWN voice
+                        // always drives the waveform. out_mic is half-duplex gated (muted
+                        // when a participant speaks) — that's for transcription, not the
+                        // visual meter. The mic is usually quieter, so give it more gain.
+                        let mut peak_mic = 0.0f32;
+                        for &s in mic_buf.iter() { let a = s.abs(); if a > peak_mic { peak_mic = a; } }
+                        let mut peak_sys = 0.0f32;
+                        for &s in sys_buf.iter() { let a = s.abs(); if a > peak_sys { peak_sys = a; } }
+                        let level = (peak_mic * 3.5).max(peak_sys * 2.2).min(1.0);
+                        let _ = app_handle.emit("audio-level", level);
+                        last_level_emit = std::time::Instant::now();
+                    }
+
                     let mut frame = Vec::with_capacity(out_mic.len() * 2);
                     for i in 0..out_mic.len() {
                         frame.push(out_mic[i]); // ch0 — you (gated)

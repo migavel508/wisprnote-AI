@@ -113,7 +113,7 @@ reusable **connector-sync engine** L1/L2 need; new connectors plug into that pat
 | Source-of-truth DB | **AWS RDS Postgres** (every table scoped by `user_id`/workspace, enforced in the Lambda) |
 | Vector DB | **turbopuffer** (existing `turbopufferService.ts`) |
 | Transcription | Deepgram (realtime, Rust) + Gemini batch |
-| LLM | **Gemini 3** primary (transcribe/notes/chat); **OpenRouter** for multi-model — route **agentic decision/action steps to Claude** (`claude-opus-4-8` / `claude-sonnet-4-6`) via OpenRouter for reliability on tool-use reasoning. Model versions pinned in the registries (`src/config/models.ts`, `aws/api/src/models/registry.ts`) |
+| LLM | **Gemini 3** primary (transcribe/notes/chat). **Agentic chat loop is model-agnostic** via the `agentTurn` provider abstraction (`aws/api/src/chat/agentTurn.ts`), each provider on its OWN direct key: **Claude → DIRECT Anthropic API** (default tool-use model, NOT OpenRouter), **OpenAI → DIRECT**, **Gemini → DIRECT + some via OpenRouter**. Model versions pinned in the registries (`src/config/models.ts`, `aws/api/src/models/registry.ts`) |
 | Auth | AWS Cognito (JWT verified in the Lambda) |
 | Billing | Paddle |
 | Serverless | AWS Lambda (`wisprnote-api`) + API Gateway (HTTP) + EventBridge (scheduled sync); Vercel `api/` only for share-preview/OG |

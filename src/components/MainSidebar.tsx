@@ -1,19 +1,12 @@
 import { useEffect, useState, useRef } from 'react';
+import ChatIcon from './ChatIcon';
+import MeetingsIcon from './MeetingsIcon';
+import GraphSparkleIcon from './GraphSparkleIcon';
 import {
-  PenLine,
-  MessageSquareText,
-  Network,
-  Clock,
-  PanelLeft,
-  AudioLines,
+  House,
   LogOut,
-  Headphones,
   Users,
-  Sun,
-  Moon,
-  Monitor,
   Plus,
-  ChevronRight,
   Lock,
   Folder as FolderIcon,
   Pencil,
@@ -21,10 +14,12 @@ import {
   Star,
   UserPlus,
   FolderPlus,
+  ArrowRight,
+  MoreHorizontal,
+  ChevronRight,
 } from 'lucide-react';
 import { AuthSession } from '../services/awsAuthService';
 import { getPendingTaskCount } from '../services/awsService';
-import { useTheme, type ThemePreference } from '../theme/ThemeProvider';
 import {
   ensureDefaultWorkspace, getFolders, createWorkspace, createFolder,
   deleteWorkspace, updateWorkspace, renameFolder, deleteFolder,
@@ -36,8 +31,9 @@ import { setWorkspaceSelection, useWorkspaceSelection } from '../services/worksp
 import CreateFolderModal, { type FolderDraft } from './CreateFolderModal';
 import WorkspaceCreationWizard from './WorkspaceCreationWizard';
 import WorkspaceSwitcher from './WorkspaceSwitcher';
+import { WisprnoteLogo } from './WisprnoteLogo';
 
-type View = 'process' | 'history' | 'notes' | 'chat' | 'knowledge' | 'notebooks' | 'audio-devices' | 'workspace' | 'people' | 'settings';
+type View = 'process' | 'history' | 'notes' | 'chat' | 'knowledge' | 'notebooks' | 'audio-devices' | 'workspace' | 'people' | 'settings' | 'spaces';
 
 interface MainSidebarProps {
   currentView: View;
@@ -48,57 +44,8 @@ interface MainSidebarProps {
   onSignOut: () => void;
   status: string;
   isCompactMode?: boolean;
-}
-
-// ── Theme picker pill ─────────────────────────────────────────────────────────
-function ThemeAppearancePicker({ collapsed }: { collapsed?: boolean }) {
-  const { preference, setPreference } = useTheme();
-  const modes: { id: ThemePreference; Icon: typeof Sun; title: string }[] = [
-    { id: 'light', Icon: Sun, title: 'Light' },
-    { id: 'dark', Icon: Moon, title: 'Dark' },
-    { id: 'system', Icon: Monitor, title: 'System' },
-  ];
-
-  if (collapsed) {
-    return (
-      <div className="flex flex-col gap-0.5 items-center py-1">
-        {modes.map(({ id, Icon, title }) => (
-          <button
-            key={id}
-            title={title}
-            onClick={() => setPreference(id)}
-            className={`w-8 h-8 flex items-center justify-center rounded-lg transition-colors ${
-              preference === id ? 'bg-app-theme-active text-app-fg shadow-sm' : 'text-app-fg-subtle hover:bg-app-nav-hover-bg hover:text-app-fg'
-            }`}
-          >
-            <Icon size={15} strokeWidth={1.5} />
-          </button>
-        ))}
-      </div>
-    );
-  }
-
-  return (
-    <div className="mt-1 mb-2 px-0.5">
-      <div className="text-[9px] font-mono font-medium text-app-fg-label uppercase tracking-[0.12em] px-2.5 mb-1.5">
-        Appearance
-      </div>
-      <div className="flex gap-0.5 p-0.5 rounded-xl bg-app-theme-track border border-app-status-border" role="group">
-        {modes.map(({ id, Icon, title }) => (
-          <button
-            key={id}
-            title={title}
-            onClick={() => setPreference(id)}
-            className={`flex-1 flex items-center justify-center py-1.5 rounded-lg transition-colors ${
-              preference === id ? 'bg-app-theme-active text-app-fg shadow-sm' : 'text-app-fg-muted hover:text-app-fg'
-            }`}
-          >
-            <Icon size={15} strokeWidth={1.5} />
-          </button>
-        ))}
-      </div>
-    </div>
-  );
+  /** macOS desktop only: inset the header below the native traffic-light controls. */
+  macInset?: boolean;
 }
 
 // ── Workspace avatar (image > gradient + letter) ──────────────────────────────
@@ -235,7 +182,7 @@ function WorkspaceRow({
     <>
       <div
         onClick={onSelectWorkspace}
-        className={`group w-full flex items-center gap-2 pl-1.5 pr-1 py-[6px] text-[13px] rounded-xl transition-all duration-200 cursor-pointer ${
+        className={`group w-full flex items-center gap-2 pl-1.5 pr-1 py-[6px] text-[13px] rounded-lg transition-all duration-200 cursor-pointer ${
           isActive ? 'bg-app-nav-active-bg text-app-nav-active-fg font-medium' : 'text-app-nav-fg hover:bg-app-nav-hover-bg hover:text-app-nav-fg-hover'
         }`}
       >
@@ -256,7 +203,7 @@ function WorkspaceRow({
         <button
           onClick={e => { e.stopPropagation(); onCreateFolder(); }}
           title="Create folder"
-          className="opacity-0 group-hover:opacity-100 flex-shrink-0 w-5 h-5 flex items-center justify-center rounded-md text-app-fg-subtle hover:bg-app-nav-active-bg hover:text-app-fg transition-all"
+          className="opacity-0 group-hover:opacity-100 flex-shrink-0 w-5 h-5 flex items-center justify-center rounded-lg text-app-fg-subtle hover:bg-app-nav-active-bg hover:text-app-fg transition-all"
         >
           <Plus size={12} strokeWidth={1.8} />
         </button>
@@ -269,7 +216,7 @@ function WorkspaceRow({
           <div
             key={f.id}
             onClick={() => onSelectFolder(f)}
-            className={`group flex items-center gap-2 pl-7 pr-1 py-[5px] text-[12.5px] rounded-xl cursor-pointer transition-colors ${
+            className={`group flex items-center gap-2 pl-7 pr-1 py-[5px] text-[12.5px] rounded-lg cursor-pointer transition-colors ${
               folderActive ? 'bg-app-nav-active-bg text-app-nav-active-fg font-medium' : 'text-app-nav-fg hover:bg-app-nav-hover-bg hover:text-app-nav-fg-hover'
             }`}
           >
@@ -278,7 +225,7 @@ function WorkspaceRow({
             <button
               ref={el => { folderMoreRefs.current[f.id] = el; }}
               onClick={e => { e.stopPropagation(); setFolderMenu(f); }}
-              className="opacity-0 group-hover:opacity-100 flex-shrink-0 w-5 h-5 flex items-center justify-center rounded-md text-app-fg-subtle hover:bg-app-nav-active-bg hover:text-app-fg transition-all"
+              className="opacity-0 group-hover:opacity-100 flex-shrink-0 w-5 h-5 flex items-center justify-center rounded-lg text-app-fg-subtle hover:bg-app-nav-active-bg hover:text-app-fg transition-all"
             >
               <span className="text-[10px] leading-none">⋯</span>
             </button>
@@ -290,7 +237,7 @@ function WorkspaceRow({
       {expanded && folders.length === 0 && (
         <button
           onClick={onCreateFolder}
-          className="w-full flex items-center gap-2 pl-7 pr-2 py-[5px] text-[12px] rounded-xl text-app-fg-subtle hover:bg-app-nav-hover-bg hover:text-app-fg transition-colors"
+          className="w-full flex items-center gap-2 pl-7 pr-2 py-[5px] text-[12px] rounded-lg text-app-fg-subtle hover:bg-app-nav-hover-bg hover:text-app-fg transition-colors"
         >
           <FolderPlus size={12} strokeWidth={1.7} />
           <span className="truncate">Add folder</span>
@@ -340,6 +287,7 @@ export default function MainSidebar({
   onSignOut,
   status,
   isCompactMode = false,
+  macInset = false,
 }: MainSidebarProps) {
   const [pendingSyncCount, setPendingSyncCount] = useState(0);
   const [workspaces, setWorkspaces] = useState<Workspace[]>([]);
@@ -457,12 +405,11 @@ export default function MainSidebar({
   };
 
   const navItems = [
-    { id: 'process' as View, label: 'Record', icon: AudioLines },
-    { id: 'notes' as View, label: 'Notes', icon: PenLine },
-    { id: 'chat' as View, label: 'Chat', icon: MessageSquareText },
-    { id: 'knowledge' as View, label: 'Knowledge', icon: Network },
+    { id: 'process' as View, label: 'Home', icon: House },
+    { id: 'history' as View, label: 'Meetings', icon: MeetingsIcon },
+    { id: 'chat' as View, label: 'Chat', icon: ChatIcon },
+    { id: 'knowledge' as View, label: 'Knowledge', icon: GraphSparkleIcon },
     { id: 'people' as View, label: 'People', icon: Users },
-    { id: 'audio-devices' as View, label: 'Devices', icon: Headphones },
   ];
 
   // ── Collapsed: icon rail ────────────────────────────────────────────────────
@@ -472,10 +419,23 @@ export default function MainSidebar({
   // user can ALWAYS toggle between the 52px rail and the full sidebar.
   if (!isOpen) {
     return (
-      <div className="h-full w-[52px] bg-app-canvas flex flex-col items-center flex-shrink-0 font-sans">
-        {/* The shared global top bar holds the traffic lights + toggle, so the
-            rail just needs a small top gap before the nav icons. */}
-        <div className="pt-2 pb-1.5" />
+      <div className="sidebar-grain h-full w-[52px] bg-app-canvas flex flex-col items-center flex-shrink-0 font-sans">
+        {/* macOS: clear the native traffic lights; Windows: original 10px. flex-shrink-0 so a
+            short window can't compress this gap back under the lights. */}
+        <div className={`flex-shrink-0 ${macInset ? 'h-[44px]' : 'h-[10px]'}`} />
+
+        {/* Standalone sidebar toggle */}
+        <button
+          onClick={onToggle}
+          title="Open sidebar"
+          style={{ pointerEvents: 'all', cursor: 'pointer' }}
+          className="w-9 h-9 flex items-center justify-center rounded-lg text-app-fg-subtle hover:bg-app-nav-hover-bg hover:text-app-nav-fg-hover transition-colors flex-shrink-0 mb-1"
+        >
+          <svg xmlns="http://www.w3.org/2000/svg" width="19" height="19" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.8" strokeLinecap="round" strokeLinejoin="round" style={{ pointerEvents: 'none' }}>
+              <rect x="3" y="4.5" width="18" height="15" rx="4.5"/>
+              <rect x="5.6" y="7" width="3.1" height="10" rx="1.5" fill="currentColor" stroke="none"/>
+            </svg>
+        </button>
 
         <nav className="flex flex-col items-center gap-0.5 px-1.5">
           {navItems.map(({ id, label, icon: Icon }) => {
@@ -485,12 +445,12 @@ export default function MainSidebar({
                 key={id}
                 onClick={() => onViewChange(id)}
                 title={label}
-                className={`w-9 h-9 flex items-center justify-center rounded-xl transition-all duration-200 relative group ${
+                className={`w-9 h-9 flex items-center justify-center rounded-lg transition-all duration-200 relative group ${
                   isActive ? 'bg-app-nav-active-bg text-app-nav-active-fg shadow-sm' : 'text-app-fg-subtle hover:bg-app-nav-hover-bg hover:text-app-nav-fg-hover'
                 }`}
               >
                 <Icon size={17} strokeWidth={isActive ? 1.8 : 1.5} />
-                <div className="absolute left-full ml-2.5 px-2.5 py-1 bg-zinc-900 text-white dark:bg-zinc-100 dark:text-zinc-900 text-[10px] font-medium tracking-wide rounded-lg opacity-0 group-hover:opacity-100 pointer-events-none transition-opacity whitespace-nowrap z-[100]">
+                <div className="absolute left-full ml-2.5 px-2.5 py-1 bg-zinc-900 text-white text-[10px] font-medium tracking-wide rounded-lg opacity-0 group-hover:opacity-100 pointer-events-none transition-opacity whitespace-nowrap z-[100]">
                   {label}
                 </div>
               </button>
@@ -500,17 +460,15 @@ export default function MainSidebar({
 
         <div className="flex-1 min-h-0" />
 
-        <ThemeAppearancePicker collapsed />
-
         <div className="flex flex-col items-center gap-0.5 pb-3 px-1.5">
           <button
             onClick={() => onViewChange('history')}
-            className={`w-9 h-9 flex items-center justify-center rounded-xl transition-all duration-200 relative ${
+            className={`w-9 h-9 flex items-center justify-center rounded-lg transition-all duration-200 relative ${
               currentView === 'history' ? 'bg-app-nav-active-bg text-app-nav-active-fg shadow-sm' : 'text-app-fg-subtle hover:bg-app-nav-hover-bg hover:text-app-nav-fg-hover'
             }`}
             title="History"
           >
-            <Clock size={17} strokeWidth={1.5} />
+            <MeetingsIcon size={17} strokeWidth={1.7} />
             {pendingSyncCount > 0 && (
               <span className="absolute -top-0.5 -right-0.5 min-w-[14px] h-[14px] px-0.5 rounded-full bg-amber-500 text-white text-[8px] font-semibold leading-[14px] text-center">
                 {pendingSyncCount > 9 ? '9+' : pendingSyncCount}
@@ -519,7 +477,7 @@ export default function MainSidebar({
           </button>
           <button
             onClick={onSignOut}
-            className="w-9 h-9 flex items-center justify-center rounded-xl text-app-fg-subtle hover:bg-red-50 hover:text-red-500 dark:hover:bg-red-950/40 dark:hover:text-red-400 transition-all duration-200"
+            className="w-9 h-9 flex items-center justify-center rounded-lg text-app-fg-subtle hover:bg-red-50 hover:text-red-500 dark:hover:bg-red-950/40 dark:hover:text-red-400 transition-all duration-200"
             title="Sign Out"
           >
             <LogOut size={15} strokeWidth={1.5} />
@@ -539,86 +497,77 @@ export default function MainSidebar({
         <div className="fixed inset-0 z-[60]" onClick={onToggle} />
       )}
 
-      <div className={`bg-app-canvas flex flex-col flex-shrink-0 font-sans ${
+      <div className={`sidebar-grain bg-app-canvas flex flex-col flex-shrink-0 font-sans ${
         isCompactMode
           ? 'fixed left-2 top-[34px] bottom-2 w-[260px] z-[70] rounded-2xl border border-app-border shadow-2xl'
           : 'fixed md:relative h-full w-[200px] z-[70]'
       }`}>
-        {/* Small top gap — the shared global top bar already clears the traffic
-            lights, so no tall drag strip is needed here. */}
-        <div className="w-full flex-shrink-0 h-2" />
+        {/* 10px spacer matches the closed-state rail exactly — App.tsx widens the
+            drag-region exclusion zone to left-[200px] when the sidebar is open, so
+            the right-aligned toggle at x≈154px is outside the drag region at any y.
+            On macOS, inset further so the logo + title clear the native traffic lights. */}
+        <div className={`w-full flex-shrink-0 ${macInset ? 'h-[44px]' : 'h-[10px]'}`} />
 
-        {/* Brand header — toggle lives in the shared global top bar. */}
-        <div className="flex items-center gap-2 px-4 pt-0.5 pb-4">
-          <div className="flex items-center gap-1.5 ml-0.5">
-            <img src="/logo.png" alt="Logo" className="w-5 h-5 rounded-full object-cover" />
-            <span className="text-[15px] font-serif italic font-semibold text-app-fg tracking-[-0.01em]">
-              Wisprnote
-            </span>
-            <span className="text-[9px] font-mono font-medium bg-app-badge-bg text-app-badge-fg px-1.5 py-0.5 rounded-md uppercase tracking-wider">
-              Pro
-            </span>
+        {/* Header row: logo + name on left, close toggle on right */}
+        <div className="flex items-center px-2 flex-shrink-0 mb-1">
+          <div className="flex items-center gap-2 flex-1 min-w-0 pl-1">
+            <WisprnoteLogo className="w-[26px] h-[26px] flex-shrink-0" />
+            <span style={{ fontFamily: "'EB Garamond', Georgia, serif" }} className="text-[17px] font-semibold text-app-fg tracking-[-0.01em] truncate">Wisprnote</span>
           </div>
+          <button
+            onClick={onToggle}
+            title="Close sidebar"
+            style={{ pointerEvents: 'all', cursor: 'pointer' }}
+            className="w-9 h-9 flex items-center justify-center rounded-lg text-app-fg-subtle hover:bg-app-nav-hover-bg hover:text-app-nav-fg-hover transition-colors flex-shrink-0"
+          >
+            <svg xmlns="http://www.w3.org/2000/svg" width="19" height="19" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.8" strokeLinecap="round" strokeLinejoin="round" style={{ pointerEvents: 'none' }}>
+                <rect x="3" y="4.5" width="18" height="15" rx="4.5"/>
+                <path d="M8.6 4.5V19.5"/>
+              </svg>
+          </button>
         </div>
 
-        {/* Main nav */}
-        <nav className="px-2.5 space-y-px flex-shrink-0">
+        {/* Main nav — identical icon container (w-9 h-9, size=17, gap-0.5) to the
+            closed rail so nothing changes except the text label appearing beside it. */}
+        <nav className="px-2 flex flex-col gap-0.5 flex-shrink-0">
           {navItems.map(({ id, label, icon: Icon }) => {
             const isActive = currentView === id;
             return (
               <button
                 key={id}
                 onClick={() => onViewChange(id)}
-                className={`w-full flex items-center gap-2.5 px-2.5 py-[7px] text-[13px] rounded-xl transition-all duration-200 ${
-                  isActive ? 'bg-app-nav-active-bg text-app-nav-active-fg font-medium shadow-sm' : 'text-app-nav-fg hover:bg-app-nav-hover-bg hover:text-app-nav-fg-hover'
+                className={`w-full flex items-center rounded-lg transition-all duration-200 ${
+                  isActive ? 'bg-app-nav-active-bg text-app-nav-active-fg font-medium' : 'text-app-nav-fg hover:bg-app-nav-hover-bg hover:text-app-nav-fg-hover'
                 }`}
               >
-                <Icon size={15} strokeWidth={isActive ? 1.8 : 1.5} className="flex-shrink-0" />
-                <span className="tracking-[-0.01em]">{label}</span>
+                <div className="w-9 h-9 flex items-center justify-center flex-shrink-0">
+                  <Icon size={17} strokeWidth={isActive ? 1.8 : 1.5} />
+                </div>
+                <span className="text-[13px] tracking-[-0.01em]">{label}</span>
+                {id === 'history' && pendingSyncCount > 0 && (
+                  <span className="ml-auto mr-2 inline-flex items-center rounded-full bg-amber-100 text-amber-800 dark:bg-amber-500/20 dark:text-amber-200 text-[9px] font-mono font-medium px-1.5 py-[1px]">
+                    {pendingSyncCount > 99 ? '99+' : pendingSyncCount}
+                  </span>
+                )}
               </button>
             );
           })}
         </nav>
 
-        {/* Recent — FIXED (does not scroll with Spaces). */}
-        <div className="mt-5 px-2.5 flex-shrink-0">
-          <div className="text-[9px] font-mono font-medium text-app-fg-label uppercase tracking-[0.12em] px-2.5 mb-1.5">
-            Recent
-          </div>
-          <button
-            onClick={() => onViewChange('history')}
-            className={`w-full flex items-center gap-2.5 px-2.5 py-[7px] text-[13px] rounded-xl transition-all duration-200 ${
-              currentView === 'history' ? 'bg-app-nav-active-bg text-app-nav-active-fg font-medium shadow-sm' : 'text-app-nav-fg hover:bg-app-nav-hover-bg hover:text-app-nav-fg-hover'
-            }`}
-          >
-            <Clock size={15} strokeWidth={1.5} className="flex-shrink-0" />
-            <span className="tracking-[-0.01em]">All Meetings</span>
-            {pendingSyncCount > 0 && (
-              <span className="ml-auto inline-flex items-center rounded-full bg-amber-100 text-amber-800 dark:bg-amber-500/20 dark:text-amber-200 text-[9px] font-mono font-medium px-1.5 py-[1px]">
-                {pendingSyncCount > 99 ? '99+' : pendingSyncCount}
-              </span>
-            )}
-          </button>
-        </div>
-
-        {/* Scrollable region — ONLY the Spaces list scrolls; the nav and the
-            All Meetings row above stay fixed (Granola-style). */}
-        <div className="flex-1 min-h-0 overflow-y-auto no-scrollbar">
-        {/* Spaces */}
-        <div className="mt-4 px-2.5">
-          <div className="flex items-center px-2.5 mb-1.5">
-            <span className="flex-1 text-[9px] font-mono font-medium text-app-fg-label uppercase tracking-[0.12em]">Spaces</span>
+        {/* Spaces — workspaces + folders */}
+        <div className="flex-1 min-h-0 overflow-y-auto px-2 mt-3">
+          <div className="group/sp flex items-center justify-between pl-2.5 pr-1 mb-1">
+            <span className="text-[12px] font-medium text-app-fg-subtle tracking-[-0.01em]">Spaces</span>
             <button
-              onClick={() => setShowCreateWizard(true)}
-              title="Add workspace"
-              className="w-4 h-4 flex items-center justify-center rounded text-app-fg-subtle hover:text-app-fg transition-colors"
+              onClick={() => onViewChange('spaces')}
+              title="Manage spaces"
+              className="w-5 h-5 flex items-center justify-center rounded-md text-app-fg-subtle opacity-0 group-hover/sp:opacity-100 hover:bg-app-nav-hover-bg hover:text-app-fg transition-all"
             >
-              <Plus size={11} strokeWidth={2} />
+              <ArrowRight size={14} strokeWidth={1.8} />
             </button>
           </div>
-
-          <div className="space-y-px">
-            {workspaces.map(ws => (
+          <div className="flex flex-col gap-0.5">
+            {workspaces.slice(0, 2).map(ws => (
               <WorkspaceRow
                 key={ws.id}
                 ws={ws}
@@ -631,39 +580,26 @@ export default function MainSidebar({
                 onSelectFolder={(f) => handleSelectFolder(ws, f)}
                 onCreateFolder={() => setFolderModalForWs(ws.id)}
                 onRenameWorkspace={() => handleRenameWorkspace(ws)}
-                onShareWorkspace={() => onViewChange('settings')}
+                onShareWorkspace={() => onViewChange('workspace')}
                 onDeleteWorkspace={() => handleDeleteWorkspace(ws)}
                 onRenameFolder={(f) => setRenameTarget({ type: 'folder', id: f.id, name: f.name })}
-                onShareFolder={() => onViewChange('settings')}
+                onShareFolder={() => onViewChange('workspace')}
                 onDeleteFolder={(f) => handleDeleteFolderById(ws, f)}
               />
             ))}
-
-            {/* Bottom "Add folder" — creates folder under the currently selected workspace */}
-            {selection.workspaceId && (
+            {workspaces.length > 2 && (
               <button
-                onClick={() => setFolderModalForWs(selection.workspaceId)}
-                className="w-full flex items-center gap-2 pl-1.5 pr-2 py-[6px] text-[12.5px] rounded-xl text-app-fg-subtle hover:bg-app-nav-hover-bg hover:text-app-nav-fg-hover transition-all duration-200"
+                onClick={() => onViewChange('spaces')}
+                title="View all spaces"
+                className="w-full flex items-center gap-2 pl-1.5 pr-1 py-[6px] text-[13px] rounded-lg text-app-nav-fg hover:bg-app-nav-hover-bg hover:text-app-nav-fg-hover transition-all"
               >
-                <FolderPlus size={13} strokeWidth={1.6} />
-                <span>Add folder</span>
+                <span className="w-4 flex-shrink-0" />
+                <MoreHorizontal size={16} strokeWidth={1.8} className="flex-shrink-0 text-app-fg-subtle" />
+                <span className="tracking-[-0.01em]">More</span>
               </button>
             )}
           </div>
         </div>
-        {/* pad the bottom of the scroll region a touch */}
-        <div className="h-2" />
-        </div>{/* end scrollable middle */}
-
-        {/* Create folder modal */}
-        {folderModalForWs && (
-          <CreateFolderModal
-            workspaces={workspaces}
-            defaultWorkspaceId={folderModalForWs}
-            onClose={() => setFolderModalForWs(null)}
-            onCreate={(draft) => handleFolderCreated(draft.workspaceId, draft)}
-          />
-        )}
 
         {/* Inline rename modal */}
         {renameTarget && (
@@ -687,22 +623,10 @@ export default function MainSidebar({
           </div>
         )}
 
-        {/* Status pill — part of the pinned footer */}
-        <div className="mt-3 mx-4 flex-shrink-0">
-          <div className="flex items-center gap-2 px-2.5 py-2 bg-app-status-bg rounded-xl border border-app-status-border">
-            <div className={`w-[5px] h-[5px] rounded-full ${status === 'idle' ? 'bg-emerald-500' : 'bg-amber-500 animate-pulse'}`} />
-            <span className="text-[10px] font-mono font-medium text-app-status-fg uppercase tracking-wider">
-              {status !== 'idle' ? status.charAt(0).toUpperCase() + status.slice(1) : 'Ready'}
-            </span>
-          </div>
-        </div>
 
-        {/* Bottom section — pinned footer (appearance + account) */}
+
+        {/* Bottom section — pinned footer (account) */}
         <div className="px-2.5 pb-3 pt-2 space-y-1 flex-shrink-0">
-          <ThemeAppearancePicker />
-
-          <div className="h-px bg-app-divider w-full my-1" />
-
           <WorkspaceSwitcher
             workspaces={workspaces}
             activeWorkspaceId={workspaces[0]?.id ?? null}
@@ -722,6 +646,15 @@ export default function MainSidebar({
             session={session}
             onClose={() => setShowCreateWizard(false)}
             onCreated={handleWorkspaceCreated}
+          />
+        )}
+
+        {folderModalForWs && (
+          <CreateFolderModal
+            workspaces={workspaces}
+            defaultWorkspaceId={folderModalForWs}
+            onClose={() => setFolderModalForWs(null)}
+            onCreate={(draft) => handleFolderCreated(draft.workspaceId, draft)}
           />
         )}
       </div>

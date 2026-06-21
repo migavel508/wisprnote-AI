@@ -112,12 +112,14 @@ export default function BrainMapModal({ workspaceId, workspaceName, folderId = n
     const fg = fgRef.current;
     if (!fg || !graph.nodes.length) return;
     const n = graph.nodes.length;
+    // Obsidian-style spread: strong even repulsion + long, LOOSE links so clusters
+    // open up into a readable web instead of collapsing into a hairball.
     const charge = fg.d3Force?.('charge');
-    if (charge?.strength) { charge.strength(-180 - Math.min(n * 6, 600)); charge.distanceMax?.(900); }
+    if (charge?.strength) { charge.strength(-260 - Math.min(n * 9, 1000)); charge.distanceMax?.(1600); }
     const link = fg.d3Force?.('link');
-    if (link?.distance) { link.distance((l: any) => (l.verdict ? 70 : 130)); link.strength?.((l: any) => (l.verdict ? 0.5 : 0.12)); }
+    if (link?.distance) { link.distance((l: any) => (l.verdict ? 95 : 165)); link.strength?.((l: any) => (l.verdict ? 0.2 : 0.045)); }
     const center = fg.d3Force?.('center');
-    if (center?.strength) center.strength(0.04);
+    if (center?.strength) center.strength(0.05);
     fg.d3ReheatSimulation?.();
   }, [graph]);
 
@@ -200,7 +202,7 @@ export default function BrainMapModal({ workspaceId, workspaceName, folderId = n
               <span className="text-app-fg-subtle/80">reasoning:</span>
               <span className="inline-flex items-center gap-1.5"><span className="w-5 h-[2.5px] rounded-full" style={{ background: verdictColor('aligned')!, boxShadow: `0 0 5px ${verdictColor('aligned')}` }} /> aligned</span>
               <span className="inline-flex items-center gap-1.5"><span className="w-5 h-[2.5px] rounded-full" style={{ background: verdictColor('partial')!, boxShadow: `0 0 5px ${verdictColor('partial')}` }} /> partial</span>
-              <span className="inline-flex items-center gap-1.5"><span className="w-5 h-[2.5px] rounded-full border-dashed" style={{ background: verdictColor('divergent')!, boxShadow: `0 0 5px ${verdictColor('divergent')}` }} /> divergent</span>
+              <span className="inline-flex items-center gap-1.5"><span className="w-5 h-[2.5px] rounded-full" style={{ background: verdictColor('divergent')!, boxShadow: `0 0 5px ${verdictColor('divergent')}` }} /> divergent</span>
             </span>
           )}
           <span className="ml-auto text-app-fg-subtle/70">Hover to spotlight a lineage · click a line for its reasoning · click a node for details</span>
@@ -229,7 +231,7 @@ export default function BrainMapModal({ workspaceId, workspaceName, folderId = n
               onEngineStop={() => fgRef.current?.zoomToFit?.(450, 60)}
               minZoom={0.15}
               maxZoom={9}
-              linkCurvature={(l: any) => (l.verdict ? 0.14 : 0.04)}
+              linkCurvature={(l: any) => (l.verdict ? 0.08 : 0)}
               linkDirectionalParticles={(l: any) => (l.verdict && focusSet && (focusSet.has(idOf(l.source)) && focusSet.has(idOf(l.target))) ? 3 : 0)}
               linkDirectionalParticleWidth={2}
               linkDirectionalParticleSpeed={0.006}
@@ -244,28 +246,40 @@ export default function BrainMapModal({ workspaceId, workspaceName, folderId = n
               linkCanvasObject={(link: any, ctx: CanvasRenderingContext2D, scale: number) => {
                 const a = link.source, b = link.target;
                 if (!a || !b || !Number.isFinite(a.x) || !Number.isFinite(a.y) || !Number.isFinite(b.x) || !Number.isFinite(b.y)) return;
-                const onFocus = !focusSet || (focusSet.has(idOf(a)) && focusSet.has(idOf(b)));
+                // Three honest states: REST (no hover) is calm + readable; a spotlighted
+                // lineage is bold + glowing; everything off the lineage fades back.
+                const spotlighting = !!focusSet;
+                const onLineage = spotlighting && focusSet.has(idOf(a)) && focusSet.has(idOf(b));
                 const vCol = verdictColor(link.verdict);
-                // gentle quadratic curve (matches react-force-graph's curvature placement)
                 const cx = (a.x + b.x) / 2, cy = (a.y + b.y) / 2;
-                const curv = link.verdict ? 0.14 : 0.04;
+                const curv = link.verdict ? 0.08 : 0;   // near-straight, Obsidian-style
                 const nx = -(b.y - a.y), ny = (b.x - a.x);
                 const mx = cx + nx * curv, my = cy + ny * curv;
-                const draw = (w: number) => { ctx.beginPath(); ctx.moveTo(a.x, a.y); ctx.quadraticCurveTo(mx, my, b.x, b.y); ctx.lineWidth = w / scale; ctx.stroke(); };
+                const draw = (w: number) => {
+                  ctx.beginPath(); ctx.moveTo(a.x, a.y);
+                  if (curv) ctx.quadraticCurveTo(mx, my, b.x, b.y); else ctx.lineTo(b.x, b.y);
+                  ctx.lineWidth = w / scale; ctx.stroke();
+                };
                 ctx.save();
                 ctx.lineCap = 'round';
+                // SOLID everywhere — no dashes (divergent stays distinct by its red colour).
                 if (vCol) {
-                  ctx.globalAlpha = onFocus ? 0.95 : 0.10;
                   ctx.strokeStyle = vCol;
-                  if (link.verdict === 'divergent') ctx.setLineDash([5 / scale, 4 / scale]);
-                  ctx.shadowColor = vCol; ctx.shadowBlur = (onFocus ? 12 : 0) / scale;
-                  draw(onFocus ? 2.4 : 1.6);
-                  ctx.shadowBlur = 0; ctx.globalAlpha = onFocus ? 1 : 0.12; draw(onFocus ? 1.1 : 0.8);   // tight core
+                  if (onLineage) {
+                    ctx.shadowColor = vCol; ctx.shadowBlur = 9 / scale;
+                    ctx.globalAlpha = 0.95; draw(2.1);
+                    ctx.shadowBlur = 0; ctx.globalAlpha = 1; draw(0.9);     // tight core
+                  } else if (spotlighting) {
+                    ctx.globalAlpha = 0.08; draw(1);                        // off-lineage — recede
+                  } else {
+                    ctx.globalAlpha = 0.6; draw(1.2);                       // REST — calm, no glow
+                  }
                 } else {
-                  ctx.globalAlpha = onFocus ? (focusSet ? 0.5 : 0.22) : 0.05;
-                  ctx.strokeStyle = isDark ? 'rgba(190,190,205,0.5)' : 'rgba(120,112,100,0.55)';
-                  ctx.setLineDash([2 / scale, 5 / scale]);
-                  draw(0.8);
+                  // structural threads — a solid, clearly legible web (secondary to
+                  // reasoning by being thinner + neutral grey, not by being dotted).
+                  ctx.strokeStyle = isDark ? 'rgba(150,156,172,1)' : 'rgba(124,116,104,1)';
+                  ctx.globalAlpha = onLineage ? 0.65 : spotlighting ? 0.07 : 0.5;
+                  draw(0.7);
                 }
                 ctx.restore();
               }}
@@ -280,11 +294,16 @@ export default function BrainMapModal({ workspaceId, workspaceName, folderId = n
                 const r = (isAnchor ? 5 : 3.4) * (isSel || isHover ? 1.25 : 1);
                 ctx.save();
                 ctx.globalAlpha = lit ? 1 : 0.18;
-                // soft radial glow
-                const g = ctx.createRadialGradient(node.x, node.y, 0, node.x, node.y, r * 2.6);
-                g.addColorStop(0, col); g.addColorStop(0.5, `${col}66`); g.addColorStop(1, `${col}00`);
+                // soft radial glow — subtle at rest (keeps dense clusters clean),
+                // brighter only for the hovered/selected node.
+                const hot = isSel || isHover;
+                const glowR = r * (hot ? 2.8 : 1.9);
+                const g = ctx.createRadialGradient(node.x, node.y, 0, node.x, node.y, glowR);
+                g.addColorStop(0, `${col}${hot ? 'cc' : '88'}`);
+                g.addColorStop(0.5, `${col}${hot ? '33' : '1f'}`);
+                g.addColorStop(1, `${col}00`);
                 ctx.fillStyle = g;
-                ctx.beginPath(); ctx.arc(node.x, node.y, r * 2.6, 0, 2 * Math.PI); ctx.fill();
+                ctx.beginPath(); ctx.arc(node.x, node.y, glowR, 0, 2 * Math.PI); ctx.fill();
                 // solid core with a thin ring against the canvas so dense areas stay legible
                 ctx.beginPath(); ctx.arc(node.x, node.y, r, 0, 2 * Math.PI);
                 ctx.fillStyle = col; ctx.fill();

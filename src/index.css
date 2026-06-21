@@ -1,4 +1,4 @@
-@import url('https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&family=JetBrains+Mono:wght@400;500&family=Newsreader:ital,wght@0,400;0,500;0,600;1,400;1,500;1,600&display=swap');
+@import url('https://fonts.googleapis.com/css2?family=EB+Garamond:ital,wght@0,400;0,500;0,600;1,400;1,500;1,600&family=Inter:wght@400;500;600;700&family=JetBrains+Mono:wght@400;500&display=swap');
 @import "tailwindcss";
 
 @custom-variant dark (&:where(.dark, .dark *));
@@ -6,121 +6,146 @@
 @theme {
   --font-sans: "Inter", ui-sans-serif, system-ui, sans-serif;
   --font-mono: "JetBrains Mono", ui-monospace, SFMono-Regular, monospace;
-  --font-serif: "Newsreader", "Cormorant Garamond", ui-serif, Georgia, serif;
+  --font-serif: "EB Garamond", Georgia, ui-serif, serif;
 
-  /* Softer, Flow-style corner hierarchy (see theme radius scale in Tailwind v4) */
-  --radius-xs: 0.25rem; /* 4px — micro */
-  --radius-sm: 0.375rem; /* 6px — tags, pills */
-  --radius-md: 0.625rem; /* 10px — buttons, inputs */
-  --radius-lg: 0.75rem; /* 12px — small surfaces */
-  --radius-xl: 0.875rem; /* 14px — cards, controls */
-  --radius-2xl: 1.25rem; /* 20px — modals, banners */
-  --radius-3xl: 1.75rem; /* 28px — main content shell */
-  --radius-4xl: 2rem; /* 32px — largest frames */
-  --radius: 0.625rem; /* default `rounded` → 10px */
+  /* Corner radius scale */
+  --radius-xs: 0.25rem;   /* 4px */
+  --radius-sm: 0.375rem;  /* 6px */
+  --radius-md: 0.5rem;    /* 8px — buttons, inputs */
+  --radius-lg: 0.75rem;   /* 12px — cards */
+  --radius-xl: 0.875rem;  /* 14px — surfaces */
+  --radius-2xl: 1.25rem;  /* 20px — modals */
+  --radius-3xl: 1.75rem;  /* 28px — main shell */
+  --radius-4xl: 2rem;     /* 32px */
+  --radius: 0.5rem;
 
-  /* App shell — light defaults; `.dark` overrides in @layer theme.
-     Refined warm "paper" palette (Flow-style): a light, low-saturation cream
-     instead of a heavy tan, near-black warm ink, and an amber accent. */
-  --color-app-canvas: #f4f2ec;
-  --color-app-panel: #ffffff;
-  --color-app-border: rgb(38 32 24 / 0.08);
-  --color-app-border-strong: #e6e0d5;
-  --color-app-card-border: rgb(38 32 24 / 0.07);
-  --color-app-fg: #1c1a17;
-  --color-app-fg-muted: #6c655c;
-  --color-app-fg-subtle: #968d81;
-  --color-app-fg-label: #a59c8f;
-  --color-app-nav-active-bg: #e9e4d9;
-  --color-app-nav-active-fg: #1c1a17;
-  --color-app-nav-hover-bg: #efebe2;
-  --color-app-nav-fg: #6c655c;
-  --color-app-nav-fg-hover: #2e2a24;
-  --color-app-badge-bg: #e9e4d9;
-  --color-app-badge-fg: #6c655c;
-  --color-app-divider: rgb(38 32 24 / 0.07);
-  --color-app-status-bg: rgb(255 255 255 / 0.5);
-  --color-app-status-border: rgb(38 32 24 / 0.08);
-  --color-app-status-fg: #837b71;
-  --color-app-theme-track: rgb(0 0 0 / 0.04);
+  /* ── Neutral design system — content area (light mode) ─────────── */
+  --color-app-canvas: #FAF9F5;       /* pure light gray canvas */
+  --color-app-panel: #FAFAFA;        /* main content surface */
+  --color-app-raised: #F2F2F2;       /* soft surface */
+  --color-app-chip: #E8E8E8;         /* card surface */
+
+  --color-app-border: rgba(0, 0, 0, 0.08);
+  --color-app-border-strong: #E0E0E0;
+  --color-app-card-border: rgba(0, 0, 0, 0.07);
+  --color-app-divider: rgba(0, 0, 0, 0.07);
+
+  --color-app-fg: #1a1a1a;           /* ink */
+  --color-app-fg-muted: #666666;     /* body */
+  --color-app-fg-subtle: #888888;    /* muted */
+  --color-app-fg-label: #a0a0a0;     /* label */
+
+  /* Nav vars — used in floating context menus and mobile nav (light bg) */
+  --color-app-nav-active-bg: #e8e8e8;
+  --color-app-nav-active-fg: #1a1a1a;
+  --color-app-nav-hover-bg: #f0f0f0;
+  --color-app-nav-fg: #666666;
+  --color-app-nav-fg-hover: #1a1a1a;
+
+  --color-app-badge-bg: #e8e8e8;
+  --color-app-badge-fg: #666666;
+
+  --color-app-status-bg: rgba(255, 255, 255, 0.55);
+  --color-app-status-border: rgba(0, 0, 0, 0.08);
+  --color-app-status-fg: #888888;
+
+  --color-app-theme-track: rgba(0, 0, 0, 0.04);
   --color-app-theme-active: #ffffff;
-  /* Nested surfaces (cards, composers) — light */
-  --color-app-raised: #faf9f6;
-  --color-app-chip: #ffffff;
-  /* Amber accent for primary actions / highlights (Flow-style). */
-  --color-app-accent: #f3a738;
-  --color-app-accent-hover: #e8991f;
-  --color-app-accent-fg: #1c1a17;
-  /* Knowledge-graph brand green (#819C1F) palette — light mode.
-     kg-accent = brand fill, kg-accent-soft = creamy light-green tint surface,
-     kg-glow = neon/glow on the graph canvas. */
+
+  /* ── Sidebar — permanently dark olive-night ─────────────────────── */
+  /* These never flip with light/dark; only --color-sidebar darkens slightly in dark mode */
+  --color-sidebar: #22271a;
+  --color-sidebar-fg: #f2f5ea;
+  --color-sidebar-fg-muted: #9da88a;
+  --color-sidebar-border: rgba(255, 255, 255, 0.06);
+  --color-sidebar-divider: rgba(255, 255, 255, 0.08);
+  --color-sidebar-nav-active-bg: rgba(129, 156, 31, 0.16);
+  --color-sidebar-nav-hover-bg: rgba(255, 255, 255, 0.05);
+  --color-sidebar-badge-bg: rgba(129, 156, 31, 0.20);
+  --color-sidebar-badge-fg: #c5dc7a;
+  --color-sidebar-theme-active: rgba(255, 255, 255, 0.13);
+  --color-sidebar-theme-track: rgba(0, 0, 0, 0.28);
+
+  /* ── Olive primary accent ────────────────────────────────────────── */
+  --color-app-accent: #819C1F;
+  --color-app-accent-hover: #698016;
+  --color-app-accent-fg: #ffffff;
+
+  /* ── Knowledge graph palette (olive) ────────────────────────────── */
   --color-kg-accent: #819c1f;
-  --color-kg-accent-strong: #6f871a;
+  --color-kg-accent-strong: #698016;
   --color-kg-accent-fg: #ffffff;
-  --color-kg-accent-soft: #eef3dd;
-  --color-kg-accent-border: rgba(129, 156, 31, 0.42);
-  --color-kg-glow: #8fae28;
+  --color-kg-accent-soft: rgba(129, 156, 31, 0.12);
+  --color-kg-accent-border: rgba(129, 156, 31, 0.40);
+  --color-kg-glow: #a3c429;
 }
 
 @layer theme {
   .dark {
-    /*
-     * Layered charcoal (reference-style): sidebar ≠ main ≠ inner “raised” blocks.
-     * Avoid pure black — slight warmth between steps.
-     */
-    --color-app-canvas: #141414;
-    --color-app-panel: #1c1c1c;
-    --color-app-raised: #2c2c2c;
-    --color-app-chip: #383838;
+    /* Design system dark surfaces — surface-dark / surface-dark-soft / surface-dark-elevated */
+    --color-app-canvas: #141414;       /* surface-dark — deep background */
+    --color-app-panel: #232323;        /* surface-dark-soft — elevated sheet */
+    --color-app-raised: #262626;       /* surface-dark-elevated */
+    --color-app-chip: #2e2e2e;
 
-    --color-app-border: rgb(255 255 255 / 0.06);
-    --color-app-border-strong: #2f2f2f;
-    --color-app-card-border: rgb(255 255 255 / 0.09);
+    --color-app-border: rgba(255, 255, 255, 0.07);
+    --color-app-border-strong: #383838;
+    --color-app-card-border: rgba(255, 255, 255, 0.08);
+    --color-app-divider: rgba(255, 255, 255, 0.06);
 
-    --color-app-fg: #f5f5f5;
-    --color-app-fg-muted: #a3a3a3;
+    --color-app-fg: #ececec;           /* on-dark */
+    --color-app-fg-muted: #a3a3a3;     /* on-dark-soft */
     --color-app-fg-subtle: #737373;
-    --color-app-fg-label: #8a8a8a;
+    --color-app-fg-label: #737373;
 
-    --color-app-nav-active-bg: #2c2c2c;
-    --color-app-nav-active-fg: #f5f5f5;
-    --color-app-nav-hover-bg: #1a1a1a;
-    --color-app-nav-fg: #9ca3af;
-    --color-app-nav-fg-hover: #e5e5e5;
+    --color-app-nav-active-bg: #2e2e2e;
+    --color-app-nav-active-fg: #ececec;
+    --color-app-nav-hover-bg: #262626;
+    --color-app-nav-fg: #a3a3a3;
+    --color-app-nav-fg-hover: #ececec;
 
-    --color-app-badge-bg: #2c2c2c;
-    --color-app-badge-fg: #b0b0b0;
+    --color-app-badge-bg: #2e2e2e;
+    --color-app-badge-fg: #a3a3a3;
 
-    --color-app-divider: rgb(255 255 255 / 0.06);
-    --color-app-status-bg: rgb(44 44 44 / 0.72);
-    --color-app-status-border: rgb(255 255 255 / 0.08);
+    --color-app-status-bg: rgba(33, 33, 33, 0.88);
+    --color-app-status-border: rgba(255, 255, 255, 0.08);
     --color-app-status-fg: #a3a3a3;
 
-    --color-app-theme-track: rgb(0 0 0 / 0.35);
-    --color-app-theme-active: #2c2c2c;
+    --color-app-theme-track: rgba(0, 0, 0, 0.45);
+    --color-app-theme-active: #2e2e2e;
 
-    /* Amber accent — same hue reads well on charcoal. */
-    --color-app-accent: #f3a738;
-    --color-app-accent-hover: #ffb74d;
-    --color-app-accent-fg: #1c1a17;
-    /* KG green — brightened so it pops on the dark constellation canvas. */
-    --color-kg-accent: #a6c64a;
-    --color-kg-accent-strong: #b9d96a;
-    --color-kg-accent-fg: #16210b;
-    --color-kg-accent-soft: rgba(166, 198, 74, 0.16);
-    --color-kg-accent-border: rgba(166, 198, 74, 0.45);
-    --color-kg-glow: #b9d96a;
+    /* Olive accent — brand color, pops well on neutral dark */
+    --color-app-accent: #a3c429;
+    --color-app-accent-hover: #b5d43d;
+    --color-app-accent-fg: #1a1a1a;
+
+    --color-kg-accent: #a3c429;
+    --color-kg-accent-strong: #b5d43d;
+    --color-kg-accent-fg: #1a1a1a;
+    --color-kg-accent-soft: rgba(163, 196, 41, 0.12);
+    --color-kg-accent-border: rgba(163, 196, 41, 0.35);
+    --color-kg-glow: #b5d43d;
   }
 }
 
+/* Canvas and sidebar grain — background-image layer; child elements with their
+   own background-color cover this completely, so content is unaffected. */
+#app-shell,
+.sidebar-grain {
+  background-image: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='150' height='150'%3E%3Cfilter id='n'%3E%3CfeTurbulence type='fractalNoise' baseFrequency='0.65' numOctaves='6' stitchTiles='stitch'/%3E%3CfeColorMatrix type='saturate' values='0'/%3E%3C/filter%3E%3Crect width='150' height='150' filter='url(%23n)' opacity='0.12'/%3E%3C/svg%3E");
+  background-repeat: repeat;
+  background-size: 150px 150px;
+}
+
 @layer base {
-  /* Root layers are TRANSPARENT (see the !important block in index.html). The
-     opaque app background is painted by the inner full-size shell in App.tsx
-     (h-screen w-screen bg-app-canvas), NOT by the roots — this is what lets the
-     window resize smoothly without a black flash (matches the reference app:
-     transparent webview roots + macOSPrivateApi + opaque inner container). */
+  /* Root layers are TRANSPARENT. The opaque background is painted by the inner
+     shell in App.tsx — this prevents black flash on window resize. */
   html, body, #root {
     height: 100%;
+    width: 100%;
+    overflow: hidden;
+    margin: 0;
+    padding: 0;
   }
   html {
     @apply text-app-fg antialiased;
@@ -130,10 +155,10 @@
     @apply text-sm leading-relaxed text-app-fg;
   }
   .markdown-body h1 {
-    @apply text-xl font-serif italic font-bold mb-4 mt-6;
+    @apply text-xl font-serif font-semibold mb-4 mt-6;
   }
   .markdown-body h2 {
-    @apply text-lg font-serif italic font-bold mb-3 mt-5;
+    @apply text-lg font-serif font-semibold mb-3 mt-5;
   }
   .markdown-body p {
     @apply mb-4;
@@ -145,19 +170,19 @@
     @apply list-decimal list-inside mb-4;
   }
   .markdown-body blockquote {
-    @apply border-l-2 border-app-fg pl-4 italic my-4;
+    @apply border-l-2 border-app-border-strong pl-4 italic my-4 text-app-fg-muted;
   }
   .markdown-body table {
-    @apply w-full border-collapse border border-zinc-300 dark:border-zinc-600 my-6 text-xs sm:text-sm;
+    @apply w-full border-collapse border border-app-border-strong my-6 text-xs sm:text-sm;
   }
   .markdown-body th {
-    @apply border border-zinc-300 dark:border-zinc-600 bg-zinc-100 dark:bg-zinc-800 text-app-fg px-4 py-2 text-left font-bold uppercase tracking-wider;
+    @apply border border-app-border-strong bg-app-raised text-app-fg px-4 py-2 text-left font-semibold uppercase tracking-wider;
   }
   .markdown-body td {
-    @apply border border-zinc-300 dark:border-zinc-600 px-4 py-2 align-top;
+    @apply border border-app-border-strong px-4 py-2 align-top;
   }
   .markdown-body tr:nth-child(even) {
-    @apply bg-zinc-100/80 dark:bg-zinc-800/40;
+    @apply bg-app-raised/50;
   }
   .no-scrollbar::-webkit-scrollbar {
     display: none;

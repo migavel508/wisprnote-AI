@@ -110,3 +110,49 @@ export async function setConnectorToken(id: string, token: string, workspaceId?:
   if (!r.ok) return { connected: false, error: `Could not connect ${id} (${r.status}).` };
   return await r.json();
 }
+
+// ── Custom connectors (user-added remote MCP servers) ──────────────────────────────────────
+export interface CustomConnector { slug: string; name: string; url: string; auth: string; mode: string }
+
+export async function listCustomConnectors(workspaceId: string): Promise<CustomConnector[]> {
+  try {
+    const r = await authed(`/connectors/custom?workspace=${encodeURIComponent(workspaceId)}`, { method: 'GET' });
+    if (!r.ok) return [];
+    return (await r.json()).connectors || [];
+  } catch { return []; }
+}
+
+/** Create a custom connector. Returns its slug + whether it needs an OAuth sign-in next. */
+export async function createCustomConnector(workspaceId: string, input: { name: string; url: string; oauthClientId?: string; oauthClientSecret?: string; mode?: string }): Promise<{ slug: string; name: string; needsAuth: boolean }> {
+  const r = await authed(`/connectors/custom?workspace=${encodeURIComponent(workspaceId)}`, { method: 'POST', body: JSON.stringify(input) });
+  if (!r.ok) { const e = await r.json().catch(() => ({})); throw new Error(e.error || `Could not add connector (${r.status}).`); }
+  return await r.json();
+}
+
+export async function deleteCustomConnector(workspaceId: string, slug: string): Promise<void> {
+  await authed(`/connectors/custom/${encodeURIComponent(slug)}?workspace=${encodeURIComponent(workspaceId)}`, { method: 'DELETE' }).catch(() => {});
+}
+
+// ── Tool permissions (the per-tool trust plane — the connector's discovered tools + policy) ──
+export type ToolBehavior = 'allow' | 'ask' | 'deny';
+export type ToolKlass = 'read' | 'write' | 'destructive';
+export interface ConnectorTool {
+  connector: string; tool_name: string; description: string | null;
+  klass: ToolKlass; read_only: boolean; destructive: boolean; behavior: ToolBehavior;
+}
+
+/** The connector's discovered tool catalog, each with its RESOLVED behaviour (rule → class default). */
+export async function getConnectorTools(connectorId: string, workspaceId: string): Promise<ConnectorTool[]> {
+  try {
+    const r = await authed(`/connectors/${connectorId}/tools?workspace=${encodeURIComponent(workspaceId)}`, { method: 'GET' });
+    if (!r.ok) return [];
+    return (await r.json()).tools || [];
+  } catch { return []; }
+}
+
+/** Set (behavior) or clear (null = back to class default) a per-tool rule. tool='*' = connector-wide. */
+export async function setConnectorToolPermission(connectorId: string, workspaceId: string, tool: string, behavior: ToolBehavior | null): Promise<void> {
+  await authed(`/connectors/${connectorId}/tool-permission?workspace=${encodeURIComponent(workspaceId)}`, {
+    method: 'POST', body: JSON.stringify({ tool, behavior }),
+  }).catch(() => {});
+}

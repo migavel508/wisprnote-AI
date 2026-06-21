@@ -64,12 +64,12 @@ const transportLabel = (type: TransportType): string => {
 
 const transportColor = (type: TransportType): string => {
   switch (type) {
-    case 'Bluetooth': return 'bg-blue-50 text-blue-600 border-blue-200';
-    case 'Usb': return 'bg-purple-50 text-purple-600 border-purple-200';
-    case 'BuiltIn': return 'bg-gray-100 text-gray-600 border-gray-200';
-    case 'Hdmi': return 'bg-orange-50 text-orange-600 border-orange-200';
-    case 'Virtual': return 'bg-teal-50 text-teal-600 border-teal-200';
-    default: return 'bg-gray-50 text-gray-500 border-gray-200';
+    case 'Bluetooth': return 'bg-blue-50 dark:bg-blue-500/10 text-blue-600 dark:text-blue-400 border-blue-200 dark:border-blue-500/25';
+    case 'Usb': return 'bg-purple-50 dark:bg-purple-500/10 text-purple-600 dark:text-purple-400 border-purple-200 dark:border-purple-500/25';
+    case 'BuiltIn': return 'bg-app-fg/5 text-app-fg-muted border-app-border';
+    case 'Hdmi': return 'bg-orange-50 dark:bg-orange-500/10 text-orange-600 dark:text-orange-400 border-orange-200 dark:border-orange-500/25';
+    case 'Virtual': return 'bg-teal-50 dark:bg-teal-500/10 text-teal-600 dark:text-teal-400 border-teal-200 dark:border-teal-500/25';
+    default: return 'bg-app-fg/5 text-app-fg-subtle border-app-border';
   }
 };
 
@@ -174,13 +174,13 @@ export default function AudioDevicesPage({ isRecording, currentInputDevice, devi
   );
 
   return (
-    <div className="flex flex-col h-full bg-white font-[system-ui] overflow-y-auto">
+    <div className="flex flex-col h-full bg-app-panel overflow-y-auto">
       <div className="w-full max-w-[760px] mx-auto px-3 sm:px-6 md:px-8 pt-5 sm:pt-12 pb-8 sm:pb-12">
         {/* Page Title */}
-        <h1 className="text-[20px] sm:text-[32px] font-serif text-[#141414]/30 mb-1 sm:mb-2">
+        <h1 className="text-[20px] sm:text-[32px] font-serif font-semibold text-app-fg/60 mb-1 sm:mb-2">
           Audio Devices
         </h1>
-        <p className="text-[12px] sm:text-[14px] text-[#141414]/40 mb-5 sm:mb-8">
+        <p className="text-[12px] sm:text-[14px] text-app-fg-muted mb-5 sm:mb-8">
           Manage input and output devices. Tap a device to make it the system default — native recording
           uses the default microphone (Bluetooth, USB, or built-in). Changes are auto-detected.
         </p>
@@ -194,14 +194,14 @@ export default function AudioDevicesPage({ isRecording, currentInputDevice, devi
         {/* Status Cards Row */}
         <div className="grid grid-cols-1 sm:grid-cols-3 gap-3 mb-8">
           {/* Current Input */}
-          <div className="bg-white rounded-2xl border border-[#141414]/8 p-4 shadow-sm">
+          <div className="bg-app-raised rounded-2xl border border-app-border p-4 shadow-sm">
             <div className="flex items-center gap-2 mb-3">
-              <div className="w-8 h-8 rounded-xl bg-[#141414] flex items-center justify-center">
-                <Mic className="w-4 h-4 text-white" />
+              <div className="w-8 h-8 rounded-xl bg-app-fg flex items-center justify-center">
+                <Mic className="w-4 h-4 text-app-panel" />
               </div>
-              <span className="text-[11px] font-semibold uppercase tracking-wider text-[#141414]/40">Input</span>
+              <span className="text-[11px] font-semibold uppercase tracking-wider text-app-fg-muted">Input</span>
             </div>
-            <p className="text-[14px] font-medium text-[#141414] truncate">
+            <p className="text-[14px] font-medium text-app-fg truncate">
               {defaultInput?.name || 'No device'}
             </p>
             {defaultInput && (
@@ -215,22 +215,22 @@ export default function AudioDevicesPage({ isRecording, currentInputDevice, devi
           </div>
 
           {/* Current Output */}
-          <div className="bg-white rounded-2xl border border-[#141414]/8 p-4 shadow-sm">
+          <div className="bg-app-raised rounded-2xl border border-app-border p-4 shadow-sm">
             <div className="flex items-center gap-2 mb-3">
-              <div className="w-8 h-8 rounded-xl bg-[#141414] flex items-center justify-center">
+              <div className="w-8 h-8 rounded-xl bg-app-fg flex items-center justify-center">
                 {defaultOutput?.is_headphone
-                  ? <Headphones className="w-4 h-4 text-white" />
-                  : <Volume2 className="w-4 h-4 text-white" />
+                  ? <Headphones className="w-4 h-4 text-app-panel" />
+                  : <Volume2 className="w-4 h-4 text-app-panel" />
                 }
               </div>
-              <span className="text-[11px] font-semibold uppercase tracking-wider text-[#141414]/40">Output</span>
+              <span className="text-[11px] font-semibold uppercase tracking-wider text-app-fg-muted">Output</span>
               {defaultOutput?.is_headphone && (
-                <span className="text-[9px] px-1.5 py-0.5 rounded-full bg-indigo-50 text-indigo-600 font-semibold border border-indigo-200">
+                <span className="text-[9px] px-1.5 py-0.5 rounded-full bg-indigo-50 dark:bg-indigo-500/15 text-indigo-600 dark:text-indigo-300 font-semibold border border-indigo-200 dark:border-indigo-500/25">
                   Headphone
                 </span>
               )}
             </div>
-            <p className="text-[14px] font-medium text-[#141414] truncate">
+            <p className="text-[14px] font-medium text-app-fg truncate">
               {defaultOutput?.name || 'No device'}
             </p>
             {defaultOutput && (
@@ -244,20 +244,20 @@ export default function AudioDevicesPage({ isRecording, currentInputDevice, devi
           </div>
 
           {/* Status */}
-          <div className="bg-white rounded-2xl border border-[#141414]/8 p-4 shadow-sm">
+          <div className="bg-app-raised rounded-2xl border border-app-border p-4 shadow-sm">
             <div className="flex items-center gap-2 mb-3">
               <div className={`w-8 h-8 rounded-xl flex items-center justify-center ${isRecording ? 'bg-red-500' : 'bg-green-500'}`}>
                 <Activity className="w-4 h-4 text-white" />
               </div>
-              <span className="text-[11px] font-semibold uppercase tracking-wider text-[#141414]/40">Status</span>
+              <span className="text-[11px] font-semibold uppercase tracking-wider text-app-fg-muted">Status</span>
             </div>
             <div className="flex items-center gap-2">
               <span className={`w-2 h-2 rounded-full ${isRecording ? 'bg-red-500 animate-pulse' : 'bg-green-500'}`} />
-              <p className="text-[14px] font-medium text-[#141414]">
+              <p className="text-[14px] font-medium text-app-fg">
                 {isRecording ? 'Recording Active' : 'Ready'}
               </p>
             </div>
-            <p className="text-[11px] text-[#141414]/35 mt-1.5">
+            <p className="text-[11px] text-app-fg-subtle mt-1.5">
               {changeCount} device change{changeCount !== 1 ? 's' : ''} detected this session
             </p>
           </div>
@@ -272,40 +272,40 @@ export default function AudioDevicesPage({ isRecording, currentInputDevice, devi
               exit={{ opacity: 0, y: -8 }}
               className={`rounded-xl px-4 py-3 mb-6 flex items-center gap-3 ${
                 deviceSwitching || deviceRestartNotice
-                  ? 'bg-amber-50 border border-amber-200'
-                  : 'bg-blue-50 border border-blue-200'
+                  ? 'bg-amber-50 dark:bg-amber-500/10 border border-amber-200 dark:border-amber-500/20'
+                  : 'bg-blue-50 dark:bg-blue-500/10 border border-blue-200 dark:border-blue-500/20'
               }`}
             >
               {deviceSwitching || deviceRestartNotice ? (
                 <>
-                  <RefreshCw className="w-4 h-4 text-amber-600 animate-spin flex-shrink-0" />
+                  <RefreshCw className="w-4 h-4 text-amber-600 dark:text-amber-400 animate-spin flex-shrink-0" />
                   <div>
-                    <p className="text-[13px] font-medium text-amber-800">Restarting audio capture</p>
-                    <p className="text-[11px] text-amber-600">Switching to new device seamlessly…</p>
+                    <p className="text-[13px] font-medium text-amber-800 dark:text-amber-200">Restarting audio capture</p>
+                    <p className="text-[11px] text-amber-600 dark:text-amber-400">Switching to new device seamlessly…</p>
                   </div>
                 </>
               ) : lastChangeType === 'input-changed' ? (
                 <>
-                  <Mic className="w-4 h-4 text-blue-600 flex-shrink-0" />
+                  <Mic className="w-4 h-4 text-blue-600 dark:text-blue-400 flex-shrink-0" />
                   <div>
-                    <p className="text-[13px] font-medium text-blue-800">Default input device changed</p>
-                    <p className="text-[11px] text-blue-600">Now using: {defaultInput?.name || 'Unknown'}</p>
+                    <p className="text-[13px] font-medium text-blue-800 dark:text-blue-200">Default input device changed</p>
+                    <p className="text-[11px] text-blue-600 dark:text-blue-400">Now using: {defaultInput?.name || 'Unknown'}</p>
                   </div>
                 </>
               ) : lastChangeType === 'output-changed' ? (
                 <>
-                  <Volume2 className="w-4 h-4 text-blue-600 flex-shrink-0" />
+                  <Volume2 className="w-4 h-4 text-blue-600 dark:text-blue-400 flex-shrink-0" />
                   <div>
-                    <p className="text-[13px] font-medium text-blue-800">Default output device changed</p>
-                    <p className="text-[11px] text-blue-600">Now using: {defaultOutput?.name || 'Unknown'}</p>
+                    <p className="text-[13px] font-medium text-blue-800 dark:text-blue-200">Default output device changed</p>
+                    <p className="text-[11px] text-blue-600 dark:text-blue-400">Now using: {defaultOutput?.name || 'Unknown'}</p>
                   </div>
                 </>
               ) : (
                 <>
-                  <RefreshCw className="w-4 h-4 text-blue-600 flex-shrink-0" />
+                  <RefreshCw className="w-4 h-4 text-blue-600 dark:text-blue-400 flex-shrink-0" />
                   <div>
-                    <p className="text-[13px] font-medium text-blue-800">Device list updated</p>
-                    <p className="text-[11px] text-blue-600">A device was connected or disconnected</p>
+                    <p className="text-[13px] font-medium text-blue-800 dark:text-blue-200">Device list updated</p>
+                    <p className="text-[11px] text-blue-600 dark:text-blue-400">A device was connected or disconnected</p>
                   </div>
                 </>
               )}
@@ -323,24 +323,24 @@ export default function AudioDevicesPage({ isRecording, currentInputDevice, devi
             className="flex items-center justify-between w-full mb-3 group cursor-pointer select-none"
           >
             <div className="flex items-center gap-2.5">
-              <Mic className="w-4 h-4 text-[#141414]/40" />
-              <span className="text-[12px] font-semibold uppercase tracking-wider text-[#141414]/40">
+              <Mic className="w-4 h-4 text-app-fg-muted" />
+              <span className="text-[12px] font-semibold uppercase tracking-wider text-app-fg-muted">
                 Input Devices
               </span>
-              <span className="text-[11px] text-[#141414]/25 tabular-nums bg-[#141414]/5 px-2 py-0.5 rounded-full font-medium">
+              <span className="text-[11px] text-app-fg/25 tabular-nums bg-app-fg/5 px-2 py-0.5 rounded-full font-medium">
                 {inputDevices.length}
               </span>
-              {isLoading && <RefreshCw className="w-3 h-3 text-[#141414]/20 animate-spin" />}
+              {isLoading && <RefreshCw className="w-3 h-3 text-app-fg/20 animate-spin" />}
             </div>
             <div className="flex items-center gap-2">
               <button
                 onClick={(e) => { e.stopPropagation(); refreshDevices(); }}
-                className="p-1 text-[#141414]/30 hover:text-[#141414] hover:bg-[#141414]/5 rounded-md transition-colors"
+                className="p-1 text-app-fg-subtle hover:text-app-fg hover:bg-app-fg/5 rounded-md transition-colors"
                 title="Refresh"
               >
                 <RefreshCw className={`w-3.5 h-3.5 ${isLoading ? 'animate-spin' : ''}`} />
               </button>
-              {showInputs ? <ChevronUp className="w-4 h-4 text-[#141414]/25" /> : <ChevronDown className="w-4 h-4 text-[#141414]/25" />}
+              {showInputs ? <ChevronUp className="w-4 h-4 text-app-fg/25" /> : <ChevronDown className="w-4 h-4 text-app-fg/25" />}
             </div>
           </div>
 
@@ -355,9 +355,9 @@ export default function AudioDevicesPage({ isRecording, currentInputDevice, devi
               >
                 <div className="space-y-2">
                   {inputDevices.length === 0 ? (
-                    <div className="bg-white rounded-xl border border-[#141414]/8 p-8 text-center">
-                      <Mic className="w-8 h-8 text-[#141414]/15 mx-auto mb-2" />
-                      <p className="text-[13px] text-[#141414]/30">No input devices found</p>
+                    <div className="bg-app-raised rounded-xl border border-app-border p-8 text-center">
+                      <Mic className="w-8 h-8 text-app-fg/15 mx-auto mb-2" />
+                      <p className="text-[13px] text-app-fg/30">No input devices found</p>
                     </div>
                   ) : (
                     inputDevices.map((device) => (
@@ -377,7 +377,7 @@ export default function AudioDevicesPage({ isRecording, currentInputDevice, devi
         </div>
 
         {/* Divider */}
-        <div className="border-t border-[#141414]/5 mb-6" />
+        <div className="border-t border-app-border mb-6" />
 
         {/* Output Devices */}
         <div className="mb-6">
@@ -386,15 +386,15 @@ export default function AudioDevicesPage({ isRecording, currentInputDevice, devi
             className="flex items-center justify-between w-full mb-3 group"
           >
             <div className="flex items-center gap-2.5">
-              <Volume2 className="w-4 h-4 text-[#141414]/40" />
-              <span className="text-[12px] font-semibold uppercase tracking-wider text-[#141414]/40">
+              <Volume2 className="w-4 h-4 text-app-fg-muted" />
+              <span className="text-[12px] font-semibold uppercase tracking-wider text-app-fg-muted">
                 Output Devices
               </span>
-              <span className="text-[11px] text-[#141414]/25 tabular-nums bg-[#141414]/5 px-2 py-0.5 rounded-full font-medium">
+              <span className="text-[11px] text-app-fg/25 tabular-nums bg-app-fg/5 px-2 py-0.5 rounded-full font-medium">
                 {outputDevices.length}
               </span>
             </div>
-            {showOutputs ? <ChevronUp className="w-4 h-4 text-[#141414]/25" /> : <ChevronDown className="w-4 h-4 text-[#141414]/25" />}
+            {showOutputs ? <ChevronUp className="w-4 h-4 text-app-fg/25" /> : <ChevronDown className="w-4 h-4 text-app-fg/25" />}
           </button>
 
           <AnimatePresence>
@@ -408,9 +408,9 @@ export default function AudioDevicesPage({ isRecording, currentInputDevice, devi
               >
                 <div className="space-y-2">
                   {outputDevices.length === 0 ? (
-                    <div className="bg-white rounded-xl border border-[#141414]/8 p-8 text-center">
-                      <Volume2 className="w-8 h-8 text-[#141414]/15 mx-auto mb-2" />
-                      <p className="text-[13px] text-[#141414]/30">No output devices found</p>
+                    <div className="bg-app-raised rounded-xl border border-app-border p-8 text-center">
+                      <Volume2 className="w-8 h-8 text-app-fg/15 mx-auto mb-2" />
+                      <p className="text-[13px] text-app-fg/30">No output devices found</p>
                     </div>
                   ) : (
                     outputDevices.map((device) => (
@@ -430,12 +430,12 @@ export default function AudioDevicesPage({ isRecording, currentInputDevice, devi
         </div>
 
         {/* Info Footer */}
-        <div className="bg-[#141414]/[0.03] rounded-xl border border-[#141414]/5 p-4">
+        <div className="bg-app-fg/[0.03] rounded-xl border border-app-border p-4">
           <div className="flex items-start gap-3">
-            <Settings2 className="w-4 h-4 text-[#141414]/25 mt-0.5 flex-shrink-0" />
+            <Settings2 className="w-4 h-4 text-app-fg/25 mt-0.5 flex-shrink-0" />
             <div>
-              <p className="text-[12px] font-medium text-[#141414]/50 mb-1">How it works</p>
-              <ul className="text-[11px] text-[#141414]/35 space-y-1">
+              <p className="text-[12px] font-medium text-app-fg-muted mb-1">How it works</p>
+              <ul className="text-[11px] text-app-fg-subtle space-y-1">
                 <li>Devices are auto-detected via macOS CoreAudio property listeners</li>
                 <li>
                   Tap any input or output to set it as the system default — same as Sound settings in System
@@ -480,10 +480,10 @@ function DeviceCard({
         }
       }}
       title={isDefault ? 'Current default' : activateHint}
-      className={`bg-white rounded-xl border p-4 transition-all ${
+      className={`bg-app-raised rounded-xl border p-4 transition-all ${
         isDefault
-          ? 'border-[#141414]/15 shadow-sm'
-          : 'border-[#141414]/8 hover:border-[#141414]/12'
+          ? 'border-app-border-strong shadow-sm'
+          : 'border-app-border hover:border-app-border-strong'
       } ${canActivate ? 'cursor-pointer' : ''} ${isBusy ? 'opacity-70 pointer-events-none' : ''}`}
     >
       <div className="flex items-center gap-3.5">
@@ -491,7 +491,7 @@ function DeviceCard({
         <div className={`w-10 h-10 rounded-xl flex items-center justify-center flex-shrink-0 ${
           isDefault
             ? `bg-gradient-to-br ${transportBgColor(device.transport_type)} text-white shadow-sm`
-            : 'bg-[#141414]/5 text-[#141414]/35'
+            : 'bg-app-fg/5 text-app-fg/35'
         }`}>
           {device.is_headphone ? (
             <Headphones className="w-5 h-5" />
@@ -505,17 +505,17 @@ function DeviceCard({
         {/* Info */}
         <div className="flex-1 min-w-0">
           <div className="flex items-center gap-2">
-            <span className={`text-[14px] font-medium truncate ${isDefault ? 'text-[#141414]' : 'text-[#141414]/60'}`}>
+            <span className={`text-[14px] font-medium truncate ${isDefault ? 'text-app-fg' : 'text-app-fg/60'}`}>
               {device.name}
             </span>
             {isDefault && (
-              <span className="flex-shrink-0 inline-flex items-center gap-1 text-[10px] font-semibold text-green-600 bg-green-50 px-2 py-0.5 rounded-full border border-green-200">
+              <span className="flex-shrink-0 inline-flex items-center gap-1 text-[10px] font-semibold text-green-600 dark:text-green-400 bg-green-50 dark:bg-green-500/15 px-2 py-0.5 rounded-full border border-green-200 dark:border-green-500/25">
                 <Check className="w-2.5 h-2.5" strokeWidth={3} />
                 Default
               </span>
             )}
             {isBusy && (
-              <RefreshCw className="w-3.5 h-3.5 text-[#141414]/40 animate-spin flex-shrink-0" />
+              <RefreshCw className="w-3.5 h-3.5 text-app-fg-muted animate-spin flex-shrink-0" />
             )}
           </div>
 
@@ -528,14 +528,14 @@ function DeviceCard({
 
             {/* Headphone Badge */}
             {device.is_headphone && (
-              <span className="inline-flex items-center gap-1 text-[9px] font-semibold uppercase tracking-wide px-2 py-0.5 rounded-md border bg-indigo-50 text-indigo-600 border-indigo-200">
+              <span className="inline-flex items-center gap-1 text-[9px] font-semibold uppercase tracking-wide px-2 py-0.5 rounded-md border bg-indigo-50 dark:bg-indigo-500/15 text-indigo-600 dark:text-indigo-300 border-indigo-200 dark:border-indigo-500/25">
                 <Headphones className="w-2.5 h-2.5" />
                 Headphone
               </span>
             )}
 
             {/* Direction Badge */}
-            <span className="text-[9px] font-medium text-[#141414]/25 uppercase tracking-wide">
+            <span className="text-[9px] font-medium text-app-fg/25 uppercase tracking-wide">
               {device.direction}
             </span>
           </div>

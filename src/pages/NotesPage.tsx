@@ -468,16 +468,13 @@ export default function NotesPage({ selectedTask, isLoading = false, isLoadingDe
         <div className="max-w-3xl lg:max-w-4xl mx-auto w-full px-3 sm:px-6 md:px-8 pt-3 sm:pt-4 pb-2 sm:pb-3">
           {/* Title row */}
           <div className="flex items-center gap-2 mb-2.5">
-            <h1
-              className="text-[17px] sm:text-[22px] font-semibold tracking-[-0.02em] text-zinc-900 dark:text-zinc-50 truncate flex-1 leading-tight"
-              style={{ fontFamily: 'Georgia, "Times New Roman", serif', fontStyle: 'italic' }}
-            >
+            <h1 className="text-[17px] sm:text-[22px] font-serif font-semibold tracking-[-0.02em] text-zinc-900 dark:text-zinc-50 truncate flex-1 leading-tight">
               {selectedTask.filename}
             </h1>
             <button
               onClick={handleGenerateTitle}
               disabled={isGeneratingTitle}
-              className="flex-shrink-0 flex items-center justify-center w-7 h-7 sm:w-auto sm:h-auto sm:gap-1.5 sm:px-2.5 sm:py-1 text-[10.5px] font-semibold text-app-fg-muted hover:text-app-fg bg-zinc-200/60 dark:bg-app-raised hover:bg-zinc-200 dark:hover:bg-app-chip rounded-md transition-all disabled:opacity-30"
+              className="flex-shrink-0 flex items-center justify-center w-7 h-7 sm:w-auto sm:h-auto sm:gap-1.5 sm:px-2.5 sm:py-1 text-[10.5px] font-semibold text-app-fg-muted hover:text-app-fg bg-zinc-200/60 dark:bg-app-raised hover:bg-zinc-200 dark:hover:bg-app-chip rounded-lg transition-all disabled:opacity-30"
               title="Generate AI title based on content"
             >
               {isGeneratingTitle ? (
@@ -491,7 +488,7 @@ export default function NotesPage({ selectedTask, isLoading = false, isLoadingDe
             </button>
             <button
               onClick={() => setIsShareOpen(true)}
-              className="flex-shrink-0 flex items-center justify-center w-7 h-7 sm:w-auto sm:h-auto sm:gap-1.5 sm:px-2.5 sm:py-1 text-[10.5px] font-semibold text-app-fg-muted hover:text-app-fg bg-zinc-200/60 dark:bg-app-raised hover:bg-zinc-200 dark:hover:bg-app-chip rounded-md transition-all"
+              className="flex-shrink-0 flex items-center justify-center w-7 h-7 sm:w-auto sm:h-auto sm:gap-1.5 sm:px-2.5 sm:py-1 text-[10.5px] font-semibold text-app-fg-muted hover:text-app-fg bg-zinc-200/60 dark:bg-app-raised hover:bg-zinc-200 dark:hover:bg-app-chip rounded-lg transition-all"
               title="Share meeting notes"
             >
               <Share2 className="w-3 h-3" />
@@ -778,7 +775,7 @@ export default function NotesPage({ selectedTask, isLoading = false, isLoadingDe
                 <button
                   key={tab}
                   onClick={() => setNoteTab(tab)}
-                  className={`px-2.5 sm:px-3 py-[4px] rounded-md text-[11px] sm:text-[11.5px] font-semibold transition-all whitespace-nowrap ${
+                  className={`px-2.5 sm:px-3 py-[4px] rounded-lg text-[11px] sm:text-[11.5px] font-semibold transition-all whitespace-nowrap ${
                     noteTab === tab
                       ? 'bg-app-chip text-zinc-900 dark:text-app-fg shadow-sm shadow-black/10 dark:shadow-black/50 ring-1 ring-zinc-300/80 dark:ring-white/[0.08]'
                       : 'text-app-fg-muted hover:text-app-fg'
@@ -828,7 +825,7 @@ export default function NotesPage({ selectedTask, isLoading = false, isLoadingDe
               )}
 
               {noteTab === 'summary' && (
-                <div className="bg-zinc-100 dark:bg-app-raised p-4 sm:p-6 md:p-8 rounded-xl sm:rounded-2xl border border-zinc-200/90 dark:border-app-border">
+                <div className="bg-zinc-100 dark:bg-app-raised p-4 sm:p-6 md:p-8 rounded-xl border border-zinc-200/90 dark:border-app-border">
                   <div className="flex items-center justify-between mb-5">
                     <h3 className="text-[17px] font-semibold tracking-[-0.01em] text-zinc-900 dark:text-zinc-50">Key Summary</h3>
                     <button
