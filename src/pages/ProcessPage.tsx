@@ -254,8 +254,9 @@ export default function ProcessPage({
           )}
         </AnimatePresence>
 
-        {/* ── Inline action bar ── */}
-        {!isProcessing && (
+        {/* ── Inline action bar — hidden while the record panel is open, which
+            takes its place in the same spot (a morph, not a second box). ── */}
+        {!isProcessing && viewState !== 'expanded' && (
           <motion.div
             initial={{ opacity: 0, y: 8 }}
             animate={{ opacity: 1, y: 0 }}
@@ -510,30 +511,44 @@ export default function ProcessPage({
                       ? 'bg-white dark:bg-app-raised border-red-200/70 dark:border-red-500/20 shadow-sm'
                       : 'bg-white dark:bg-app-raised border-zinc-200 dark:border-app-border shadow-sm'
                   }`}>
-                    <button
-                      onClick={() => setViewState('expanded')}
-                      className="flex items-center gap-1 hover:opacity-75 transition-opacity"
-                      title="Open options"
-                    >
-                      <svg width="16" height="18" viewBox="0 0 16 18" fill="none">
-                        {([6, 13, 8] as const).map((defaultH, i) => {
-                          const h = isRecording && !isPaused ? barHeights[i] : defaultH;
-                          return (
-                            <line key={i} x1={3 + i * 5} y1={(18 - h) / 2} x2={3 + i * 5} y2={(18 + h) / 2}
-                              stroke="#819C1F" strokeWidth="2.5" strokeLinecap="round" />
-                          );
-                        })}
-                      </svg>
-                      <ChevronUp className="w-3 h-3 text-[#4a4038]/55" />
-                    </button>
-                    <button
-                      onClick={isRecording ? stopRecording : () => setViewState('expanded')}
-                      className="flex items-center justify-center hover:opacity-75 transition-opacity"
-                      title={isRecording ? 'Stop recording' : 'Open options'}
-                    >
-                      <div className="w-3.5 h-3.5 rounded-[2px] transition-all duration-300"
-                        style={{ backgroundColor: '#4a4038', opacity: isRecording ? 1 : 0.65 }} />
-                    </button>
+                    {isRecording ? (
+                      /* Recording — live waveform + stop. Only shown while actually recording. */
+                      <>
+                        <button
+                          onClick={() => setViewState('expanded')}
+                          className="flex items-center gap-1 hover:opacity-75 transition-opacity"
+                          title="Open recording"
+                        >
+                          <svg width="16" height="18" viewBox="0 0 16 18" fill="none">
+                            {([6, 13, 8] as const).map((defaultH, i) => {
+                              const h = !isPaused ? barHeights[i] : defaultH;
+                              return (
+                                <line key={i} x1={3 + i * 5} y1={(18 - h) / 2} x2={3 + i * 5} y2={(18 + h) / 2}
+                                  stroke="#819C1F" strokeWidth="2.5" strokeLinecap="round" />
+                              );
+                            })}
+                          </svg>
+                          <ChevronUp className="w-3 h-3 text-[#4a4038]/55 dark:text-app-fg-subtle" />
+                        </button>
+                        <button
+                          onClick={stopRecording}
+                          className="flex items-center justify-center hover:opacity-75 transition-opacity"
+                          title="Stop recording"
+                        >
+                          <div className="w-3.5 h-3.5 rounded-[2px] bg-red-500" />
+                        </button>
+                      </>
+                    ) : (
+                      /* Idle — a clean record affordance (no fake waveform/stop). */
+                      <button
+                        onClick={() => setViewState('expanded')}
+                        className="flex items-center gap-1.5 hover:opacity-75 transition-opacity"
+                        title="Record or upload audio"
+                      >
+                        <Mic className="w-[17px] h-[17px] text-zinc-600 dark:text-app-fg-subtle" />
+                        <ChevronUp className="w-3 h-3 text-zinc-400 dark:text-app-fg-subtle/60" />
+                      </button>
+                    )}
                   </div>
 
                   {/* Center input pill */}
@@ -687,7 +702,6 @@ export default function ProcessPage({
             </motion.div>
           )}
         </AnimatePresence>
-      </main>
 
       {/* Processing pill — floating */}
       <AnimatePresence>
@@ -710,39 +724,19 @@ export default function ProcessPage({
         )}
       </AnimatePresence>
 
-      {/* ── Backdrop (only when expanded) ── */}
-      <AnimatePresence>
-        {viewState === 'expanded' && (
-          <motion.div
-            key="panel-backdrop"
-            initial={{ opacity: 0 }}
-            animate={{ opacity: 1 }}
-            exit={{ opacity: 0 }}
-            transition={{ duration: 0.2 }}
-            onClick={() => setViewState('collapsed')}
-            className="absolute inset-0 bg-black/[0.04] z-30"
-          />
-        )}
-      </AnimatePresence>
-
-      {/* ── Expanded panel ── */}
+      {/* ── Expanded record panel — inline, in the centered column (below the
+          command bar). It can never overlap the title because it's in flow. ── */}
       <AnimatePresence>
         {!isProcessing && viewState === 'expanded' && (
           <motion.div
             key="expanded-panel"
-            initial={{ opacity: 0, scale: 0.92, y: 12 }}
-            animate={{ opacity: 1, scale: 1, y: 0 }}
-            exit={{ opacity: 0, scale: 0.95, y: 8 }}
-            transition={{ type: 'spring', damping: 28, stiffness: 350 }}
-            style={{ transformOrigin: 'bottom center' }}
-            className="absolute bottom-2 sm:bottom-6 left-1/2 -translate-x-1/2 w-[calc(100%-16px)] sm:w-[600px] h-[380px] sm:h-[420px] max-h-[55vh] sm:max-h-[60vh] bg-white dark:bg-app-raised rounded-2xl sm:rounded-3xl shadow-[0_4px_40px_rgba(0,0,0,0.12)] dark:shadow-[0_8px_48px_rgba(0,0,0,0.5)] border border-[#1a1a1a]/[0.06] dark:border-app-border text-zinc-900 dark:text-app-fg flex flex-col z-40 overflow-hidden"
+            initial={{ opacity: 0, y: 8, scale: 0.985 }}
+            animate={{ opacity: 1, y: 0, scale: 1 }}
+            exit={{ opacity: 0, y: 6, scale: 0.985 }}
+            transition={{ duration: 0.2, ease: [0.22, 1, 0.36, 1] }}
+            className="w-full max-w-[600px] h-[320px] sm:h-[360px] max-h-[58vh] bg-white dark:bg-app-raised rounded-[28px] border border-zinc-200 dark:border-app-border text-zinc-900 dark:text-app-fg flex flex-col overflow-hidden"
             onClick={(e) => e.stopPropagation()}
           >
-            {/* Drag handle */}
-            <div className="flex justify-center pt-3 pb-1">
-              <div className="w-8 h-1 rounded-full bg-zinc-300/80 dark:bg-white/20" />
-            </div>
-
               {/* Header */}
               <div className="flex items-center justify-between px-5 py-2.5">
                 <div className="flex gap-0.5 bg-[#1a1a1a]/[0.04] dark:bg-app-panel rounded-lg p-0.5 ring-1 ring-transparent dark:ring-white/[0.06]">
@@ -1036,6 +1030,7 @@ export default function ProcessPage({
           </motion.div>
         )}
       </AnimatePresence>
+      </main>
     </div>
   );
 }
