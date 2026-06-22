@@ -270,7 +270,10 @@ export default function WorkspaceChat({
         });
       }
       setMessages((prev) => [...prev, { role: 'model', text: answer, proposal, jiraMeta: jMeta, mcpProposals: mcpProps, trace: traceItems }]);
-      void saveChatMessage({ role: 'model', text: answer, thread_id: tid, workspace_id: workspaceId }).catch(() => {});
+      // Persist the thought-process trace (trim large tool results) so it survives a reload.
+      const persistedTrace = traceItems?.map((t) =>
+        t.kind === 'tool' && typeof t.result === 'string' ? { ...t, result: t.result.slice(0, 2000) } : t);
+      void saveChatMessage({ role: 'model', text: answer, thread_id: tid, workspace_id: workspaceId, trace: persistedTrace }).catch(() => {});
       // Refresh the durable thread list so this conversation appears in History.
       getWorkspaceChatThreads(workspaceId).then(setThreads).catch(() => {});
     } catch {
@@ -293,7 +296,7 @@ export default function WorkspaceChat({
     setThreadId(t.thread_id);
     try {
       const msgs = await getChatHistoryByThread(t.thread_id);
-      setMessages(msgs.map((m) => ({ role: m.role, text: m.text })));
+      setMessages(msgs.map((m) => ({ role: m.role, text: m.text, trace: (m.trace as TraceItem[] | undefined) })));
     } catch { /* non-fatal */ }
   };
 

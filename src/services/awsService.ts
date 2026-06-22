@@ -440,6 +440,10 @@ export interface ChatMessage {
   /** Set for workspace-scoped chat so its threads are kept separate from the
    *  global AI Chat (and from other workspaces). */
   workspace_id?: string;
+  /** Agentic-loop thought-process timeline (tool calls + plan), persisted so it
+   *  survives a reload. Shape = TraceItem[] from the agent UI; kept loose here to
+   *  avoid coupling the service layer to a component type. */
+  trace?: unknown;
 }
 
 export async function saveChatMessage(message: ChatMessage): Promise<ChatMessage> {
