@@ -547,7 +547,7 @@ export default function WorkspaceChat({
           ))}
           <div className="flex-1" />
           <button className="flex items-center gap-1.5 px-2 py-1.5 rounded-full text-[12px] font-medium text-app-fg-muted hover:bg-app-nav-hover-bg transition-colors">
-            <LayoutGrid className="w-3.5 h-3.5" /> All recipes
+            <LayoutGrid className="w-3.5 h-3.5" /> Gems
           </button>
         </div>
 
