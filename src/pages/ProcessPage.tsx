@@ -31,6 +31,10 @@ import {
 
 import type { RecordingMode } from '../services/nativeRecorderService';
 import PermissionsGate from '../components/PermissionsGate';
+import Markdown from 'react-markdown';
+import remarkGfm from 'remark-gfm';
+import GemsModal from '../components/GemsModal';
+import type { Gem } from '../services/gemsService';
 
 interface ProcessPageProps {
   file: File | null;
@@ -63,6 +67,16 @@ interface ProcessPageProps {
   onPermissionsGranted: () => void;
   currentInputDevice?: string | null;
   deviceRestartNotice?: boolean;
+  /** All-meetings chat wiring (Home command bar → existing chat logic). */
+  chatInput?: string;
+  setChatInput?: (v: string) => void;
+  onAskAnything?: () => void;
+  onOpenChatHistory?: () => void;
+  /** The live all-meetings conversation, rendered inline in the home chat panel. */
+  messages?: { role: string; text: string }[];
+  isChatting?: boolean;
+  /** Run a Gem's prompt against the all-meetings chat. */
+  onRunGem?: (prompt: string) => void;
 }
 
 type ViewState = 'collapsed' | 'expanded';
@@ -128,7 +142,14 @@ export default function ProcessPage({
   permissionsGranted,
   onPermissionsGranted,
   currentInputDevice,
-  deviceRestartNotice
+  deviceRestartNotice,
+  chatInput = '',
+  setChatInput,
+  onAskAnything,
+  onOpenChatHistory,
+  messages = [],
+  isChatting = false,
+  onRunGem,
 }: ProcessPageProps) {
   const fileInputRef = useRef<HTMLInputElement>(null);
   const transcriptEndRef = useRef<HTMLDivElement>(null);
@@ -142,6 +163,30 @@ export default function ProcessPage({
   const [isHistoryOpen, setIsHistoryOpen] = useState(false);
   const [isChatOpen, setIsChatOpen] = useState(false);
   const [activeChip, setActiveChip] = useState<string | null>(null);
+  const [gemsOpen, setGemsOpen] = useState(false);
+  const chatEndRef = useRef<HTMLDivElement>(null);
+
+  // Run a Gem: open the inline chat panel and send its prompt to all-meetings chat.
+  const runGem = (gem: Gem) => {
+    setIsChatOpen(true);
+    setIsCommandBarOpen(true);
+    setIsHistoryOpen(false);
+    onRunGem?.(gem.prompt);
+  };
+
+  // Open the inline chat panel (stay on the home page) and send to all-meetings chat.
+  const submitChat = () => {
+    if (!chatInput.trim()) return;
+    setIsChatOpen(true);
+    setIsCommandBarOpen(true);
+    setIsHistoryOpen(false);
+    onAskAnything?.();
+  };
+
+  // Keep the inline conversation pinned to the latest message.
+  useEffect(() => {
+    chatEndRef.current?.scrollIntoView({ behavior: 'auto', block: 'end' });
+  }, [messages, isChatting]);
 
   // Auto-scroll live transcript. Use instant ('auto') not 'smooth': interim updates
   // fire several times a second, and queuing an overlapping smooth-scroll animation on
@@ -296,34 +341,45 @@ export default function ProcessPage({
                     </div>
                   </div>
 
-                  {/* Chat area */}
-                  <div className="flex-1 overflow-y-auto px-4 pb-2 min-h-0 flex flex-col gap-4">
-                    {/* User message bubble — right aligned */}
-                    {activeChip && (
-                      <div className="flex justify-end">
-                        <div className="flex items-center gap-1.5 px-3 py-1.5 bg-zinc-100 dark:bg-app-chip rounded-full text-[13px] font-medium text-zinc-700 dark:text-zinc-200 max-w-[85%]">
-                          <svg width="11" height="11" viewBox="0 0 11 11" fill="none" className="flex-shrink-0 text-zinc-400">
-                            <rect x="0.5" y="0.5" width="10" height="10" rx="2.5" stroke="currentColor" strokeWidth="1" />
-                            <line x1="3" y1="8" x2="8" y2="3" stroke="currentColor" strokeWidth="1.1" strokeLinecap="round" />
-                          </svg>
-                          <span>{activeChip}</span>
-                          <ChevronRight className="w-3 h-3 text-zinc-400 flex-shrink-0" />
-                        </div>
+                  {/* Chat area — the live all-meetings conversation, inline. */}
+                  <div className="flex-1 overflow-y-auto px-4 pt-1 pb-2 min-h-0 flex flex-col gap-3">
+                    {messages.length === 0 && !isChatting && (
+                      <div className="flex-1 flex items-center justify-center text-[13px] text-zinc-400 dark:text-zinc-500">
+                        Ask anything about your meeting notes.
                       </div>
                     )}
-                    {/* AI response area — populated by real data */}
-                    <div className="flex-1" />
+                    {messages.map((m, i) => (
+                      m.role === 'user' ? (
+                        <div key={i} className="flex justify-end">
+                          <div className="px-3.5 py-2 bg-zinc-100 dark:bg-app-chip rounded-2xl text-[13px] text-zinc-800 dark:text-zinc-100 max-w-[85%] whitespace-pre-wrap leading-relaxed">
+                            {m.text}
+                          </div>
+                        </div>
+                      ) : (
+                        <div key={i} className="text-[13.5px] text-zinc-800 dark:text-app-fg leading-relaxed [&_h1]:text-[15px] [&_h1]:font-semibold [&_h2]:text-[14px] [&_h2]:font-semibold [&_h3]:text-[13.5px] [&_h3]:font-semibold [&_h1]:mt-3 [&_h2]:mt-3 [&_h3]:mt-2 [&_ul]:list-disc [&_ul]:pl-5 [&_ul]:my-1 [&_ol]:list-decimal [&_ol]:pl-5 [&_ol]:my-1 [&_p]:my-1.5 [&_a]:text-[#6f871a] [&_a]:underline [&_code]:text-[12px] [&_code]:bg-zinc-100 [&_code]:dark:bg-app-chip [&_code]:px-1 [&_code]:rounded">
+                          {m.text
+                            ? <Markdown remarkPlugins={[remarkGfm]}>{m.text}</Markdown>
+                            : <span className="text-zinc-400">…</span>}
+                        </div>
+                      )
+                    ))}
+                    {isChatting && (
+                      <div className="flex items-center gap-1.5 text-[12.5px] text-zinc-400 dark:text-zinc-500">
+                        <Loader2 className="w-3 h-3 animate-spin" /> Thinking…
+                      </div>
+                    )}
+                    <div ref={chatEndRef} />
                   </div>
 
                   {/* Bottom: chip row + input — same as command bar */}
                   <div className="border-t border-zinc-100 dark:border-app-border/60">
                     <div className="flex items-center pl-2 pr-[22px] py-1">
                       <button
-                        onClick={() => { setActiveChip('All recipes'); }}
+                        onClick={(e) => { e.stopPropagation(); setGemsOpen(true); }}
                         className="flex-shrink-0 flex items-center gap-1.5 px-2.5 py-1 text-[12.5px] text-zinc-600 dark:text-zinc-400 hover:text-zinc-900 dark:hover:text-zinc-100 transition-colors whitespace-nowrap"
                       >
                         <LayoutGrid className="w-[13px] h-[13px] text-zinc-400 dark:text-zinc-500" />
-                        All recipes
+                        Gems
                       </button>
                       {(['Make me sound smart', 'What did I miss'] as const).map((label) => (
                         <button
@@ -347,7 +403,15 @@ export default function ProcessPage({
                       </button>
                     </div>
                     <div className="m-1.5 flex items-center gap-2 px-4 py-[11px] rounded-full bg-white dark:bg-app-raised border border-[#819C1F]/65 shadow-[0_0_0_2.5px_rgba(129,156,31,0.12)]">
-                      <span className="flex-1 text-[14px] text-zinc-400 dark:text-zinc-500 tracking-[-0.01em]">Ask anything</span>
+                      <input
+                        value={chatInput}
+                        onChange={(e) => setChatInput?.(e.target.value)}
+                        onKeyDown={(e) => { if (e.key === 'Enter' && chatInput.trim()) { e.preventDefault(); submitChat(); } }}
+                        onClick={(e) => e.stopPropagation()}
+                        placeholder="Ask anything"
+                        autoFocus
+                        className="flex-1 bg-transparent outline-none text-[14px] text-zinc-800 dark:text-app-fg placeholder:text-zinc-400 dark:placeholder:text-zinc-500 tracking-[-0.01em]"
+                      />
                       <button onClick={(e) => e.stopPropagation()} className="flex-shrink-0 flex items-center gap-0.5 text-[13px] text-zinc-400 dark:text-zinc-500 hover:text-zinc-600 dark:hover:text-zinc-300 transition-colors">
                         Auto<ChevronDown className="w-3.5 h-3.5" />
                       </button>
@@ -434,11 +498,11 @@ export default function ProcessPage({
                   {/* Top chip row */}
                   <div className="flex items-center pl-2 pr-[22px] py-1">
                     <button
-                      onClick={() => { setActiveChip('All recipes'); setIsChatOpen(true); setIsHistoryOpen(false); }}
+                      onClick={(e) => { e.stopPropagation(); setGemsOpen(true); }}
                       className="flex-shrink-0 flex items-center gap-1.5 px-2.5 py-1 text-[12.5px] text-zinc-600 dark:text-zinc-400 hover:text-zinc-900 dark:hover:text-zinc-100 transition-colors whitespace-nowrap"
                     >
                       <LayoutGrid className="w-[13px] h-[13px] text-zinc-400 dark:text-zinc-500" />
-                      All recipes
+                        Gems
                     </button>
 
                     {(['Make me sound smart', 'What did I miss'] as const).map((label) => (
@@ -456,9 +520,9 @@ export default function ProcessPage({
                     ))}
 
                     <button
-                      onClick={(e) => { e.stopPropagation(); setIsHistoryOpen(prev => !prev); }}
+                      onClick={(e) => { e.stopPropagation(); onOpenChatHistory ? onOpenChatHistory() : setIsHistoryOpen(prev => !prev); }}
                       className={`ml-auto self-end flex-shrink-0 p-[7px] transition-colors ${isHistoryOpen ? 'text-zinc-900 dark:text-app-fg' : 'text-zinc-400 hover:text-zinc-600 dark:hover:text-zinc-200'}`}
-                      title="History"
+                      title="Meeting & chat history"
                     >
                       <History className="w-[19px] h-[19px]" />
                     </button>
@@ -466,9 +530,15 @@ export default function ProcessPage({
 
                   {/* Bottom input row — keeps its own inner green stroke border */}
                   <div className="m-1.5 flex items-center gap-2 px-4 py-[11px] rounded-full bg-[#ffffff] border border-[#819C1F]/65 shadow-[0_0_0_2.5px_rgba(129,156,31,0.12)]">
-                    <span className="flex-1 text-[14px] text-zinc-400 dark:text-zinc-500 tracking-[-0.01em]">
-                      Ask anything
-                    </span>
+                    <input
+                      value={chatInput}
+                      onChange={(e) => setChatInput?.(e.target.value)}
+                      onKeyDown={(e) => { if (e.key === 'Enter' && chatInput.trim()) { e.preventDefault(); submitChat(); } }}
+                      onClick={(e) => e.stopPropagation()}
+                      placeholder="Ask anything"
+                      autoFocus
+                      className="flex-1 bg-transparent outline-none text-[14px] text-zinc-800 dark:text-app-fg placeholder:text-zinc-400 dark:placeholder:text-zinc-500 tracking-[-0.01em]"
+                    />
                     <button
                       onClick={(e) => e.stopPropagation()}
                       className="flex-shrink-0 flex items-center gap-0.5 text-[13px] text-zinc-400 dark:text-zinc-500 hover:text-zinc-600 dark:hover:text-zinc-300 transition-colors"
@@ -1031,6 +1101,8 @@ export default function ProcessPage({
         )}
       </AnimatePresence>
       </main>
+
+      {gemsOpen && <GemsModal onClose={() => setGemsOpen(false)} onRun={runGem} />}
     </div>
   );
 }

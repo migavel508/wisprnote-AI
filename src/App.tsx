@@ -3081,16 +3081,17 @@ export default function App() {
     }
   };
 
-  const handleSendMessage = async () => {
-    if (!chatInput.trim() || isChatting) return;
+  const handleSendMessage = async (overrideText?: string) => {
+    const inputText = overrideText ?? chatInput;
+    if (!inputText.trim() || isChatting) return;
 
     if (selectedTask && !selectedTask.transcription) {
       setChatMessages(prev => [...prev, { role: 'model', text: 'Unable to chat: No transcription content available for this meeting.' }]);
       return;
     }
 
-    const userMessage: Message = { role: 'user', text: chatInput };
-    const userInput = chatInput;
+    const userMessage: Message = { role: 'user', text: inputText };
+    const userInput = inputText;
     setChatMessages(prev => [...prev, userMessage]);
     setChatInput('');
     setIsChatting(true);
@@ -5051,6 +5052,17 @@ export default function App() {
                   onPermissionsGranted={() => setPermissionsGranted(true)}
                   currentInputDevice={currentInputDevice}
                   deviceRestartNotice={deviceRestartNotice}
+                  chatInput={chatInput}
+                  setChatInput={setChatInput}
+                  messages={chatMessages}
+                  isChatting={isChatting}
+                  onAskAnything={() => {
+                    if (!chatInput.trim()) return;
+                    setSelectedTask(null);
+                    void handleSendMessage();   // all-meetings chat, rendered inline on Home
+                  }}
+                  onRunGem={(p) => { setSelectedTask(null); void handleSendMessage(p); }}
+                  onOpenChatHistory={() => { setSelectedTask(null); setCurrentView('chat'); }}
                 />
               </motion.div>
             )}
