@@ -1,5 +1,71 @@
 import { query, queryOne } from '../db';
 import { getMcpServer, type McpServer } from './registry';
+import { getSecrets } from '../secrets';
+
+// Connectors whose remote endpoint isn't a fixed public URL (Google Workspace, Slack). Following
+// the reference's `mcp add` model, the endpoint is BRING-YOUR-OWN: the user supplies the MCP server
+// URL (+ optional OAuth client) per the named card, stored in custom_connector keyed by the
+// connector's OWN id. An operator-wide fallback (Secrets Manager) is also honored. Either way it
+// then rides the exact same generic flow as Jira/GitHub. Google's Gmail/Calendar/Drive share one URL.
+const GOOGLE_FAMILY = new Set(['gmail', 'gcal', 'gdrive']);
+
+/** A user-configured BYO endpoint for a catalog connector (custom_connector row keyed by its id). */
+async function storedEndpoint(userId: string, workspaceId: string, id: string): Promise<{ url: string; auth: string; clientId: string | null; clientSecret: string | null } | null> {
+  await ensureCustomConnectorSchema();
+  const row = await queryOne<{ url: string; auth: string; oauth_client_id: string | null; oauth_client_secret: string | null }>(
+    `SELECT url, auth, oauth_client_id, oauth_client_secret FROM custom_connector WHERE user_id=$1 AND workspace_id=$2 AND slug=$3`,
+    [userId, workspaceId, id],
+  ).catch(() => null);
+  return row?.url ? { url: row.url, auth: row.auth, clientId: row.oauth_client_id, clientSecret: row.oauth_client_secret } : null;
+}
+
+/** Fill a registry server's null url: user's BYO endpoint first, then operator secrets. */
+async function withConfiguredEndpoint(server: McpServer, userId?: string, workspaceId?: string): Promise<McpServer> {
+  if (server.url) return server;                       // already pinned (jira/github)
+  if (userId && workspaceId) {
+    const st = await storedEndpoint(userId, workspaceId, server.id);
+    if (st) return { ...server, url: st.url, auth: st.auth === 'none' ? 'none' : server.auth };
+  }
+  const s = await getSecrets().catch(() => null);
+  if (s && GOOGLE_FAMILY.has(server.id) && s.MCP_GOOGLE_URL) return { ...server, url: s.MCP_GOOGLE_URL };
+  if (s && server.id === 'slack' && s.MCP_SLACK_URL) return { ...server, url: s.MCP_SLACK_URL };
+  return server;                                       // not configured → stays null (not connectable)
+}
+
+/** The pre-registered OAuth client (Google/Slack can't auto-register): user's first, then secrets. */
+export async function getRegistryOAuthClient(id: string, userId?: string, workspaceId?: string): Promise<{ clientId: string; clientSecret: string | null } | null> {
+  if (userId && workspaceId) {
+    const st = await storedEndpoint(userId, workspaceId, id);
+    if (st?.clientId) return { clientId: st.clientId, clientSecret: st.clientSecret };
+  }
+  const s = await getSecrets().catch(() => null);
+  if (s && GOOGLE_FAMILY.has(id) && s.GOOGLE_OAUTH_CLIENT_ID) return { clientId: s.GOOGLE_OAUTH_CLIENT_ID, clientSecret: s.GOOGLE_OAUTH_CLIENT_SECRET || null };
+  if (s && id === 'slack' && s.SLACK_OAUTH_CLIENT_ID) return { clientId: s.SLACK_OAUTH_CLIENT_ID, clientSecret: s.SLACK_OAUTH_CLIENT_SECRET || null };
+  return null;
+}
+
+/** True if this registry connector has a usable endpoint now (pinned, user-configured, or secret). */
+export async function isConnectorAvailable(id: string, userId?: string, workspaceId?: string): Promise<boolean> {
+  const base = getMcpServer(id);
+  if (!base) return false;
+  if (base.transport === 'local') return false;        // local connectors aren't MCP-connect
+  return !!(await withConfiguredEndpoint(base, userId, workspaceId)).url;
+}
+
+/** Configure a catalog connector with a user-supplied MCP endpoint (+ optional OAuth client),
+ *  stored under the connector's own id so the rest of the system resolves it like any server.
+ *  Idempotent (upsert). This is the BYO-endpoint half of "Connect" on a named card. */
+export async function configureCatalogConnector(userId: string, workspaceId: string, id: string, input: { url: string; oauthClientId?: string | null; oauthClientSecret?: string | null; auth?: string }): Promise<void> {
+  await ensureCustomConnectorSchema();
+  const base = getMcpServer(id);
+  await query(
+    `INSERT INTO custom_connector (user_id, workspace_id, slug, name, url, auth, oauth_client_id, oauth_client_secret, mode)
+     VALUES ($1,$2,$3,$4,$5,$6,$7,$8,'individual')
+     ON CONFLICT (user_id, workspace_id, slug) DO UPDATE SET
+       url=EXCLUDED.url, auth=EXCLUDED.auth, oauth_client_id=EXCLUDED.oauth_client_id, oauth_client_secret=EXCLUDED.oauth_client_secret`,
+    [userId, workspaceId, id, base?.label || id, input.url.trim(), input.auth === 'none' ? 'none' : 'oauth', input.oauthClientId || null, input.oauthClientSecret || null],
+  );
+}
 
 /**
  * CUSTOM CONNECTORS — user-added remote MCP servers (the "Add custom connector" flow). The static
@@ -98,7 +164,10 @@ export async function getCustomConnectorOAuthClient(userId: string, workspaceId:
   return row?.oauth_client_id ? { clientId: row.oauth_client_id, clientSecret: row.oauth_client_secret } : null;
 }
 
-/** Unified server resolver: static registry first, then this user's custom connectors. */
+/** Unified server resolver: static registry (with configured-endpoint overlay) first, then this
+ *  user's custom connectors. */
 export async function getServerConfig(userId: string, workspaceId: string, id: string): Promise<McpServer | null> {
-  return getMcpServer(id) || await getCustomConnectorServer(userId, workspaceId, id);
+  const reg = getMcpServer(id);
+  if (reg) return await withConfiguredEndpoint(reg, userId, workspaceId);
+  return await getCustomConnectorServer(userId, workspaceId, id);
 }

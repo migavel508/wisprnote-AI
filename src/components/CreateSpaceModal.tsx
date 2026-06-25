@@ -1,13 +1,13 @@
 import { useEffect, useRef, useState } from 'react';
 import { X, Loader2 } from 'lucide-react';
-import type { Workspace } from '../services/workspaceService';
-import { createWorkspace, addWorkspaceMember } from '../services/workspaceService';
+import type { Space } from '../services/workspaceService';
+import { createSpace } from '../services/workspaceService';
 import { ICON_COLORS, ICON_LIBRARY } from './CreateFolderModal';
 import { EMOJI_GROUPS } from '../data/emojiData';
 
 interface Props {
   onClose: () => void;
-  onCreated: (ws: Workspace) => void;
+  onCreated: (space: Space) => void;
 }
 
 // "Create a space" modal — name + icon/emoji picker + members, matching the
@@ -58,11 +58,14 @@ export default function CreateSpaceModal({ onClose, onCreated }: Props) {
     if (!canCreate) return;
     setSaving(true);
     try {
-      const ws = await createWorkspace(title.trim(), iconChosen && iconType === 'emoji' ? emoji : '🗂️', iconColor);
-      for (const email of members) {
-        await addWorkspaceMember(ws.id, email).catch(() => {});
-      }
-      onCreated(ws);
+      // Create a SPACE (inside the active workspace), with its members. A space with
+      // members is shared; with none it's private ("Just you").
+      const space = await createSpace(title.trim(), {
+        emoji: iconChosen && iconType === 'emoji' ? emoji : undefined,
+        color: iconColor,
+        members,
+      });
+      onCreated(space);
     } finally {
       setSaving(false);
     }

@@ -31,6 +31,9 @@ export interface ConnectorStatus {
   connected: boolean;
   account: string | null;
   status: string;
+  /** Server reports the MCP endpoint is configured/usable now (jira/github always; google/slack
+   *  once an endpoint + OAuth client are provisioned). Flips a "coming soon" card to connectable. */
+  available?: boolean;
 }
 
 /**
@@ -100,6 +103,21 @@ export async function ingestLocalSessions(workspaceId: string, sessions: unknown
     method: 'POST', body: JSON.stringify({ sessions }),
   });
   if (!r.ok) throw new Error(`Local session ingest failed (${r.status})`);
+  return await r.json();
+}
+
+/** Configure a catalog connector (Slack/Gmail/…) with a bring-your-own MCP endpoint (+ optional
+ *  OAuth client). After this, start the normal OAuth connect for that same id. */
+export async function configureConnector(
+  id: string,
+  input: { url: string; oauthClientId?: string; oauthClientSecret?: string },
+  workspaceId?: string,
+): Promise<{ configured: boolean; needsAuth: boolean }> {
+  const r = await authed(`/connectors/${id}/configure`, {
+    method: 'POST',
+    body: JSON.stringify({ workspace: workspaceId, ...input }),
+  });
+  if (!r.ok) { const e = await r.json().catch(() => ({})); throw new Error(e.error || `Could not configure ${id} (${r.status}).`); }
   return await r.json();
 }
 

@@ -1,5 +1,5 @@
 import { query } from '../db';
-import { getMcpServer, type McpServer } from './registry';
+import { type McpServer } from './registry';
 import { getToken } from '../trust/broker';
 import { context as jiraContext } from '../connectors/jira/actions';
 
@@ -24,13 +24,11 @@ export async function resolveMcpConnection(userId: string, workspaceId: string, 
     const ctx = await jiraContext(userId, workspaceId).catch(() => null);
     return ctx ? { connector: 'jira', server: ctx.server, token: ctx.at, cloudId: ctx.cloudId, siteUrl: ctx.siteUrl } : null;
   }
-  // Generic remote MCP: server from the registry OR a user-added custom connector, + the
-  // workspace's OAuth token. (Custom connectors are looked up by slug; no-auth ones need no token.)
-  let server = getMcpServer(connector);
-  if (!server && connector.startsWith('custom-')) {
-    const { getCustomConnectorServer } = await import('./customConnectors');
-    server = await getCustomConnectorServer(userId, workspaceId, connector).catch(() => null) || undefined as any;
-  }
+  // Generic remote MCP: server from the registry (with its configured-endpoint overlay for
+  // Google/Slack) OR a user-added custom connector, + the workspace's OAuth token. (Custom
+  // connectors are looked up by slug; no-auth ones need no token.)
+  const { getServerConfig } = await import('./customConnectors');
+  const server = await getServerConfig(userId, workspaceId, connector).catch(() => null);
   if (!server?.url) return null;
   const cred = await getToken(userId, connector, workspaceId).catch(() => null);
   const token = ((cred?.token as any)?.access_token) ?? '';

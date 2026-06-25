@@ -1,7 +1,7 @@
 import { useEffect, useRef, useState } from 'react';
 import Markdown from 'react-markdown';
 import remarkGfm from 'remark-gfm';
-import { ChevronDown, Paperclip, Mic, Send, X, Check, Loader2, Sparkles, History, Plus, LayoutGrid, FileText } from 'lucide-react';
+import { ChevronDown, Paperclip, Mic, Send, X, Check, Loader2, Sparkles, History, Plus, LayoutGrid, FileText, Network } from 'lucide-react';
 import { assistantMarkdownComponents } from './chatMarkdown';
 import { useVoiceInput } from '../hooks/useVoiceInput';
 import { CHAT_MODELS, getChatModel, setChatModelId, type ChatModelDef } from '../services/chatModels';
@@ -13,7 +13,9 @@ import { serverChat, isServerChatEnabled } from '../services/aiProxyService';
 import JiraActionCard from './JiraActionCard';
 import McpActionCard from './McpActionCard';
 import AgentApprovalCard, { type ApprovalDecision } from './AgentApprovalCard';
+import MessageActions from './MessageActions';
 import AgentTimeline, { type TraceItem } from './AgentTimeline';
+import WisprSpark from './WisprSpark';
 import { runAgentLoop, type AgentLoopEvent, type PendingApproval } from '../services/agentLoopService';
 import type { JiraActionProposal, JiraMeta, McpWriteProposal } from '../services/jiraActionService';
 
@@ -45,11 +47,15 @@ const newThreadId = (): string => {
 export default function WorkspaceChat({
   workspaceId,
   workspaceName,
+  spaceId,
   scopedMeetings,
   session,
 }: {
   workspaceId: string;
   workspaceName: string;
+  /** When set, this is a SPACE chat — server retrieval is restricted to this space's
+      meetings (scope:'space'); the client fallback is already scoped to `scopedMeetings`. */
+  spaceId?: string;
   scopedMeetings: SearchableMeeting[];
   session?: { user: { id: string; email: string; name?: string } } | null;
 }) {
@@ -250,8 +256,11 @@ export default function WorkspaceChat({
         setPlan([`Searching ${workspaceName} on the server…`]);
         const res = await serverChat({
           query: text,
-          scope: 'workspace',
+          // A space chat retrieves ONLY this space's meetings; the workspace-home
+          // chat retrieves the whole workspace (+ connected tools).
+          scope: spaceId ? 'space' : 'workspace',
           workspaceId,
+          spaceId,
           history: messages.map((m) => ({ role: m.role, text: m.text })),
           model: activeModel.provider === 'anthropic' ? 'claude' : 'gemini',
         });
@@ -326,9 +335,7 @@ export default function WorkspaceChat({
               <div key={i} className="flex justify-start">
                 <div className="max-w-[88%] w-full">
                   <div className="flex items-center gap-2.5 mb-2.5">
-                    <div className="w-6 h-6 rounded-full bg-[#1a1a1a] flex items-center justify-center flex-shrink-0">
-                      <Sparkles className="w-3 h-3 text-white" />
-                    </div>
+                    <WisprSpark size={22} className="flex-shrink-0" />
                     <span className="text-[12.5px] font-semibold text-zinc-800 dark:text-zinc-200">WisprNote AI</span>
                   </div>
                   <div className="pl-[34px] min-w-0">
@@ -340,6 +347,7 @@ export default function WorkspaceChat({
                     {m.mcpProposals?.map((mp, idx) => (
                       <McpActionCard key={idx} proposal={mp} workspaceId={workspaceId} />
                     ))}
+                    {!!m.text?.trim() && <MessageActions text={m.text} className="mt-2 -ml-1" />}
                   </div>
                 </div>
               </div>
@@ -348,7 +356,7 @@ export default function WorkspaceChat({
           {isChatting && (
             <div className="rounded-xl bg-app-raised/50 px-3.5 py-3 text-[12px]">
               <div className="flex items-center gap-2 text-app-fg-muted font-medium mb-1.5">
-                <Loader2 className="w-3.5 h-3.5 animate-spin" /> Working on it…
+                <WisprSpark size={18} active className="flex-shrink-0" /> Working on it…
               </div>
               {/* Agent-mode live timeline — thought process, plan, and tool calls (Request/Response) */}
               {agentMode && <AgentTimeline trace={liveTrace} live />}
@@ -358,6 +366,27 @@ export default function WorkspaceChat({
                 </div>
               ))}
               {steps.map((s) => (
+                s.kind === 'analyze' ? (
+                  // Deep-analysis SUB-AGENT spawn — distinct brand-green node-graph icon + label.
+                  <div key={s.callId} className="flex items-start gap-2 pl-0.5 py-0.5 text-[#6f871a] dark:text-[#acc36a] font-semibold">
+                    <Network className={`w-3.5 h-3.5 text-[#819C1F] flex-shrink-0 mt-px ${s.status === 'running' ? 'animate-pulse' : ''}`} strokeWidth={2} />
+                    <span>
+                      {s.status === 'running' ? 'Spawned deep-analysis agent' : 'Deep-analysis agent'}
+                      {s.status === 'done' && s.results ? <span className="font-normal text-app-fg-subtle"> · read {s.results.length} in full</span> : null}
+                    </span>
+                  </div>
+                ) : s.kind === 'read' ? (
+                  // read_meeting_notes — a Read, not a Search: document icon + meeting title.
+                  <div key={s.callId} className="flex items-start gap-2 pl-0.5 py-0.5 text-app-fg-subtle">
+                    {s.status === 'done'
+                      ? <FileText className="w-3.5 h-3.5 text-app-fg-subtle flex-shrink-0 mt-px" />
+                      : <Loader2 className="w-3.5 h-3.5 animate-spin flex-shrink-0 mt-px" />}
+                    <span>
+                      {s.status === 'running' ? 'Reading' : 'Read'}{' '}
+                      <span className="text-app-fg">{s.query?.trim() ? `“${s.query.trim()}”` : 'meeting'}</span>
+                    </span>
+                  </div>
+                ) : (
                 <div key={s.callId} className="flex items-start gap-2 pl-0.5 py-0.5 text-app-fg-subtle">
                   {s.status === 'done'
                     ? <Check className="w-3.5 h-3.5 text-emerald-500 flex-shrink-0 mt-px" strokeWidth={2.4} />
@@ -368,6 +397,7 @@ export default function WorkspaceChat({
                     {s.status === 'done' && s.results ? <span className="text-app-fg-subtle"> · {s.results.length} found</span> : null}
                   </span>
                 </div>
+                )
               ))}
             </div>
           )}

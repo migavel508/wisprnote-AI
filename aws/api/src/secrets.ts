@@ -23,6 +23,17 @@ export interface ApiSecrets {
   DEEPGRAM_API_KEY: string;
   OPENROUTER_API_KEY: string;
   TURBOPUFFER_API_KEY: string;
+  // MCP connector endpoints + OAuth clients for connectors whose remote endpoint isn't a fixed
+  // public URL (Google Workspace, Slack). Empty until an endpoint is provisioned — when set, the
+  // connector goes live through the SAME generic MCP flow as Jira/GitHub. Google's family
+  // (Gmail/Calendar/Drive) shares one MCP server + OAuth client. Google & Slack don't support
+  // dynamic client registration, so a pre-registered OAuth client is required (like GitHub's PAT).
+  MCP_GOOGLE_URL: string;
+  GOOGLE_OAUTH_CLIENT_ID: string;
+  GOOGLE_OAUTH_CLIENT_SECRET: string;
+  MCP_SLACK_URL: string;
+  SLACK_OAUTH_CLIENT_ID: string;
+  SLACK_OAUTH_CLIENT_SECRET: string;
   // Paddle (billing) — server-side secret. Used for Paddle API calls
   // (subscription status, etc.). NEVER ship this in the client bundle.
   PADDLE_API_KEY: string;
@@ -56,6 +67,12 @@ export function getSecrets(): Promise<ApiSecrets> {
         DEEPGRAM_API_KEY: process.env.DEEPGRAM_API_KEY || '',
         OPENROUTER_API_KEY: process.env.OPENROUTER_API_KEY || '',
         TURBOPUFFER_API_KEY: process.env.TURBOPUFFER_API_KEY || '',
+        MCP_GOOGLE_URL: process.env.MCP_GOOGLE_URL || '',
+        GOOGLE_OAUTH_CLIENT_ID: process.env.GOOGLE_OAUTH_CLIENT_ID || '',
+        GOOGLE_OAUTH_CLIENT_SECRET: process.env.GOOGLE_OAUTH_CLIENT_SECRET || '',
+        MCP_SLACK_URL: process.env.MCP_SLACK_URL || '',
+        SLACK_OAUTH_CLIENT_ID: process.env.SLACK_OAUTH_CLIENT_ID || '',
+        SLACK_OAUTH_CLIENT_SECRET: process.env.SLACK_OAUTH_CLIENT_SECRET || '',
         PADDLE_API_KEY: process.env.PADDLE_API_KEY || '',
         PADDLE_WEBHOOK_SECRET: process.env.PADDLE_WEBHOOK_SECRET || '',
         PADDLE_SANDBOX_WEBHOOK_SECRET: process.env.PADDLE_SANDBOX_WEBHOOK_SECRET || '',
@@ -74,6 +91,12 @@ export function getSecrets(): Promise<ApiSecrets> {
             DEEPGRAM_API_KEY: parsed.DEEPGRAM_API_KEY || fallback.DEEPGRAM_API_KEY,
             OPENROUTER_API_KEY: parsed.OPENROUTER_API_KEY || fallback.OPENROUTER_API_KEY,
             TURBOPUFFER_API_KEY: parsed.TURBOPUFFER_API_KEY || fallback.TURBOPUFFER_API_KEY,
+            MCP_GOOGLE_URL: parsed.MCP_GOOGLE_URL || fallback.MCP_GOOGLE_URL,
+            GOOGLE_OAUTH_CLIENT_ID: parsed.GOOGLE_OAUTH_CLIENT_ID || fallback.GOOGLE_OAUTH_CLIENT_ID,
+            GOOGLE_OAUTH_CLIENT_SECRET: parsed.GOOGLE_OAUTH_CLIENT_SECRET || fallback.GOOGLE_OAUTH_CLIENT_SECRET,
+            MCP_SLACK_URL: parsed.MCP_SLACK_URL || fallback.MCP_SLACK_URL,
+            SLACK_OAUTH_CLIENT_ID: parsed.SLACK_OAUTH_CLIENT_ID || fallback.SLACK_OAUTH_CLIENT_ID,
+            SLACK_OAUTH_CLIENT_SECRET: parsed.SLACK_OAUTH_CLIENT_SECRET || fallback.SLACK_OAUTH_CLIENT_SECRET,
             PADDLE_API_KEY: parsed.PADDLE_API_KEY || fallback.PADDLE_API_KEY,
             PADDLE_WEBHOOK_SECRET: parsed.PADDLE_WEBHOOK_SECRET || fallback.PADDLE_WEBHOOK_SECRET,
             PADDLE_SANDBOX_WEBHOOK_SECRET: parsed.PADDLE_SANDBOX_WEBHOOK_SECRET || fallback.PADDLE_SANDBOX_WEBHOOK_SECRET,

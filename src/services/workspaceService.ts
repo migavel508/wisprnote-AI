@@ -1,5 +1,7 @@
 import { fetch as tauriFetch } from '@tauri-apps/plugin-http';
 import { getIdToken } from './awsAuthService';
+import { getSelection } from './workspaceSelection';
+import { emitVaultEvent } from '../lib/vaultEvents';
 
 const API_BASE = import.meta.env.VITE_API_GATEWAY_URL || '';
 const isTauri = !!(window as any).__TAURI_INTERNALS__;
@@ -13,6 +15,8 @@ export interface Workspace {
   color: string;
   created_at: string;
   updated_at: string;
+  /** The user's home vault — created server-side, shown as their name + photo, undeletable. */
+  is_default?: boolean;
 }
 
 export interface Folder {
@@ -21,6 +25,8 @@ export interface Folder {
   user_id: string;
   name: string;
   created_at: string;
+  /** Hierarchy: NULL/undefined = a top-level SPACE; set = a FOLDER inside that space. */
+  parentId?: string | null;
   // Client-side overlay (stored in localStorage):
   emoji?: string;
   color?: string;
@@ -33,7 +39,10 @@ export const DEFAULT_WORKSPACE_NAME = 'My notes';
 export const DEFAULT_WORKSPACE_EMOJI = '🔒';
 
 export function isDefaultWorkspace(ws: Workspace | null | undefined): boolean {
-  return !!ws && ws.name === DEFAULT_WORKSPACE_NAME;
+  // Use ONLY the server's authoritative flag. The server guarantees exactly one
+  // default per user; relying on the name too would make a legacy "My notes" ALSO
+  // render as the user's vault → duplicate "you" entries in the switcher.
+  return !!ws && ws.is_default === true;
 }
 
 // ── Client-side metadata overlay (folders + workspace description) ────────────
@@ -124,6 +133,7 @@ function hydrateFolder(f: Folder): Folder {
     emoji: f.emoji ?? meta.emoji,
     color: f.color ?? meta.color,
     description: f.description ?? meta.description,
+    parentId: (f as any).parent_id ?? f.parentId ?? null,
   };
 }
 
@@ -161,9 +171,13 @@ export const setContactEmail = (name: string, email: string): Promise<{ ok: bool
 
 async function apiRequest<T = any>(method: string, path: string, body?: any): Promise<T> {
   const token = await getIdToken();
+  const headers: Record<string, string> = { 'Content-Type': 'application/json', Authorization: token };
+  // Scope workspace/space/folder calls to the active vault (matches awsService).
+  const activeWs = getSelection().workspaceId;
+  if (activeWs) headers['X-Workspace-Id'] = activeWs;
   const resp = await httpFetch(`${API_BASE}${path}`, {
     method,
-    headers: { 'Content-Type': 'application/json', Authorization: token },
+    headers,
     body: body ? JSON.stringify(body) : undefined,
   });
   if (!resp.ok) {
@@ -228,7 +242,7 @@ export const getFolders = async (workspaceId: string): Promise<Folder[]> => {
 export const createFolder = async (
   workspaceId: string,
   name: string,
-  meta?: { emoji?: string; color?: string; description?: string; iconType?: 'icon' | 'emoji'; iconName?: string }
+  meta?: { emoji?: string; color?: string; description?: string; iconType?: 'icon' | 'emoji'; iconName?: string; parentId?: string | null }
 ): Promise<Folder> => {
   const f = await apiRequest<Folder>('POST', `/workspaces/${workspaceId}/folders`, {
     name,
@@ -237,6 +251,7 @@ export const createFolder = async (
     description: meta?.description ?? '',
     icon_type: meta?.iconType ?? 'icon',
     icon_name: meta?.iconName ?? null,
+    parent_id: meta?.parentId ?? null,
   });
   // Keep localStorage in sync so the UI keeps working even on older backends.
   if (meta) setFolderMeta(f.id, meta);
@@ -256,20 +271,112 @@ export const deleteFolder = async (folderId: string): Promise<void> => {
   deleteFolderMeta(folderId);
 };
 
-// ── Ensure default "My notes" workspace exists for the user ───────────────────
+// ── Spaces (membership-scoped grouping inside the active workspace) ────────────
+
+export interface Space {
+  id: string;
+  workspace_id: string;
+  user_id: string;
+  name: string;
+  emoji?: string | null;
+  color?: string | null;
+  is_default?: boolean;
+  shared_all?: boolean;
+  created_at: string;
+  folder_count?: number; // populated by the list endpoint
+  member_count?: number;
+}
+
+export const getSpaces = (): Promise<Space[]> => apiRequest('GET', '/spaces');
+
+export const createSpace = async (
+  name: string,
+  opts?: { emoji?: string; color?: string; members?: string[]; sharedAll?: boolean },
+): Promise<Space> => {
+  const sp = await apiRequest<Space>('POST', '/spaces', {
+    name,
+    emoji: opts?.emoji ?? null,
+    color: opts?.color ?? null,
+    members: opts?.members ?? [],
+    shared_all: opts?.sharedAll ?? false,
+  });
+  emitVaultEvent('spaces:changed', {});
+  return sp;
+};
+
+export const updateSpace = async (id: string, data: { name?: string; emoji?: string; color?: string }): Promise<Space> => {
+  const sp = await apiRequest<Space>('PUT', `/spaces/${id}`, data);
+  emitVaultEvent('spaces:changed', {});
+  return sp;
+};
+
+export const deleteSpace = async (id: string): Promise<void> => {
+  await apiRequest('DELETE', `/spaces/${id}`);
+  emitVaultEvent('spaces:changed', {});
+};
+
+export const getSpaceFolders = async (spaceId: string): Promise<Folder[]> => {
+  const folders = await apiRequest<Folder[]>('GET', `/spaces/${spaceId}/folders`);
+  return folders.map(hydrateFolder);
+};
+
+export const getSpaceMeetings = (spaceId: string): Promise<WorkspaceMeeting[]> =>
+  apiRequest('GET', `/spaces/${spaceId}/meetings`);
+
+export const createFolderInSpace = async (
+  spaceId: string,
+  name: string,
+  meta?: { emoji?: string; color?: string; iconType?: 'icon' | 'emoji'; iconName?: string },
+): Promise<Folder> => {
+  const f = await apiRequest<Folder>('POST', `/spaces/${spaceId}/folders`, {
+    name,
+    emoji: meta?.emoji ?? null,
+    color: meta?.color ?? null,
+    icon_type: meta?.iconType ?? 'icon',
+    icon_name: meta?.iconName ?? null,
+  });
+  if (meta) setFolderMeta(f.id, meta);
+  emitVaultEvent('spaces:changed', {});
+  return hydrateFolder(f);
+};
+
+/** Move a note into a space (optionally a folder within it). */
+export const moveNoteToSpace = async (spaceId: string, taskId: string, folderId: string | null = null): Promise<void> => {
+  await apiRequest('POST', `/spaces/${spaceId}/meetings`, { task_id: taskId, folder_id: folderId });
+  emitVaultEvent('notes:changed', { taskId, spaceId, folderId });
+};
+
+/** Move a folder into a different space. */
+export const moveFolderToSpace = async (folderId: string, spaceId: string): Promise<Folder> => {
+  const f = await apiRequest<Folder>('PUT', `/folders/${folderId}`, { space_id: spaceId });
+  emitVaultEvent('spaces:changed', {});
+  return f;
+};
+
+export interface SpaceMember { space_id: string; email: string; role: string; }
+export const getSpaceMembers = (spaceId: string): Promise<SpaceMember[]> =>
+  apiRequest('GET', `/spaces/${spaceId}/members`);
+export const addSpaceMember = (spaceId: string, email: string, role = 'viewer'): Promise<void> =>
+  apiRequest('POST', `/spaces/${spaceId}/members`, { email, role });
+
+// ── Ensure a default (home) workspace exists for the user ─────────────────────
+// The server (workspaceScope) is the authoritative creator of the default vault
+// (named from the user, is_default=true). We only create a fallback if the user
+// has NO workspace at all (e.g. first run before bootstrap) — and never a second
+// one when a server default already exists (avoids duplicate vaults).
 export async function ensureDefaultWorkspace(): Promise<Workspace[]> {
   let workspaces = await getWorkspaces();
-  const hasDefault = workspaces.some(w => w.name === DEFAULT_WORKSPACE_NAME);
-  if (!hasDefault) {
+  const hasDefault = workspaces.some(w => isDefaultWorkspace(w));
+  if (!hasDefault && workspaces.length === 0) {
     try {
       const ws = await createWorkspace(DEFAULT_WORKSPACE_NAME, DEFAULT_WORKSPACE_EMOJI, '#71717a');
       workspaces = [ws, ...workspaces];
     } catch { /* ignore — user may be offline */ }
   }
-  // Sort so default is always first.
+  // Sort so the default (home) vault is always first.
   return workspaces.sort((a, b) => {
-    if (a.name === DEFAULT_WORKSPACE_NAME) return -1;
-    if (b.name === DEFAULT_WORKSPACE_NAME) return 1;
+    if (isDefaultWorkspace(a)) return -1;
+    if (isDefaultWorkspace(b)) return 1;
     return new Date(a.created_at).getTime() - new Date(b.created_at).getTime();
   });
 }

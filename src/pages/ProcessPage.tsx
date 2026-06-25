@@ -20,6 +20,10 @@ import {
   LayoutGrid,
   ExternalLink,
   Maximize2,
+  SquarePen,
+  ChevronLeft,
+  MessageSquare,
+  ArrowUp,
   X,
   ChevronRight,
   Copy,
@@ -34,7 +38,8 @@ import PermissionsGate from '../components/PermissionsGate';
 import Markdown from 'react-markdown';
 import remarkGfm from 'remark-gfm';
 import GemsModal from '../components/GemsModal';
-import type { Gem } from '../services/gemsService';
+import { gemPromptFor, type Gem } from '../services/gemsService';
+import MessageActions from '../components/MessageActions';
 
 interface ProcessPageProps {
   file: File | null;
@@ -76,7 +81,12 @@ interface ProcessPageProps {
   messages?: { role: string; text: string }[];
   isChatting?: boolean;
   /** Run a Gem's prompt against the all-meetings chat. */
-  onRunGem?: (prompt: string) => void;
+  onRunGem?: (prompt: string, displayText?: string) => void;
+  /** All-meetings chat history (threads), for the inline History dropdown. */
+  chatThreads?: { id: string; title: string; taskId: string | null; updatedAt: string; preview: string }[];
+  onNewChat?: () => void;
+  onLoadThread?: (id: string) => void;
+  onOpenFullChat?: () => void;
 }
 
 type ViewState = 'collapsed' | 'expanded';
@@ -150,6 +160,10 @@ export default function ProcessPage({
   messages = [],
   isChatting = false,
   onRunGem,
+  chatThreads = [],
+  onNewChat,
+  onLoadThread,
+  onOpenFullChat,
 }: ProcessPageProps) {
   const fileInputRef = useRef<HTMLInputElement>(null);
   const transcriptEndRef = useRef<HTMLDivElement>(null);
@@ -164,14 +178,76 @@ export default function ProcessPage({
   const [isChatOpen, setIsChatOpen] = useState(false);
   const [activeChip, setActiveChip] = useState<string | null>(null);
   const [gemsOpen, setGemsOpen] = useState(false);
+  const [historyOpen, setHistoryOpen] = useState(false);
   const chatEndRef = useRef<HTMLDivElement>(null);
+
+  // All-meetings chat threads (taskId === null), newest first, for the History dropdown.
+  const homeThreads = [...chatThreads]
+    .filter((t) => t.taskId === null)
+    .sort((a, b) => (b.updatedAt || '').localeCompare(a.updatedAt || ''));
+  const groupLabel = (iso: string) => {
+    const d = new Date(iso); const now = new Date();
+    const startOfDay = (x: Date) => new Date(x.getFullYear(), x.getMonth(), x.getDate()).getTime();
+    const days = Math.round((startOfDay(now) - startOfDay(d)) / 86400000);
+    if (days <= 0) return 'Today';
+    if (days <= 3) return 'Last 3 days';
+    return d.toLocaleDateString(undefined, d.getFullYear() === now.getFullYear() ? { month: 'long' } : { month: 'long', year: 'numeric' });
+  };
+  const [fullScreen, setFullScreen] = useState(false);
+  const fsEndRef = useRef<HTMLDivElement>(null);
+
+  // History thread list — shared by the inline dropdown and the full-screen view.
+  const renderThreadGroups = () => {
+    if (homeThreads.length === 0) return <div className="px-3 py-5 text-[13px] text-zinc-400 dark:text-zinc-500 text-center">No chats yet.</div>;
+    const groups: { label: string; items: typeof homeThreads }[] = [];
+    for (const t of homeThreads) {
+      const label = groupLabel(t.updatedAt);
+      const last = groups[groups.length - 1];
+      if (last && last.label === label) last.items.push(t); else groups.push({ label, items: [t] });
+    }
+    return groups.map((g) => (
+      <div key={g.label} className="mb-1 last:mb-0">
+        <div className="px-3 pt-2 pb-1 text-[12.5px] text-zinc-400 dark:text-zinc-500">{g.label}</div>
+        {g.items.map((t) => (
+          <button
+            key={t.id}
+            onClick={() => { onLoadThread?.(t.id); setHistoryOpen(false); setIsChatOpen(true); setIsCommandBarOpen(true); }}
+            className="w-full text-left px-3 py-2 rounded-lg text-[14px] text-zinc-800 dark:text-app-fg hover:bg-zinc-100 dark:hover:bg-app-chip truncate transition-colors"
+          >
+            {t.title || t.preview || 'Untitled chat'}
+          </button>
+        ))}
+      </div>
+    ));
+  };
+
+  // The conversation — shared by the inline panel and the full-screen view.
+  const renderConversation = (endRef: React.RefObject<HTMLDivElement>) => (
+    <>
+      {messages.length === 0 && !isChatting && (
+        <div className="flex-1 flex items-center justify-center text-[13px] text-zinc-400 dark:text-zinc-500">Ask anything about your meeting notes.</div>
+      )}
+      {messages.map((m, i) => (
+        m.role === 'user' ? (
+          <div key={i} className="flex justify-end"><div className="px-3.5 py-2 bg-zinc-100 dark:bg-app-chip rounded-2xl text-[13px] text-zinc-800 dark:text-zinc-100 max-w-[85%] whitespace-pre-wrap leading-relaxed">{m.text}</div></div>
+        ) : (
+          <div key={i}>
+            <div className="text-[13.5px] text-zinc-800 dark:text-app-fg leading-relaxed [&_h1]:text-[15px] [&_h1]:font-semibold [&_h2]:text-[14px] [&_h2]:font-semibold [&_h3]:text-[13.5px] [&_h3]:font-semibold [&_h1]:mt-3 [&_h2]:mt-3 [&_h3]:mt-2 [&_ul]:list-disc [&_ul]:pl-5 [&_ul]:my-1 [&_ol]:list-decimal [&_ol]:pl-5 [&_ol]:my-1 [&_p]:my-1.5 [&_a]:text-[#6f871a] [&_a]:underline">{m.text ? <Markdown remarkPlugins={[remarkGfm]}>{m.text}</Markdown> : <span className="text-zinc-400">…</span>}</div>
+            {!!m.text?.trim() && <MessageActions text={m.text} className="mt-1.5 -ml-1" />}
+          </div>
+        )
+      ))}
+      {isChatting && (<div className="flex items-center gap-1.5 text-[12.5px] text-zinc-400 dark:text-zinc-500"><Loader2 className="w-3 h-3 animate-spin" /> Thinking…</div>)}
+      <div ref={endRef} />
+    </>
+  );
 
   // Run a Gem: open the inline chat panel and send its prompt to all-meetings chat.
   const runGem = (gem: Gem) => {
     setIsChatOpen(true);
     setIsCommandBarOpen(true);
     setIsHistoryOpen(false);
-    onRunGem?.(gem.prompt);
+    onRunGem?.(gemPromptFor(gem), gem.name);   // engine gets the directive; bubble shows the Gem name
   };
 
   // Open the inline chat panel (stay on the home page) and send to all-meetings chat.
@@ -183,10 +259,11 @@ export default function ProcessPage({
     onAskAnything?.();
   };
 
-  // Keep the inline conversation pinned to the latest message.
+  // Keep both the inline and full-screen conversations pinned to the latest message.
   useEffect(() => {
     chatEndRef.current?.scrollIntoView({ behavior: 'auto', block: 'end' });
-  }, [messages, isChatting]);
+    fsEndRef.current?.scrollIntoView({ behavior: 'auto', block: 'end' });
+  }, [messages, isChatting, fullScreen]);
 
   // Auto-scroll live transcript. Use instant ('auto') not 'smooth': interim updates
   // fire several times a second, and queuing an overlapping smooth-scroll animation on
@@ -325,17 +402,28 @@ export default function ProcessPage({
                   className="flex flex-col rounded-[28px] border border-zinc-200 dark:border-app-border bg-white dark:bg-app-raised overflow-hidden"
                   style={{ maxHeight: '560px' }}
                 >
-                  {/* Header */}
-                  <div className="flex items-center px-4 pt-4 pb-2 flex-shrink-0">
-                    <button className="flex items-center gap-1 text-zinc-500 dark:text-zinc-400 hover:text-zinc-700 dark:hover:text-zinc-200 transition-colors">
+                  {/* Header — History dropdown · New chat · Full screen */}
+                  <div className="relative flex items-center px-4 pt-4 pb-2 flex-shrink-0">
+                    <button
+                      onClick={(e) => { e.stopPropagation(); setHistoryOpen((o) => !o); }}
+                      className="flex items-center gap-1 px-1.5 py-1 rounded-md text-zinc-500 dark:text-zinc-400 hover:text-zinc-700 dark:hover:text-zinc-200 hover:bg-zinc-100 dark:hover:bg-app-chip transition-colors"
+                      title="Chat history"
+                    >
                       <History className="w-[15px] h-[15px]" />
-                      <ChevronDown className="w-3.5 h-3.5" />
+                      <ChevronDown className={`w-3.5 h-3.5 transition-transform ${historyOpen ? 'rotate-180' : ''}`} />
                     </button>
-                    <div className="ml-auto flex items-center">
-                      <button className="p-1.5 text-zinc-400 hover:text-zinc-600 dark:hover:text-zinc-200 transition-colors" title="Open in full">
-                        <ExternalLink className="w-[15px] h-[15px]" />
+
+                    {historyOpen && (
+                      <div onClick={(e) => e.stopPropagation()} className="absolute left-3 top-full mt-1.5 z-20 w-[340px] max-h-[320px] overflow-y-auto bg-white dark:bg-app-raised rounded-2xl border border-zinc-200 dark:border-app-border shadow-[0_16px_44px_-12px_rgba(0,0,0,0.28)] p-1.5">
+                        {renderThreadGroups()}
+                      </div>
+                    )}
+
+                    <div className="ml-auto flex items-center gap-0.5">
+                      <button onClick={(e) => { e.stopPropagation(); setHistoryOpen(false); onNewChat?.(); }} className="p-1.5 text-zinc-400 hover:text-zinc-600 dark:hover:text-zinc-200 transition-colors" title="New chat">
+                        <SquarePen className="w-[15px] h-[15px]" />
                       </button>
-                      <button className="p-1.5 text-zinc-400 hover:text-zinc-600 dark:hover:text-zinc-200 transition-colors" title="Expand">
+                      <button onClick={(e) => { e.stopPropagation(); setHistoryOpen(false); setFullScreen(true); }} className="p-1.5 text-zinc-400 hover:text-zinc-600 dark:hover:text-zinc-200 transition-colors" title="Open full screen">
                         <Maximize2 className="w-[15px] h-[15px]" />
                       </button>
                     </div>
@@ -343,32 +431,7 @@ export default function ProcessPage({
 
                   {/* Chat area — the live all-meetings conversation, inline. */}
                   <div className="flex-1 overflow-y-auto px-4 pt-1 pb-2 min-h-0 flex flex-col gap-3">
-                    {messages.length === 0 && !isChatting && (
-                      <div className="flex-1 flex items-center justify-center text-[13px] text-zinc-400 dark:text-zinc-500">
-                        Ask anything about your meeting notes.
-                      </div>
-                    )}
-                    {messages.map((m, i) => (
-                      m.role === 'user' ? (
-                        <div key={i} className="flex justify-end">
-                          <div className="px-3.5 py-2 bg-zinc-100 dark:bg-app-chip rounded-2xl text-[13px] text-zinc-800 dark:text-zinc-100 max-w-[85%] whitespace-pre-wrap leading-relaxed">
-                            {m.text}
-                          </div>
-                        </div>
-                      ) : (
-                        <div key={i} className="text-[13.5px] text-zinc-800 dark:text-app-fg leading-relaxed [&_h1]:text-[15px] [&_h1]:font-semibold [&_h2]:text-[14px] [&_h2]:font-semibold [&_h3]:text-[13.5px] [&_h3]:font-semibold [&_h1]:mt-3 [&_h2]:mt-3 [&_h3]:mt-2 [&_ul]:list-disc [&_ul]:pl-5 [&_ul]:my-1 [&_ol]:list-decimal [&_ol]:pl-5 [&_ol]:my-1 [&_p]:my-1.5 [&_a]:text-[#6f871a] [&_a]:underline [&_code]:text-[12px] [&_code]:bg-zinc-100 [&_code]:dark:bg-app-chip [&_code]:px-1 [&_code]:rounded">
-                          {m.text
-                            ? <Markdown remarkPlugins={[remarkGfm]}>{m.text}</Markdown>
-                            : <span className="text-zinc-400">…</span>}
-                        </div>
-                      )
-                    ))}
-                    {isChatting && (
-                      <div className="flex items-center gap-1.5 text-[12.5px] text-zinc-400 dark:text-zinc-500">
-                        <Loader2 className="w-3 h-3 animate-spin" /> Thinking…
-                      </div>
-                    )}
-                    <div ref={chatEndRef} />
+                    {renderConversation(chatEndRef)}
                   </div>
 
                   {/* Bottom: chip row + input — same as command bar */}
@@ -395,8 +458,8 @@ export default function ProcessPage({
                         </button>
                       ))}
                       <button
-                        onClick={(e) => { e.stopPropagation(); setIsChatOpen(false); setIsHistoryOpen(prev => !prev); }}
-                        className={`ml-auto self-end flex-shrink-0 p-[7px] transition-colors text-zinc-400 hover:text-zinc-600 dark:hover:text-zinc-200`}
+                        onClick={(e) => { e.stopPropagation(); setHistoryOpen(prev => !prev); }}
+                        className={`ml-auto self-end flex-shrink-0 p-[7px] transition-colors ${historyOpen ? 'text-zinc-900 dark:text-app-fg' : 'text-zinc-400 hover:text-zinc-600 dark:hover:text-zinc-200'}`}
                         title="History"
                       >
                         <History className="w-[19px] h-[19px]" />
@@ -520,9 +583,9 @@ export default function ProcessPage({
                     ))}
 
                     <button
-                      onClick={(e) => { e.stopPropagation(); onOpenChatHistory ? onOpenChatHistory() : setIsHistoryOpen(prev => !prev); }}
-                      className={`ml-auto self-end flex-shrink-0 p-[7px] transition-colors ${isHistoryOpen ? 'text-zinc-900 dark:text-app-fg' : 'text-zinc-400 hover:text-zinc-600 dark:hover:text-zinc-200'}`}
-                      title="Meeting & chat history"
+                      onClick={(e) => { e.stopPropagation(); setIsHistoryOpen(false); setIsChatOpen(true); setIsCommandBarOpen(true); setHistoryOpen(true); }}
+                      className={`ml-auto self-end flex-shrink-0 p-[7px] transition-colors ${historyOpen ? 'text-zinc-900 dark:text-app-fg' : 'text-zinc-400 hover:text-zinc-600 dark:hover:text-zinc-200'}`}
+                      title="Chat history"
                     >
                       <History className="w-[19px] h-[19px]" />
                     </button>
@@ -1103,6 +1166,51 @@ export default function ProcessPage({
       </main>
 
       {gemsOpen && <GemsModal onClose={() => setGemsOpen(false)} onRun={runGem} />}
+
+      {/* Full-screen chat — the SAME inline conversation, expanded to fill the
+          window (not the old chat route). History + New chat work here too. */}
+      {fullScreen && (
+        <div className="fixed inset-0 z-[100] bg-app-panel flex flex-col font-[system-ui]">
+          <div data-tauri-drag-region className="relative flex items-center px-4 h-[52px] flex-shrink-0">
+            <button onClick={() => { setFullScreen(false); setHistoryOpen(false); }} className="flex items-center gap-1 px-2 py-1.5 rounded-lg text-app-fg-subtle hover:bg-app-nav-hover-bg hover:text-app-fg transition-colors" title="Collapse">
+              <ChevronLeft className="w-4 h-4" /><MessageSquare className="w-4 h-4" />
+            </button>
+            <button onClick={() => setHistoryOpen((o) => !o)} className="ml-1 flex items-center gap-1.5 px-2 py-1.5 rounded-lg text-app-fg hover:bg-app-nav-hover-bg transition-colors">
+              <History className="w-4 h-4" /><span className="text-[13px] font-medium">History</span><ChevronDown className={`w-3.5 h-3.5 transition-transform ${historyOpen ? 'rotate-180' : ''}`} />
+            </button>
+            {historyOpen && (
+              <div className="absolute left-12 top-full mt-1.5 z-20 w-[340px] max-h-[60vh] overflow-y-auto bg-white dark:bg-app-raised rounded-2xl border border-zinc-200 dark:border-app-border shadow-[0_16px_44px_-12px_rgba(0,0,0,0.28)] p-1.5">
+                {renderThreadGroups()}
+              </div>
+            )}
+            <button onClick={() => { setHistoryOpen(false); onNewChat?.(); }} className="ml-auto flex items-center gap-1.5 px-3 py-1.5 rounded-full border border-app-divider text-[13px] font-medium text-app-fg hover:bg-app-nav-hover-bg transition-colors">
+              <SquarePen className="w-3.5 h-3.5" /> New chat
+            </button>
+          </div>
+
+          <div className="flex-1 overflow-y-auto">
+            <div className="max-w-[760px] mx-auto px-6 py-6 flex flex-col gap-3 min-h-full">
+              {renderConversation(fsEndRef)}
+            </div>
+          </div>
+
+          <div className="flex-shrink-0 px-6 pb-6">
+            <div className="max-w-[760px] mx-auto flex items-center gap-2 px-4 py-3 rounded-full bg-white dark:bg-app-raised border border-zinc-200 dark:border-app-border shadow-sm">
+              <input
+                value={chatInput}
+                onChange={(e) => setChatInput?.(e.target.value)}
+                onKeyDown={(e) => { if (e.key === 'Enter' && chatInput.trim()) { e.preventDefault(); submitChat(); } }}
+                placeholder="Ask anything"
+                autoFocus
+                className="flex-1 bg-transparent outline-none text-[14px] text-app-fg placeholder:text-app-fg-subtle"
+              />
+              <button className="flex items-center gap-0.5 text-[13px] text-app-fg-subtle hover:text-app-fg transition-colors">Auto<ChevronDown className="w-3.5 h-3.5" /></button>
+              <button onClick={() => fileInputRef.current?.click()} className="p-1.5 text-app-fg-subtle hover:text-app-fg transition-colors" title="Attach"><Paperclip className="w-[15px] h-[15px] -rotate-45" /></button>
+              <button onClick={submitChat} disabled={!chatInput.trim()} className="p-2 rounded-full bg-[#6f871a] text-white hover:opacity-90 disabled:opacity-40 transition-opacity" title="Send"><ArrowUp className="w-[15px] h-[15px]" /></button>
+            </div>
+          </div>
+        </div>
+      )}
     </div>
   );
 }

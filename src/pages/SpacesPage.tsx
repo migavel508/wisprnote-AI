@@ -1,30 +1,27 @@
 import { useEffect, useState } from 'react';
 import { ChevronLeft, House, Lock } from 'lucide-react';
-import type { Workspace } from '../services/workspaceService';
-import {
-  ensureDefaultWorkspace, getFolders, getWorkspaceMembers,
-  isDefaultWorkspace, getWorkspaceImage, getAvatarGradient,
-} from '../services/workspaceService';
+import type { Space } from '../services/workspaceService';
+import { getSpaces, getAvatarGradient } from '../services/workspaceService';
 import CreateSpaceModal from '../components/CreateSpaceModal';
+import { onVaultEvent } from '../lib/vaultEvents';
 
-function SpaceGlyph({ ws, size = 30 }: { ws: Workspace; size?: number }) {
-  if (isDefaultWorkspace(ws)) {
+function SpaceGlyph({ space, size = 30 }: { space: Space; size?: number }) {
+  if (space.is_default) {
     return (
       <div className="rounded-lg bg-app-nav-hover-bg flex items-center justify-center flex-shrink-0" style={{ width: size, height: size }}>
         <Lock size={size * 0.42} strokeWidth={1.8} className="text-app-fg-muted" />
       </div>
     );
   }
-  const image = getWorkspaceImage(ws.id);
-  if (image) {
+  if (space.emoji) {
     return (
-      <div className="rounded-lg overflow-hidden flex-shrink-0" style={{ width: size, height: size }}>
-        <img src={image} alt={ws.name} className="w-full h-full object-cover" />
+      <div className="rounded-lg bg-app-nav-hover-bg flex items-center justify-center flex-shrink-0" style={{ width: size, height: size, fontSize: size * 0.5 }}>
+        <span>{space.emoji}</span>
       </div>
     );
   }
-  const initial = (ws.name.charAt(0) || '?').toUpperCase();
-  const [c1, c2, c3] = getAvatarGradient(ws.name || 'workspace');
+  const initial = (space.name.charAt(0) || '?').toUpperCase();
+  const [c1, c2, c3] = getAvatarGradient(space.name || 'space');
   return (
     <div
       className="rounded-lg flex items-center justify-center text-white font-semibold flex-shrink-0 overflow-hidden"
@@ -37,34 +34,23 @@ function SpaceGlyph({ ws, size = 30 }: { ws: Workspace; size?: number }) {
 
 interface Props {
   onClose: () => void;
-  onOpenSpace: (ws: Workspace) => void;
+  onOpenSpace: (space: Space) => void;
 }
 
 const COLS = 'grid grid-cols-[minmax(0,1.8fr)_150px_minmax(0,1fr)_130px] items-center gap-4';
 
 export default function SpacesPage({ onClose, onOpenSpace }: Props) {
-  const [workspaces, setWorkspaces] = useState<Workspace[]>([]);
-  const [folderCounts, setFolderCounts] = useState<Record<string, number>>({});
-  const [memberCounts, setMemberCounts] = useState<Record<string, number>>({});
+  const [spaces, setSpaces] = useState<Space[]>([]);
   const [showCreate, setShowCreate] = useState(false);
 
-  const load = () => {
-    ensureDefaultWorkspace().then(ws => {
-      setWorkspaces(ws);
-      ws.forEach(w => {
-        getFolders(w.id).then(f => setFolderCounts(p => ({ ...p, [w.id]: f.length }))).catch(() => {});
-        if (!isDefaultWorkspace(w)) {
-          getWorkspaceMembers(w.id).then(m => setMemberCounts(p => ({ ...p, [w.id]: m.length }))).catch(() => {});
-        }
-      });
-    }).catch(() => {});
-  };
+  const load = () => { getSpaces().then(setSpaces).catch(() => {}); };
   useEffect(load, []);
+  // Reflect space create/rename/delete + folder changes from anywhere.
+  useEffect(() => onVaultEvent('spaces:changed', load), []);
 
-  const memberLabel = (ws: Workspace) => {
-    if (isDefaultWorkspace(ws)) return 'Just you';
-    const c = memberCounts[ws.id];
-    if (c === undefined) return '—';
+  const memberLabel = (space: Space) => {
+    if (space.shared_all) return 'Everyone in workspace';
+    const c = space.member_count ?? 0;
     return c <= 0 ? 'Just you' : `${c + 1} members`;
   };
 
@@ -111,20 +97,20 @@ export default function SpacesPage({ onClose, onOpenSpace }: Props) {
 
             <div className="px-3 py-2 bg-app-nav-hover-bg/60 text-[14px] text-app-fg-subtle">Default</div>
 
-            {workspaces.map(ws => (
+            {spaces.map(space => (
               <div
-                key={ws.id}
-                onClick={() => onOpenSpace(ws)}
+                key={space.id}
+                onClick={() => onOpenSpace(space)}
                 className={`${COLS} px-3 py-3 border-b border-app-divider/60 cursor-pointer hover:bg-app-nav-hover-bg/40 transition-colors`}
               >
                 <div className="flex items-center gap-3 min-w-0">
-                  <SpaceGlyph ws={ws} size={30} />
-                  <span className="text-[16px] text-app-fg truncate">{ws.name}</span>
+                  <SpaceGlyph space={space} size={30} />
+                  <span className="text-[16px] text-app-fg truncate">{space.name}</span>
                 </div>
                 <div className="text-[15px]">
-                  {folderCounts[ws.id] ? folderCounts[ws.id] : <span className="text-app-fg-subtle">None</span>}
+                  {space.folder_count ? space.folder_count : <span className="text-app-fg-subtle">None</span>}
                 </div>
-                <div className="text-[15px] text-app-fg truncate">{memberLabel(ws)}</div>
+                <div className="text-[15px] text-app-fg truncate">{memberLabel(space)}</div>
                 <div className="text-right text-app-fg-subtle text-[15px]">—</div>
               </div>
             ))}

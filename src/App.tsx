@@ -50,6 +50,7 @@ import {
   generateNotes,
   chatWithNotes,
   agentChatAllMeetings,
+  extractAcrossMeetings,
   generateConceptImage,
   generateEmailContent,
   generateWikiContent,
@@ -62,6 +63,7 @@ import {
   isFileApiDisabledByFailures,
   resolveSpeakerNames,
 } from './services/geminiService';
+import { EXTRACT_DIRECTIVE } from './services/gemsService';
 import { reconcileLeadingSpeaker, type AudioSourceKind } from './services/speakerLabeling';
 import {
   retrieveForSingleMeeting,
@@ -165,7 +167,7 @@ import type { Entitlements } from './services/awsService';
 import ChatPage from './pages/ChatPage';
 import NotesPage from './pages/NotesPage';
 import HistoryPage from './pages/HistoryPage';
-import { setWorkspaceSelection } from './services/workspaceSelection';
+import { setWorkspaceSelection, getSelection as getWorkspaceSelection, useWorkspaceSelection } from './services/workspaceSelection';
 import SharedMeetingPage from './pages/SharedMeetingPage';
 import KnowledgePage from './pages/KnowledgePage';
 import ProcessPage from './pages/ProcessPage';
@@ -177,6 +179,7 @@ import MainSidebar from './components/MainSidebar';
 import { ManualNotesList } from './components/ManualNotes/ManualNotesList';
 import { ManualNoteEditor } from './components/ManualNotes/ManualNoteEditor';
 import { logger } from './lib/logger';
+import { onVaultEvent } from './lib/vaultEvents';
 import { readKGLedger, markKGExtracted, markKGExtractedBatch, clearKGLedger, reconcileKGLedger } from './lib/kgLedger';
 import { clearArtifactCache } from './lib/kgArtifactCache';
 import { mergePeopleWithAttendees } from './lib/peopleResolve';
@@ -205,10 +208,64 @@ interface AgentStep {
   status: 'pending' | 'running' | 'done' | 'error';
   detail?: string;
   type?: 'search-tool' | 'plan';
-  searchKind?: 'notes' | 'people';
+  searchKind?: 'notes' | 'people' | 'analyze' | 'read';
   searchQuery?: string;
   searchResults?: Array<{ meetingId: string; meetingTitle: string; score: number }>;
   planSteps?: string[];
+  /** Live nested steps for a sub-agent spawn (analyze_meetings): each meeting read
+   *  + the synthesis, streamed the way a Task streams its child tool calls.
+   *  Non-recursive (own shape, not AgentStep) so Message stays structurally simple. */
+  subSteps?: Array<{ id: string; label: string; status: 'pending' | 'running' | 'done' | 'error'; detail?: string }>;
+}
+
+/**
+ * Deterministically recognize a BROAD per-meeting extraction request (list action
+ * items / to-dos / commitments / a recap ACROSS meetings). These must read every
+ * meeting in full, not synthesize from a partial listing — so we route them through
+ * the deterministic map-reduce (visible read steps + full coverage) instead of
+ * relying on the model to choose the deep path. Conservative: requires BOTH an
+ * extraction-list intent AND a cross-meeting breadth signal, so single-meeting Q&A
+ * ("what did we decide in my last meeting") is never mis-routed.
+ */
+function looksLikeBroadExtraction(text: string): boolean {
+  const t = text.toLowerCase();
+  const extraction =
+    /\b(action items?|to-?dos?|commit(?:ment|ments|ted)?|follow[- ]?ups?|outstanding|deliverables?|recap)\b/.test(t) ||
+    /\b(everything|what (?:have|did) i (?:commit|promis|agree|sign up))/.test(t);
+  const breadth =
+    /\b(all|every|each|across|entire|whole)\b/.test(t) ||
+    /\b(my|the) meetings\b/.test(t) ||
+    /\bevery meeting\b/.test(t);
+  return extraction && breadth;
+}
+
+/**
+ * Of the broad-extraction requests, which can be answered DIRECTLY from the
+ * pre-built KG index (action_items / decisions already extracted by kgSweep) —
+ * instantly, over ALL meetings, no live reading. This is the action-item /
+ * commitment / to-do / decision facet the KG holds. Nuanced asks (recap, themes,
+ * coaching, blind-spots) are intentionally excluded — those need the full notes,
+ * so they stay on the live read-each-meeting path.
+ */
+function kgExtractableFacet(text: string): 'action_items' | 'decisions' | null {
+  const t = text.toLowerCase();
+  if (/\bdecisions?\b/.test(t) && !/\b(action items?|to-?dos?|tasks?|commit)/.test(t)) return 'decisions';
+  if (/\b(action items?|to-?dos?|tasks?|commit(?:ment|ments|ted)?|follow[- ]?ups?|outstanding|deliverables?)\b/.test(t)
+      || /\bwhat (?:have|did) i (?:commit|promis|agree|sign up)\b/.test(t)) return 'action_items';
+  return null;
+}
+
+/**
+ * Does a broad-extraction request also name an explicit TOPIC (e.g. "…about the
+ * Helix project", "…regarding the website")? Conservative on purpose — only an
+ * explicit topic marker counts — so a pure global request ("everything I committed
+ * to across all meetings") is NOT mistaken for a topical one and keeps reading by
+ * KG-priority + recency. When a topic IS named, the extract route retrieves the
+ * semantically-relevant meetings (turbopuffer) and deep-reads THOSE real notes.
+ */
+function queryMentionsTopic(text: string): boolean {
+  return /\b(about|regarding|concerning|related to|involving|around the|on the topic of|to do with)\b/i.test(text)
+    || /\b(?:the\s+)?[a-z0-9][\w-]+\s+project\b/i.test(text);
 }
 
 interface Message {
@@ -463,6 +520,15 @@ export default function App() {
   // (React setState updaters run async, so reading it back inline was racy and
   // dropped agent_plan from the saved message — making the steps vanish on reload).
   const liveAgentPlanRef = useRef<AgentStep[] | undefined>(undefined);
+  // Session cache for the full meeting index (getAllTaskIds). Avoids re-fetching the
+  // whole catalogue on every all-meetings turn; short TTL keeps it reasonably fresh.
+  const allMetaCacheRef = useRef<{ data: import('./services/awsService').TaskMetadata[]; ts: number; workspaceId: string | null } | null>(null);
+  // P5: resumable cursor for capped deep-extractions — lets "keep going" read the NEXT
+  // batch of the ordered candidate set instead of restarting (the reference's resume).
+  const extractCursorRef = useRef<{ threadId: string; instructions: string; orderedIds: string[]; covered: number } | null>(null);
+  // W3: detect workspace (vault) switches to fully reload the app for the new vault.
+  const activeWorkspaceSelection = useWorkspaceSelection();
+  const prevWorkspaceIdRef = useRef<string | null>(null);
   const realtimeTranscriptRef = useRef<string[]>([]);
   // Mirror of the faded (not-yet-final) interim text, so stop/pause can COMMIT it instead of
   // dropping it if the user stops before Deepgram promotes it to a final.
@@ -2221,12 +2287,13 @@ export default function App() {
           .catch(err => log.error('kg_background_extraction_failed', { error: err instanceof Error ? err : undefined }))
           .finally(() => setIsExtractingNewKG(false));
 
-        indexMeetingTranscription(savedTask.id, savedTask.filename, savedTask.transcription!, { createdAt: savedTask.created_at, attendees: savedTask.attendees })
+        indexMeetingTranscription(savedTask.id, savedTask.filename, savedTask.transcription!, { createdAt: savedTask.created_at, attendees: savedTask.attendees, workspaceId: getWorkspaceSelection().workspaceId ?? undefined })
           .then(() => log.info('turbopuffer_indexing_complete_realtime'))
           .catch(err => log.warn('turbopuffer_indexing_failed', { error: err instanceof Error ? err : undefined }));
       }
 
       setHistory(prev => [savedTask, ...prev.filter(t => t.id !== savedTask.id)]);
+      allMetaCacheRef.current = null; // freshness: a newly saved meeting must appear in the all-meetings index next turn
       setSelectedTask(savedTask);
       setProcessingHeadline('Your notes are ready 🎉');
       setProcessingSubtext(savedTask.id?.startsWith('pending_') ? 'Saved locally. Will sync when internet is back.' : 'Opening the magic now 🚀');
@@ -3081,7 +3148,7 @@ export default function App() {
     }
   };
 
-  const handleSendMessage = async (overrideText?: string) => {
+  const handleSendMessage = async (overrideText?: string, displayText?: string) => {
     const inputText = overrideText ?? chatInput;
     if (!inputText.trim() || isChatting) return;
 
@@ -3090,7 +3157,11 @@ export default function App() {
       return;
     }
 
-    const userMessage: Message = { role: 'user', text: inputText };
+    // The engine reads `userInput` (may carry a routing directive + full Gem prompt);
+    // the chat bubble + persisted history show `displayInput` (clean label, e.g. the
+    // Gem name) so routing noise never appears in the conversation.
+    const displayInput = (displayText ?? inputText).trim();
+    const userMessage: Message = { role: 'user', text: displayInput };
     const userInput = inputText;
     setChatMessages(prev => [...prev, userMessage]);
     setChatInput('');
@@ -3118,6 +3189,16 @@ export default function App() {
       }));
     };
 
+    // Attach live nested sub-steps to the in-flight analyze_meetings spawn step, so
+    // the UI streams each meeting the sub-agent reads (like a Task's child tool calls).
+    const updateAnalyzeProgress = (subSteps: AgentStep[]) => {
+      updateAgentMessage(prev => ({
+        agentPlan: prev.agentPlan?.map(s =>
+          s.searchKind === 'analyze' && s.status === 'running' ? { ...s, subSteps } : s
+        ),
+      }));
+    };
+
     // Read the ACTIVE thread from the ref (synchronous) — not the async state —
     // so every message in a conversation appends to the SAME thread. A new thread
     // is created only when there's no active one (home page / after "New chat").
@@ -3135,18 +3216,18 @@ export default function App() {
       if (isNewConversation || !chatThreads.find(t => t.id === currentThreadId)) {
         upsertChatThread({
           id: currentThreadId,
-          title: userInput.slice(0, 60),
+          title: displayInput.slice(0, 60),
           taskId: selectedTask?.id ?? null,
           taskTitle: selectedTask?.filename,
           createdAt: new Date().toISOString(),
           updatedAt: new Date().toISOString(),
-          preview: userInput.slice(0, 120),
+          preview: displayInput.slice(0, 120),
         });
       } else {
         upsertChatThread({
           ...chatThreads.find(t => t.id === currentThreadId)!,
           updatedAt: new Date().toISOString(),
-          preview: userInput.slice(0, 120),
+          preview: displayInput.slice(0, 120),
         });
       }
 
@@ -3154,14 +3235,14 @@ export default function App() {
         await saveChatMessage({
           task_id: selectedTask.id,
           role: 'user',
-          text: userInput,
+          text: displayInput,
           thread_id: currentThreadId,
         });
       } else {
         setAllMeetingsChatMessages(prev => [...prev, userMessage]);
         saveChatMessage({
           role: 'user',
-          text: userInput,
+          text: displayInput,
           thread_id: currentThreadId,
         }).catch(err => log.warn('persist_all_meetings_user_msg_failed', { error: err instanceof Error ? err : undefined }));
       }
@@ -3181,7 +3262,10 @@ export default function App() {
       setChatMessages(prev => [...prev, agentPlaceholder]);
 
       const isSingleMeeting = !!selectedTask;
-      const allMeetings: MeetingDocument[] = history
+      // Built from the paginated `history` (first page). For the ALL-MEETINGS chat we
+      // replace this below with the COMPLETE meeting set (getAllTaskIds), so the agent
+      // never thinks the user only has the 24 most-recent meetings.
+      let allMeetings: MeetingDocument[] = history
         .filter((task) => !!task.id)
         .map((task) => ({
           meetingId: task.id!,
@@ -3190,6 +3274,46 @@ export default function App() {
           summary: task.summary || '',
           notes: task.notes || '',
         }));
+
+      // ALL-MEETINGS chat: load the FULL meeting index (lightweight metadata for every
+      // meeting, not just the loaded page). Content is hydrated on demand by the
+      // read/analyze/listing paths via getTaskById — so coverage is complete without
+      // pulling every transcript up front.
+      let fullMeta: import('./services/awsService').TaskMetadata[] = [];
+      if (!isSingleMeeting) {
+        const ALL_META_TTL_MS = 60_000;
+        // W1: the full index is per-workspace — invalidate the cache when the active
+        // workspace differs so a vault switch never shows the previous vault's meetings.
+        const activeWs = getWorkspaceSelection().workspaceId;
+        const cached = allMetaCacheRef.current;
+        if (cached && cached.workspaceId === activeWs && Date.now() - cached.ts < ALL_META_TTL_MS) {
+          fullMeta = cached.data;
+        } else {
+          try {
+            fullMeta = await getAllTaskIds();
+            allMetaCacheRef.current = { data: fullMeta, ts: Date.now(), workspaceId: activeWs };
+          } catch (err) {
+            log.warn('all_meetings_full_index_failed', { error: err instanceof Error ? err : undefined });
+            if (cached && cached.workspaceId === activeWs) fullMeta = cached.data; // stale-but-usable beats empty
+          }
+        }
+        if (fullMeta.length) {
+          const loaded = new Map(history.filter(t => t.id).map(t => [t.id!, t]));
+          allMeetings = fullMeta
+            .filter(m => !!m.id && m.status !== 'error')
+            .map(m => {
+              const h = loaded.get(m.id);
+              return {
+                meetingId: m.id,
+                title: m.filename || h?.filename || 'Untitled Meeting',
+                transcription: h?.transcription || '',   // hydrated on demand
+                summary: m.summary || h?.summary || '',
+                notes: h?.notes || '',                     // hydrated on demand
+              };
+            });
+          log.debug('all_meetings_full_index', { total: allMeetings.length, loaded: loaded.size });
+        }
+      }
       // ═══════════ PHASE 2: PLANNING + EXECUTING ═══════════
       let response: string;
       let responseCitations: Message['citations'] = undefined;
@@ -3278,7 +3402,245 @@ export default function App() {
         log.debug('agent_multi_meeting_agentic', { meetingCount: allMeetings.length });
         updateAgentMessage(() => ({ agentStatus: 'executing', agentPlan: [] }));
 
-        const dateMap = new Map(history.map(h => [h.id ?? '', h.created_at ?? '']));
+        // Dates for EVERY meeting (full index when available), not just the loaded page —
+        // so date scoping and labels work across all meetings, not the first 24.
+        const dateMap = new Map<string, string>(
+          (fullMeta.length ? fullMeta.map(m => [m.id, m.created_at] as [string, string]) : [])
+            .concat(history.map(h => [h.id ?? '', h.created_at ?? ''] as [string, string])),
+        );
+
+        const dateLabelFor = (meetingId: string): string | undefined => {
+          const dateStr = dateMap.get(meetingId);
+          return dateStr
+            ? new Date(dateStr).toLocaleDateString('en-US', { weekday: 'short', month: 'short', day: 'numeric', year: 'numeric' })
+            : undefined;
+        };
+
+        // Hydrate ONE meeting's full content on demand (server fetch when the
+        // paginated history omitted notes/transcript). Shared by the extract route
+        // and the analyze_meetings sub-agent. Mirrors readNotesFn.
+        const loadMeetingFullContent = async (meetingId: string) => {
+          const doc = allMeetings.find(m => m.meetingId === meetingId);
+          let notes = (doc?.notes ?? '').trim();
+          let summary = (doc?.summary ?? '').trim();
+          let transcript = (doc?.transcription ?? '').trim();
+          if (!notes && !summary && !transcript) {
+            try {
+              const full = await getTaskById(meetingId);
+              if (full) { notes = (full.notes ?? '').trim(); summary = (full.summary ?? '').trim(); transcript = (full.transcription ?? '').trim(); }
+            } catch { /* offline / not found */ }
+          }
+          return { notes, summary, transcript };
+        };
+
+        // Deep per-meeting analysis reads each meeting in FULL (one model call each),
+        // so it must be bounded — but the bound is DISCLOSED, never silent (CLAUDE.md
+        // §10). Up to this many most-recent meetings are read per request; anything
+        // beyond is reported back with an offer to continue. (At true 10k-scale the
+        // right tool is the background KG/turbopuffer index, not reading all live.)
+        const DEEP_ANALYSIS_CEILING = 150;
+
+        // Shared deep-read+synthesize step, used by the extract route AND "keep going"
+        // continuation. Shows plan → live per-meeting reads → synth, reads the REAL
+        // notes (transcript+summary+notes), returns the synthesized answer. The caller
+        // owns candidate selection + the resumable cursor.
+        const deepReadExtract = async (
+          refs: { meetingId: string; title: string; dateLabel?: string }[],
+          instr: string,
+          planLabel: string,
+        ): Promise<string> => {
+          const n = refs.length;
+          updateAgentMessage(() => ({
+            agentStatus: 'planning',
+            agentPlan: [{
+              id: 'plan', type: 'plan' as const, status: 'done' as const, label: planLabel,
+              planSteps: [
+                `Load every meeting in scope (${n})`,
+                'Read each meeting in full — one focused pass per meeting',
+                'Extract the requested items from each',
+                'Synthesize one grouped, deduplicated answer',
+              ],
+            }],
+          }));
+          await new Promise(r => setTimeout(r, 150));
+          updateAgentMessage(prev => ({
+            agentStatus: 'executing',
+            agentPlan: [...(prev.agentPlan ?? []), { id: 'read-all', label: `Reading ${n} meeting${n !== 1 ? 's' : ''} in full`, status: 'running' as const, detail: `0 / ${n}` }],
+          }));
+          const setReadAllSub = (subSteps: AgentStep['subSteps'], detail: string, status: AgentStep['status']) => {
+            updateAgentMessage(prev => ({ agentPlan: prev.agentPlan?.map(s => s.id === 'read-all' ? { ...s, status, detail, subSteps } : s) }));
+          };
+          const readDone: NonNullable<AgentStep['subSteps']> = [];
+          const out = await extractAcrossMeetings({
+            instructions: instr,
+            meetings: refs,
+            loadContent: loadMeetingFullContent,
+            concurrency: 4,
+            onProgress: (ev) => {
+              if (ev.phase === 'map') {
+                readDone.push({ id: `read-${readDone.length}`, label: ev.title, status: 'done', detail: ev.hadItems ? undefined : 'nothing relevant' });
+                setReadAllSub(
+                  ev.completed < ev.total
+                    ? [...readDone, { id: 'reading', label: `Reading meetings in full… (${ev.completed}/${ev.total})`, status: 'running' }]
+                    : [...readDone],
+                  `${ev.completed} / ${ev.total}`,
+                  'running',
+                );
+              } else if (ev.phase === 'reduce') {
+                setReadAllSub([...readDone], `${n} / ${n}`, 'done');
+                updateAgentMessage(prev => ({ agentPlan: [...(prev.agentPlan ?? []), { id: 'synth', label: 'Synthesizing answer', status: 'running' as const }] }));
+              }
+            },
+          });
+          setReadAllSub([...readDone], `${n} / ${n}`, 'done');
+          updateStep('synth', 'done');
+          return out;
+        };
+
+        // P5: "keep going" continuation. If the user affirms continuation and a capped
+        // extract cursor is pending for THIS thread, read the NEXT batch of the ordered
+        // candidate set (real notes) and advance the cursor — never restart.
+        const continueCursor = extractCursorRef.current;
+        const isContinue = !!continueCursor
+          && continueCursor.threadId === (currentThreadId || '')
+          && continueCursor.covered < continueCursor.orderedIds.length
+          && /^\s*(yes|yep|yeah|sure|ok(ay)?|please( do)?|continue|keep going|go on|carry on|do the rest|the rest|more|next)\b/i.test(userInput.trim());
+
+        // ── Route: per-meeting extraction (Gems with intent:'extract', OR a free-form
+        //    "list X across all my meetings" request detected by looksLikeBroadExtraction)
+        //    use a programmatic MAP-REDUCE instead of the agentic loop. Each meeting is
+        //    read in FULL by its own focused call, so the parent context only ever holds
+        //    COMPACT per-meeting findings — never raw transcripts. This makes the deep,
+        //    visible read-every-meeting path DETERMINISTIC for these tasks (no reliance
+        //    on the model choosing to spawn) and keeps huge histories bounded. ──
+        const isExtractTask = userInput.includes(EXTRACT_DIRECTIVE) || looksLikeBroadExtraction(userInput);
+        if (isContinue && continueCursor) {
+          const slice = continueCursor.orderedIds.slice(continueCursor.covered, continueCursor.covered + DEEP_ANALYSIS_CEILING);
+          const refs = slice
+            .map(id => allMeetings.find(m => m.meetingId === id))
+            .filter((m): m is MeetingDocument => !!m)
+            .map(m => ({ meetingId: m.meetingId, title: m.title, dateLabel: dateLabelFor(m.meetingId) }));
+          if (refs.length) {
+            response = await deepReadExtract(refs, continueCursor.instructions, `Continue — read the next ${refs.length} meeting${refs.length !== 1 ? 's' : ''} in full`);
+            const newCovered = continueCursor.covered + refs.length;
+            const remaining = continueCursor.orderedIds.length - newCovered;
+            if (remaining > 0) {
+              extractCursorRef.current = { ...continueCursor, covered: newCovered };
+              response += `\n\n---\n*Read ${refs.length} more (${newCovered} of ${continueCursor.orderedIds.length} total). ${remaining} still remaining — say "keep going" to continue.*`;
+            } else {
+              extractCursorRef.current = null;
+              response += `\n\n---\n*That now covers all ${continueCursor.orderedIds.length} meetings.*`;
+            }
+            responseRetrievalMeta = {
+              scope: 'many', confidence: 0.85,
+              selectedMeetingIds: slice,
+              coveredMeetingsCount: refs.length,
+              totalMeetingsCount: allMeetings.length,
+            };
+          } else {
+            extractCursorRef.current = null;
+            response = "Those remaining meetings are no longer available — try your request again.";
+          }
+        } else if (isExtractTask) {
+          const instructions = userInput.replace(EXTRACT_DIRECTIVE, '').trim();
+
+          // ── P1 (HYBRID): the KG index decides WHICH meetings to deep-read; the
+          //    ANSWER always comes from the real NOTES (full fidelity), never from the
+          //    lossy index. The KG is a router, not the source of truth: for
+          //    action-item / decision extraction we use it to PRIORITIZE meetings
+          //    likely to contain what's asked, so a bounded read budget at scale is
+          //    spent on the right meetings — but every item is extracted from the
+          //    actual notes page, catching informal commitments the index would miss. ──
+          const kgFacet = kgExtractableFacet(userInput);
+          const kgPriority = new Map<string, number>();
+          if (kgFacet) {
+            try {
+              const kg = await getKnowledgeGraph();
+              for (const e of kg) {
+                const n = kgFacet === 'decisions' ? (e.decisions?.length ?? 0) : (e.action_items?.length ?? 0);
+                if (n > 0) kgPriority.set(e.task_id, n);
+              }
+            } catch (err) {
+              log.warn('kg_priority_unavailable', { error: err instanceof Error ? err : undefined });
+            }
+          }
+
+          // ── P2: candidate selection. If the request names an explicit TOPIC, RETRIEVE
+          //    the semantically-relevant meetings (turbopuffer ANN+BM25, wide net) and
+          //    deep-read THOSE real notes — so a capped budget covers the meetings that
+          //    matter, not just the recent ones. A pure global request (no topic) orders
+          //    by KG-priority then recency. Either way the ANSWER is read from real notes. ──
+          let relevantRank: Map<string, number> | null = null;
+          if (queryMentionsTopic(instructions) && isTurbopufferConfigured()) {
+            try {
+              const qVec = await embedQuery(instructions);
+              const hits = await queryHybrid(qVec, instructions, 160); // wide net → many distinct meetings
+              const rank = new Map<string, number>();
+              let r = 0;
+              for (const h of hits) if (!rank.has(h.meetingId)) rank.set(h.meetingId, r++);
+              if (rank.size) relevantRank = rank;
+            } catch (err) {
+              log.warn('extract_topic_retrieval_failed', { error: err instanceof Error ? err : undefined });
+            }
+          }
+          const selectionMode: 'topic' | 'global' = relevantRank ? 'topic' : 'global';
+
+          const orderedCandidates = relevantRank
+            ? allMeetings
+                .filter(m => relevantRank!.has(m.meetingId))
+                .sort((a, b) => relevantRank!.get(a.meetingId)! - relevantRank!.get(b.meetingId)!)
+            : [...allMeetings].sort((a, b) => {
+                const pa = kgPriority.get(a.meetingId) ?? 0;
+                const pb = kgPriority.get(b.meetingId) ?? 0;
+                if (pa !== pb) return pb - pa;
+                const ta = new Date(dateMap.get(a.meetingId) || 0).getTime();
+                const tb = new Date(dateMap.get(b.meetingId) || 0).getTime();
+                return tb - ta;
+              });
+          const scopedMeetings = orderedCandidates.slice(0, DEEP_ANALYSIS_CEILING);
+          const notCoveredCount = Math.max(0, orderedCandidates.length - scopedMeetings.length);
+          if (notCoveredCount > 0) {
+            log.debug('extract_scope_capped', { capped: DEEP_ANALYSIS_CEILING, total: orderedCandidates.length, mode: selectionMode });
+          }
+
+          const scopedRefs = scopedMeetings.map(m => ({
+            meetingId: m.meetingId,
+            title: m.title,
+            dateLabel: dateLabelFor(m.meetingId),
+          }));
+
+          const total = scopedRefs.length;
+          response = await deepReadExtract(
+            scopedRefs,
+            instructions,
+            `Read all ${total} meeting${total !== 1 ? 's' : ''} in full and extract exactly what was asked`,
+          );
+
+          // P5: disclose the uncovered tail AND store a resumable cursor so "keep going"
+          // reads the NEXT batch of the SAME ordered candidate set — never restarts.
+          if (notCoveredCount > 0) {
+            extractCursorRef.current = {
+              threadId: currentThreadId || '',
+              instructions,
+              orderedIds: orderedCandidates.map(m => m.meetingId),
+              covered: scopedRefs.length,
+            };
+            const how = selectionMode === 'topic'
+              ? ' most relevant to your topic'
+              : kgPriority.size > 0 ? ' (prioritized by the index toward the meetings most likely to contain relevant items)' : '';
+            response += `\n\n---\n*Deep-read the actual notes of ${total} meetings${how}. ${notCoveredCount} other relevant meeting${notCoveredCount !== 1 ? 's were' : ' was'} not read this pass — say "keep going" and I'll read the next batch.*`;
+          } else {
+            extractCursorRef.current = null;
+          }
+
+          responseRetrievalMeta = {
+            scope: 'many',
+            confidence: 0.85,
+            selectedMeetingIds: scopedRefs.map(r => r.meetingId),
+            coveredMeetingsCount: total,
+            totalMeetingsCount: allMeetings.length,
+          };
+        } else {
 
         let sharedKgCache: KnowledgeGraphEntry[] | null = null;
         const loadKG = async (): Promise<KnowledgeGraphEntry[]> => {
@@ -3321,6 +3683,26 @@ export default function App() {
           filters?: { recent_days?: number; start_ms?: number; end_ms?: number; off_track?: boolean },
           limit?: number,
         ) => {
+          // Self-heal a common model mistake: passing a task_id (UUID) as the search
+          // QUERY. Keyword search can't match an id, so it would return "No results".
+          // If the query IS a known meeting id, resolve it to that meeting's full
+          // content (what the model actually wanted) instead of a dead search.
+          const qTrim = query.trim();
+          const idHit = qTrim ? allMeetings.find(m => m.meetingId === qTrim) : undefined;
+          if (idHit) {
+            const c = await loadMeetingFullContent(idHit.meetingId);
+            const dateLabel = dateLabelFor(idHit.meetingId) ?? 'unknown date';
+            const body = [
+              c.notes ? `NOTES:\n${c.notes}` : '',
+              c.summary ? `SUMMARY:\n${c.summary}` : '',
+              c.transcript ? `TRANSCRIPT:\n${c.transcript.length > 6000 ? `${c.transcript.slice(0, 6000)}… [truncated — NOTES above are authoritative]` : c.transcript}` : '',
+            ].filter(Boolean).join('\n\n');
+            return {
+              results: [{ meetingId: idHit.meetingId, meetingTitle: idHit.title, score: 1, date: dateMap.get(idHit.meetingId) }],
+              contextText: `=== ${idHit.title} (${dateLabel}) [task_id: ${idHit.meetingId}] ===\n${body || '(No notes generated for this meeting.)'}`,
+            };
+          }
+
           // Deterministic absolute window (from the parsed query) takes precedence
           // over the model's relative recent_days, so "this month / last 3 days /
           // a specific date" filter reliably.
@@ -3338,9 +3720,17 @@ export default function App() {
             const cutoff = Date.now() - filters.recent_days * 24 * 60 * 60 * 1000;
             docsToSearch = allMeetings.filter(m => {
               const date = dateMap.get(m.meetingId);
-              if (!date) return false;
+              if (!date) return true;   // unknown date → keep, never silently drop a meeting
               return new Date(date).getTime() >= cutoff;
             });
+          }
+          // Robustness: if a date filter excluded EVERYTHING (a too-narrow recent_days,
+          // or a clock/year mismatch between the device and the meeting timestamps),
+          // fall back to ALL meetings so the tool never returns "No results found"
+          // when meetings exist. The agent (which has the dated meeting index in its
+          // prompt) then reasons about which days are relevant.
+          if (docsToSearch.length === 0 && allMeetings.length > 0) {
+            docsToSearch = allMeetings;
           }
           // Off-track intent → restrict to meetings whose knowledge graph flags an
           // off-track/blocked topic.
@@ -3353,10 +3743,13 @@ export default function App() {
             if (offIds.size) docsToSearch = docsToSearch.filter(m => offIds.has(m.meetingId));
           }
 
-          // Floor at 8 so semantically-related meetings beyond the LLM's stated limit
-          // still get surfaced — the LLM tends to under-specify limit (e.g. 5) for
-          // queries that actually span many meetings.
-          const maxCandidates = Math.min(Math.max(limit ?? 5, 8), 10);
+          // Intent-driven breadth: honour the LLM's requested limit (it knows whether
+          // the ask is narrow or sweeping), floored at 8 so related meetings still
+          // surface, and ceilinged generously at 40 so broad asks ("todos across all
+          // my meetings", recaps) go WIDE instead of being truncated to 10. Total
+          // context stays bounded by the per-meeting evidence budget below, NOT by a
+          // small meeting cap — so huge histories are handled by relevance + budgeting.
+          const maxCandidates = Math.min(Math.max(limit ?? 8, 8), 40);
           const trimmedQuery = query.trim();
 
           // ── Date-range listing mode (empty query) ─────────────────────────────────
@@ -3378,8 +3771,34 @@ export default function App() {
                 return db.localeCompare(da);
               });
 
-            const perMeetingChars = sorted.length > 24 ? 500 : sorted.length > 12 ? 900 : 1800;
-            const sections = sorted.map((m, i) => {
+            // The paginated history list usually omits notes/transcription (they're
+            // loaded lazily per meeting). Without hydrating them, action-item / recap
+            // extraction sees empty content and wrongly reports "No notes generated".
+            // Pull the real notes from the server for any listed meeting missing
+            // content — bounded + parallel so it scales to large windows.
+            // SCALE: a listing tool result must stay bounded. A windowed listing
+            // ("this week/month") is naturally small, but a global empty-query
+            // listing over thousands of meetings would build thousands of sections
+            // and overflow. Cap the sections (most-recent-first) and DISCLOSE the
+            // remainder so the model steers the user to a window or analyze_meetings.
+            const LISTING_CAP = 60;
+            const listed = sorted.slice(0, LISTING_CAP);
+            const listingHidden = sorted.length - listed.length;
+
+            await Promise.all(listed.slice(0, 25).map(async (m) => {
+              if (m.summary?.trim() || m.notes?.trim() || m.transcription?.trim()) return;
+              try {
+                const full = await getTaskById(m.meetingId);
+                if (full) {
+                  m.summary = full.summary || m.summary;
+                  m.notes = full.notes || m.notes;
+                  m.transcription = full.transcription || m.transcription;
+                }
+              } catch { /* offline / not found — leave as-is */ }
+            }));
+
+            const perMeetingChars = listed.length > 24 ? 500 : listed.length > 12 ? 900 : 1800;
+            const sections = listed.map((m, i) => {
               const dateStr = dateMap.get(m.meetingId);
               const dateLabel = dateStr
                 ? new Date(dateStr).toLocaleDateString('en-US', { weekday: 'short', month: 'short', day: 'numeric', year: 'numeric' })
@@ -3390,12 +3809,15 @@ export default function App() {
               return `${i + 1}. ${m.title} (${dateLabel})\n${content || '(no content available)'}`;
             });
 
+            const coverageLine = listingHidden > 0
+              ? `=== COVERAGE ===\nShowing the ${listed.length} most recent meetings in this scope; ${listingHidden} older meeting${listingHidden !== 1 ? 's are' : ' is'} NOT shown here. For a complete extraction across all of them, narrow to a time window or use analyze_meetings — and tell the user this listing is partial.`
+              : `=== COVERAGE ===\nListed ALL ${listed.length} meetings in this date range (${allMeetings.length} total). This is the COMPLETE set — base your recap on every meeting below.`;
             const rangeContext = [
-              `=== COVERAGE ===\nListed ALL ${sorted.length} meetings in this date range (${allMeetings.length} total). This is the COMPLETE set — base your recap on every meeting below.`,
+              coverageLine,
               `=== MEETINGS ===\n${sections.join('\n\n---\n\n')}`,
             ].join('\n\n');
 
-            const rangeResults = sorted.map(m => ({
+            const rangeResults = listed.map(m => ({
               meetingId: m.meetingId,
               meetingTitle: m.title,
               score: 1,
@@ -3414,10 +3836,10 @@ export default function App() {
           if (isTurbopufferConfigured()) {
             try {
               const qVec = await embedQuery(query);
-              // Fetch a wide net of chunks (80) so meetings with mid-relevance hits
-              // still bubble up after the per-meeting dedup, instead of being cut off
-              // by one meeting dominating the top of the chunk list.
-              const globalHits = await queryHybrid(qVec, query, 80);
+              // Fetch a WIDE net of chunks (160) so many DISTINCT meetings surface
+              // after the per-meeting dedup — essential for broad asks over large
+              // histories, where the relevant meetings are spread across many chunks.
+              const globalHits = await queryHybrid(qVec, query, 160);
 
               // Date-filter hits to respect filters.recent_days
               const validHits = filters?.recent_days
@@ -3461,7 +3883,12 @@ export default function App() {
           // ── Strategy 3: per-meeting deep retrieval for each candidate ────────────
           // Turbopuffer with meetingIdFilter pulls the most relevant chunks from that
           // specific meeting. Falls back to local BM25 if chunks aren't indexed.
-          const perBudget = Math.floor(7000 / Math.max(1, candidateDocs.length));
+          // Scale the per-meeting evidence budget with the candidate count so the
+          // TOTAL context stays bounded (~14k chars) no matter how many meetings we
+          // cover, while never starving any single meeting below a useful floor.
+          // Turbopuffer/BM25 picks only the relevant chunks per meeting — so we go
+          // deep across many meetings without dragging in unwanted text.
+          const perBudget = Math.max(280, Math.floor(14000 / Math.max(1, candidateDocs.length)));
           const allEvidence: RetrievalEvidence[] = [];
           for (const m of candidateDocs) {
             const { evidence } = await retrieveMeetingEvidence(query, m, perBudget);
@@ -3469,10 +3896,11 @@ export default function App() {
           }
 
           // ── Strategy 4: lazy-load fallback (meetings not yet indexed in turbopuffer) ──
-          // Fetches the full transcription from the server for the top 2 candidates and
-          // runs local BM25 on it. Handles cold-start and unindexed meetings.
+          // Fetches the full transcription from the server for the top candidates and
+          // runs local BM25 on it. Handles cold-start and unindexed meetings. Covers
+          // more than a token 2 so broad cold-start asks aren't starved.
           if (allEvidence.length === 0 && candidateDocs.length > 0) {
-            for (const m of candidateDocs.slice(0, 2)) {
+            for (const m of candidateDocs.slice(0, 6)) {
               if (m.transcription?.trim()) continue;
               try {
                 const full = await getTaskById(m.meetingId);
@@ -3513,7 +3941,7 @@ export default function App() {
 
           const evidenceText = allEvidence
             .sort((a, b) => b.score - a.score)
-            .slice(0, 20)
+            .slice(0, 30)
             .map((e, i) => formatEvidence(0, i, e))
             .join('\n\n');
 
@@ -3781,6 +4209,94 @@ export default function App() {
           return { contacts, meetings: surfacedMeetings, contextText };
         };
 
+        // SUB-AGENT (P4): the parent agent delegates broad per-meeting work here.
+        // We scope the meetings (explicit ids > recent_days > all), then run the
+        // SAME map-reduce as the extract route — each meeting read in full by its
+        // own focused call — and hand the parent ONE synthesized result. The parent
+        // never pulls those transcripts into its own context window.
+        const analyzeMeetingsFn = async (
+          instructions: string,
+          opts: { meetingIds?: string[]; recentDays?: number },
+        ) => {
+          let scoped = allMeetings;
+          if (opts.meetingIds?.length) {
+            const idset = new Set(opts.meetingIds);
+            scoped = allMeetings.filter(m => idset.has(m.meetingId));
+          } else if (opts.recentDays && opts.recentDays > 0) {
+            const cutoff = Date.now() - opts.recentDays * 24 * 60 * 60 * 1000;
+            scoped = allMeetings.filter(m => {
+              const d = dateMap.get(m.meetingId);
+              if (!d) return true; // unknown date → keep, never silently drop
+              return new Date(d).getTime() >= cutoff;
+            });
+          }
+          const sorted = [...scoped].sort((a, b) =>
+            new Date(dateMap.get(b.meetingId) || 0).getTime() - new Date(dateMap.get(a.meetingId) || 0).getTime());
+          const notCoveredCount = Math.max(0, sorted.length - DEEP_ANALYSIS_CEILING);
+          if (notCoveredCount > 0) {
+            log.debug('analyze_scope_capped', { capped: DEEP_ANALYSIS_CEILING, total: sorted.length });
+          }
+          const refs = sorted.slice(0, DEEP_ANALYSIS_CEILING).map(m => ({
+            meetingId: m.meetingId,
+            title: m.title,
+            dateLabel: dateLabelFor(m.meetingId),
+          }));
+          if (!refs.length) {
+            return { contextText: 'No meetings matched that scope.', results: [] };
+          }
+          // Stream each meeting the sub-agent reads as a nested sub-step, then the
+          // synthesis — the way the reference's Task surfaces its child tool calls.
+          const readDone: AgentStep[] = [];
+          const synthesis = await extractAcrossMeetings({
+            instructions,
+            meetings: refs,
+            loadContent: loadMeetingFullContent,
+            concurrency: 4,
+            onProgress: (ev) => {
+              if (ev.phase === 'map') {
+                readDone.push({
+                  id: `analyze-read-${readDone.length}`,
+                  label: ev.title,
+                  status: 'done',
+                  detail: ev.hadItems ? undefined : 'nothing relevant',
+                });
+                updateAnalyzeProgress(
+                  ev.completed < ev.total
+                    ? [...readDone, { id: 'analyze-reading', label: `Reading meetings in full… (${ev.completed}/${ev.total})`, status: 'running' }]
+                    : [...readDone],
+                );
+              } else if (ev.phase === 'reduce') {
+                updateAnalyzeProgress([
+                  ...readDone,
+                  { id: 'analyze-synth', label: `Synthesizing findings across ${ev.withItems} meeting${ev.withItems !== 1 ? 's' : ''}`, status: 'running' },
+                ]);
+              }
+            },
+          });
+          // Finalize: every read done + synthesis done.
+          updateAnalyzeProgress([...readDone, { id: 'analyze-synth', label: 'Synthesized findings', status: 'done' }]);
+          // Disclose any uncovered tail back to the agent so it relays it (no silent cap).
+          const contextText = notCoveredCount > 0
+            ? `${synthesis}\n\n[COVERAGE: read the ${refs.length} most recent of ${sorted.length} meetings in this scope IN FULL. ${notCoveredCount} older meeting${notCoveredCount !== 1 ? 's were' : ' was'} NOT covered — tell the user this and offer to continue with the older ones.]`
+            : synthesis;
+          return {
+            contextText,
+            results: refs.map(r => ({
+              meetingId: r.meetingId,
+              meetingTitle: r.title,
+              score: 1,
+              date: dateMap.get(r.meetingId),
+            })),
+          };
+        };
+
+        // P3 (rolling compaction safety): bound how many single-meeting reads the
+        // agentic loop may accumulate in one turn, so context can't balloon from a
+        // huge read fan-out. Past the budget, nudge the model to analyze_meetings
+        // (which fans out + folds into ONE compact result) instead of more reads.
+        let agenticReadCount = 0;
+        const AGENTIC_READ_BUDGET = 30;
+
         response = await agentChatAllMeetings(
           userInput,
           msgHistory,
@@ -3795,6 +4311,45 @@ export default function App() {
           {
             searchFn: turbopufferSearchFn,
             contactsFn: contactsSearchFn,
+            // Read ONE meeting in FULL on demand (Read-style tool). Hydrates from
+            // the server when the paginated history omitted notes/transcript, so
+            // per-meeting extraction sees complete content, not a snippet.
+            readNotesFn: async (meetingId: string) => {
+              if (++agenticReadCount > AGENTIC_READ_BUDGET) {
+                return {
+                  title: undefined,
+                  contextText: `Read budget reached for this turn (${AGENTIC_READ_BUDGET} meetings). For broader coverage, call analyze_meetings — it reads every meeting in scope in full and returns one synthesized result — instead of more individual read_meeting_notes calls.`,
+                };
+              }
+              const doc = allMeetings.find(m => m.meetingId === meetingId);
+              let notes = (doc?.notes ?? '').trim();
+              let summary = (doc?.summary ?? '').trim();
+              let transcription = (doc?.transcription ?? '').trim();
+              if (!notes && !summary && !transcription) {
+                try {
+                  const full = await getTaskById(meetingId);
+                  if (full) { notes = (full.notes ?? '').trim(); summary = (full.summary ?? '').trim(); transcription = (full.transcription ?? '').trim(); }
+                } catch { /* offline / not found */ }
+              }
+              const title = doc?.title || 'Untitled meeting';
+              const dateStr = dateMap.get(meetingId);
+              const dateLabel = dateStr
+                ? new Date(dateStr).toLocaleDateString('en-US', { weekday: 'short', month: 'short', day: 'numeric', year: 'numeric' })
+                : 'unknown date';
+              // Compaction: keep NOTES + SUMMARY in full (they hold the action
+              // items/decisions), but cap the verbose TRANSCRIPT so reading many
+              // meetings in one extraction run stays within the context window.
+              const body = [
+                notes ? `NOTES:\n${notes}` : '',
+                summary ? `SUMMARY:\n${summary}` : '',
+                transcription ? `TRANSCRIPT:\n${transcription.length > 6000 ? `${transcription.slice(0, 6000)}… [transcript truncated — NOTES above are the authoritative source]` : transcription}` : '',
+              ].filter(Boolean).join('\n\n');
+              return {
+                title,
+                contextText: `=== ${title} (${dateLabel}) [task_id: ${meetingId}] ===\n${body || '(No notes generated for this meeting.)'}`,
+              };
+            },
+            analyzeMeetingsFn,
             onPlan: ({ intent, steps }) => {
               updateAgentMessage(prev => ({
                 agentStatus: 'planning',
@@ -3812,17 +4367,22 @@ export default function App() {
             },
             onToolCallStart: (step) => {
               const isContacts = step.kind === 'contacts';
+              const isAnalyze = step.kind === 'analyze';
+              const isRead = step.kind === 'read';
               updateAgentMessage(prev => ({
                 agentStatus: 'executing',
                 agentPlan: [
                   ...(prev.agentPlan ?? []),
                   {
                     id: `search-${step.callId}`,
-                    label: isContacts ? 'Searching people' : 'Searching notes',
+                    label: isAnalyze ? (step.query || 'Analyzing meetings in depth')
+                      : isRead ? 'Reading meeting'
+                      : isContacts ? 'Searching people' : 'Searching notes',
                     status: 'running' as const,
                     type: 'search-tool' as const,
-                    searchKind: isContacts ? 'people' as const : 'notes' as const,
-                    searchQuery: step.query || '',
+                    searchKind: isAnalyze ? 'analyze' as const : isRead ? 'read' as const : isContacts ? 'people' as const : 'notes' as const,
+                    // For a read, the query is a task_id at start; the human title arrives on done.
+                    searchQuery: (isAnalyze || isRead) ? '' : (step.query || ''),
                   },
                 ],
               }));
@@ -3871,6 +4431,28 @@ export default function App() {
                       })),
                     };
                   }
+                  if (step.kind === 'analyze') {
+                    return {
+                      ...s,
+                      status: 'done' as const,
+                      detail: step.results?.length
+                        ? `Read ${step.results.length} meeting${step.results.length !== 1 ? 's' : ''} in full`
+                        : 'Analysis complete',
+                      searchResults: step.results?.map(r => ({
+                        meetingId: r.meetingId,
+                        meetingTitle: r.meetingTitle,
+                        score: r.score,
+                      })),
+                    };
+                  }
+                  if (step.kind === 'read') {
+                    // The human-readable meeting title arrives as step.query on done.
+                    return {
+                      ...s,
+                      status: 'done' as const,
+                      label: step.query ? `Read ${step.query}` : 'Read meeting',
+                    };
+                  }
                   return {
                     ...s,
                     status: 'done' as const,
@@ -3888,6 +4470,7 @@ export default function App() {
             },
           }
         );
+        } // end agentic (non-extract) path
       }
 
       // ═══════════ PHASE 4: DONE — replace agent placeholder with final response ═══════════
@@ -3962,10 +4545,13 @@ export default function App() {
       }
       void persistChatThreadToCache(selectedTask?.id ?? null);
     } catch (err) {
+      // Turn-level error boundary: NEVER surface a raw error mid-response. Replace the
+      // in-flight placeholder with a calm, actionable message and keep the chat usable.
       log.error('chat_error', { error: err instanceof Error ? err : undefined });
+      const friendly = "I wasn't able to finish that one. If you were asking across a very large history, try narrowing it to a time window (e.g. “this month”) or a specific topic/person and I'll get it — or ask me to try again.";
       setChatMessages(prev => {
         const cleaned = prev.filter(m => !(m.role === 'model' && m.agentStatus && m.agentStatus !== 'done'));
-        return [...cleaned, { role: 'model', text: 'Sorry, I encountered an error while processing your request.' }];
+        return [...cleaned, { role: 'model', text: friendly }];
       });
     } finally {
       setIsChatting(false);
@@ -4062,6 +4648,51 @@ export default function App() {
     }
   };
 
+  // W3: switching the active workspace (vault) reloads the WHOLE app for that vault.
+  // Every per-workspace cache + in-memory list is invalidated so the previous vault's
+  // data can never bleed through, then the new vault's data is refetched and the user
+  // lands back on Home — a clean context swap (like the reference's session switch).
+  const switchWorkspaceReload = async () => {
+    log.info('workspace_switch_reload');
+    // 1. invalidate per-workspace caches + transient cursors
+    allMetaCacheRef.current = null;
+    extractCursorRef.current = null;
+    lastChatFetchTaskIdRef.current = null;
+    lastAssetsFetchTaskIdRef.current = null;
+    // 2. clear per-workspace in-memory state (NOT user-level: plan/ledger/entitlements stay)
+    setSelectedTask(null);
+    setHistory([]);
+    setChatMessages([]);
+    setAllMeetingsChatMessages([]);
+    setChatThreads([]);
+    setActiveThread(null);
+    setActiveChatThreadId(null);
+    setKgData([]); setKgBuilt(false); setSelectedNode(null);
+    setAgentAssetHistory([]); setSelectedAgentAsset(null);
+    setManualNotesList([]);
+    // 3. land on Home for the new vault
+    setSelectedTask(null);
+    setCurrentView('process');
+    // 4. refetch the new vault's data (history state + chat threads, both workspace-scoped)
+    const uid = await getUserId().catch(() => null);
+    await Promise.all([
+      fetchHistory(true),
+      uid ? primeFromBootstrap(uid) : Promise.resolve(),
+    ]);
+  };
+
+  // Fire the full reload whenever the active workspace id actually changes (not on the
+  // initial selection, where the app is already loading).
+  useEffect(() => {
+    const cur = activeWorkspaceSelection.workspaceId;
+    const prev = prevWorkspaceIdRef.current;
+    if (prev === null) { prevWorkspaceIdRef.current = cur; return; } // initial selection — skip
+    if (!cur || cur === prev) return;
+    prevWorkspaceIdRef.current = cur;
+    void switchWorkspaceReload();
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [activeWorkspaceSelection.workspaceId]);
+
   const loadMoreHistory = async () => {
     const nextPage = historyPageRef.current + 1;
     try {
@@ -4141,6 +4772,27 @@ export default function App() {
       setSelectedTask(prev => prev ? { ...prev, ...updatedTask } : updatedTask);
     }
   };
+
+  // GLOBAL SYNC: a note moved between spaces/folders ANYWHERE (note picker, history
+  // row, space page) updates the shared history list + the open note + the cache, so
+  // every page reflects the new location without a manual refresh or page visit.
+  useEffect(() => {
+    const off = onVaultEvent('notes:changed', ({ taskId, spaceId, folderId }) => {
+      setHistory(prev => {
+        const next = prev.map(t => t.id === taskId ? { ...t, space_id: spaceId, folder_id: folderId } : t);
+        void getUserId().then(async uid => {
+          if (!uid) return;
+          const merged = next.find(t => t.id === taskId);
+          if (merged?.id) await cacheSet(`task:${merged.id}`, merged);
+          const payload = await cacheGet<CachedHistoryPayload>(`tasks:${uid}`);
+          if (payload) await cacheSet(`tasks:${uid}`, { ...payload, list: next });
+        });
+        return next;
+      });
+      setSelectedTask(prev => prev && prev.id === taskId ? { ...prev, space_id: spaceId, folder_id: folderId } : prev);
+    });
+    return off;
+  }, []);
 
   const handleDeleteManualNote = async (id: string) => {
     await deleteManualNote(id);
@@ -4705,12 +5357,13 @@ export default function App() {
           .catch(err => log.error('kg_background_extraction_failed', { error: err instanceof Error ? err : undefined }))
           .finally(() => setIsExtractingNewKG(false));
 
-        indexMeetingTranscription(savedTask.id, savedTask.filename, savedTask.transcription!, { createdAt: savedTask.created_at, attendees: savedTask.attendees })
+        indexMeetingTranscription(savedTask.id, savedTask.filename, savedTask.transcription!, { createdAt: savedTask.created_at, attendees: savedTask.attendees, workspaceId: getWorkspaceSelection().workspaceId ?? undefined })
           .then(() => log.info('turbopuffer_indexing_complete_upload'))
           .catch(err => log.warn('turbopuffer_indexing_failed', { error: err instanceof Error ? err : undefined }));
       }
 
       setHistory(prev => [savedTask, ...prev.filter(t => t.id !== savedTask.id)]);
+      allMetaCacheRef.current = null; // freshness: a newly saved meeting must appear in the all-meetings index next turn
       setSelectedTask(savedTask);
       setStatus('completed');
       setProcessingHeadline('All done, yay 🎉');
@@ -4968,7 +5621,7 @@ export default function App() {
           >
             <SpacesPage
               onClose={() => setCurrentView('process')}
-              onOpenSpace={(ws) => { setWorkspaceSelection(ws.id, null); setCurrentView('workspace'); }}
+              onOpenSpace={(space) => { setWorkspaceSelection(space.workspace_id ?? getWorkspaceSelection().workspaceId, space.id); setCurrentView('workspace'); }}
             />
           </motion.div>
         )}
@@ -5061,7 +5714,11 @@ export default function App() {
                     setSelectedTask(null);
                     void handleSendMessage();   // all-meetings chat, rendered inline on Home
                   }}
-                  onRunGem={(p) => { setSelectedTask(null); void handleSendMessage(p); }}
+                  onRunGem={(p, d) => { setSelectedTask(null); void handleSendMessage(p, d); }}
+                  chatThreads={chatThreads}
+                  onNewChat={handleNewThread}
+                  onLoadThread={(id) => { const t = chatThreads.find((x) => x.id === id); if (t) void handleSwitchThread(t); }}
+                  onOpenFullChat={() => { setSelectedTask(null); setCurrentView('chat'); }}
                   onOpenChatHistory={() => { setSelectedTask(null); setCurrentView('chat'); }}
                 />
               </motion.div>

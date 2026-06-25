@@ -18,13 +18,15 @@ import { semanticSearchItems, expandWithNeighbours } from './connectors/embed';
  * model is told to ignore embedded instructions). It never ships the corpus to
  * the client, so it scales to users with thousands of meetings.
  *
- * Endpoint: POST /ai/chat  { query, scope?, workspaceId?, taskId?, history?, model? }
+ * Endpoint: POST /ai/chat  { query, scope?, workspaceId?, spaceId?, taskId?, history?, model? }
  */
 
 interface ChatBody {
   query?: string;
-  scope?: 'all' | 'workspace' | 'single';
+  scope?: 'all' | 'workspace' | 'space' | 'single';
   workspaceId?: string;
+  /** When scope==='space': restrict retrieval to meetings filed in THIS space. */
+  spaceId?: string;
   taskId?: string;
   history?: Array<{ role: 'user' | 'model'; text: string }>;
   model?: 'gemini' | 'claude';
@@ -95,7 +97,9 @@ function itemCard(row: any): string {
 /** Pull this workspace's connected-tool records (Jira, …). Guarded: if the table
  *  isn't present or connectors are off, we just return [] and chat still works. */
 async function fetchKnowledgeItems(userId: string, scope: string | undefined, workspaceId: string | undefined, q?: string): Promise<any[]> {
-  if (scope === 'single') return [];
+  // Single-meeting and space chat are MEETING-only — connected-tool records (Jira/
+  // GitHub) aren't space-tagged, so a space chat must not pull them in.
+  if (scope === 'single' || scope === 'space') return [];
   // SEMANTIC first: when there's a query + workspace, retrieve the most RELEVANT records
   // across all sources from the unified brain index (Phase B). Falls back to recency.
   if (q && q.trim().length >= 2 && scope === 'workspace' && workspaceId) {
@@ -416,6 +420,9 @@ export async function handleChatAgent(userId: string, raw: any): Promise<APIGate
 
   if (body.scope === 'single' && body.taskId) {
     params.push(body.taskId); where.push(`th.id = ${p()}`);
+  } else if (body.scope === 'space' && body.spaceId) {
+    // Space chat: ONLY meetings filed in this space (canonical task_history.space_id).
+    params.push(body.spaceId); where.push(`th.space_id = ${p()}`);
   } else if (body.scope === 'workspace' && body.workspaceId) {
     params.push(body.workspaceId);
     where.push(`th.id IN (

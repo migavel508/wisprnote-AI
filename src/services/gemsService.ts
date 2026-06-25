@@ -10,6 +10,23 @@ export interface Gem {
   author?: string;       // e.g. "Matt Mochary" / "Granola"
   featured?: boolean;
   builtIn?: boolean;
+  /** Routing hints for the chat engine (P4). 'extract' + 'full' = per-meeting
+   *  read-each-meeting path; 'qa' + 'slice' = targeted RAG. */
+  intent?: 'qa' | 'extract' | 'person';
+  depth?: 'slice' | 'full';
+}
+
+// Prepended to a Gem's prompt when it's a per-meeting extraction task, so the
+// agent deterministically reads each meeting in full before answering.
+export const EXTRACT_DIRECTIVE =
+  '[Routing: this is a per-meeting extraction task. First call search_notes with an empty query + the right recent_days to LIST the meetings in scope, then call read_meeting_notes for EACH meeting in scope (fan out the calls) and extract from its FULL notes. Never report a meeting as empty from a search snippet — only after reading it.]';
+
+/** The final prompt to send for a Gem — prefixed with the extraction directive
+ *  when the Gem is an extract/full Gem. */
+export function gemPromptFor(gem: Gem): string {
+  return gem.intent === 'extract'
+    ? `${EXTRACT_DIRECTIVE}\n\n${gem.prompt}`
+    : gem.prompt;
 }
 
 const COACH_ME_MATT_PROMPT = `<Matt Mochary Curriculum>
@@ -43,7 +60,9 @@ const BUILT_IN_GEMS: Gem[] = [
     author: 'Matt Mochary',
     featured: true,
     builtIn: true,
-    prompt: COACH_ME_MATT_PROMPT,
+    intent: 'extract',
+    depth: 'full',
+    prompt:COACH_ME_MATT_PROMPT,
   },
   {
     id: 'list-recent-todos',
@@ -51,7 +70,9 @@ const BUILT_IN_GEMS: Gem[] = [
     description: 'Extracts and displays your outstanding to-dos from recent meeting notes.',
     author: 'Wisprnote',
     builtIn: true,
-    prompt: `Scan my recent meetings in reverse chronological order, read the latest day plus earlier complete days until at least 5 meetings are covered, then extract likely personal to-dos only. Group the action items by meeting, with the meeting title as a heading. Use markdown.`,
+    intent: 'extract',
+    depth: 'full',
+    prompt:`Scan my recent meetings in reverse chronological order, read the latest day plus earlier complete days until at least 5 meetings are covered, then extract likely personal to-dos only. Group the action items by meeting, with the meeting title as a heading. Use markdown.`,
   },
   {
     id: 'write-weekly-recap',
@@ -59,7 +80,9 @@ const BUILT_IN_GEMS: Gem[] = [
     description: 'Generates a weekly recap of accomplishments for your team.',
     author: 'Wisprnote',
     builtIn: true,
-    prompt: `I need to write a recap of my week to share with my team. The goal is for my team to understand what I worked on / accomplished. Recaps should always focus on a full calendar week. Figure out today's date — if it's the beginning of the week (Sunday–Wednesday) focus on the previous calendar week, if it's the end of the week (Thursday–Saturday), focus on the current week. Use markdown with clear headings.`,
+    intent: 'extract',
+    depth: 'full',
+    prompt:`I need to write a recap of my week to share with my team. The goal is for my team to understand what I worked on / accomplished. Recaps should always focus on a full calendar week. Figure out today's date — if it's the beginning of the week (Sunday–Wednesday) focus on the previous calendar week, if it's the end of the week (Thursday–Saturday), focus on the current week. Use markdown with clear headings.`,
   },
   {
     id: 'streamline-calendar',
@@ -67,7 +90,9 @@ const BUILT_IN_GEMS: Gem[] = [
     description: 'Reviews your recent meetings and suggests which to cut, shorten, or make async.',
     author: 'Wisprnote',
     builtIn: true,
-    prompt: `Review my recent meetings and suggest how to streamline my calendar: which meetings could be shortened, made asynchronous, delegated, or cancelled. For each, give a one-line rationale. Use markdown.`,
+    intent: 'extract',
+    depth: 'full',
+    prompt:`Review my recent meetings and suggest how to streamline my calendar: which meetings could be shortened, made asynchronous, delegated, or cancelled. For each, give a one-line rationale. Use markdown.`,
   },
   {
     id: 'blind-spots',
@@ -75,7 +100,9 @@ const BUILT_IN_GEMS: Gem[] = [
     description: 'Surfaces themes, risks, and blind spots across your recent meetings.',
     author: 'Wisprnote',
     builtIn: true,
-    prompt: `Look across my recent meetings and surface my blind spots: recurring risks, unresolved decisions, commitments I may be forgetting, and themes I'm not paying enough attention to. Be direct and specific. Use markdown.`,
+    intent: 'extract',
+    depth: 'full',
+    prompt:`Look across my recent meetings and surface my blind spots: recurring risks, unresolved decisions, commitments I may be forgetting, and themes I'm not paying enough attention to. Be direct and specific. Use markdown.`,
   },
 ];
 

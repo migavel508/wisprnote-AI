@@ -61,16 +61,19 @@ export interface BrainEventRow {
   from_state: string | null; to_state: string | null; title: string | null; occurred_at: string | null;
 }
 
-/** Recent events for the Pulse feed (most recent first). Optional folder (project) scope —
- *  events are scoped via their item's folder_id (brain_event has no folder column of its own). */
-export async function getEvents(userId: string, workspaceId: string, limit = 40, folderId?: string | null): Promise<BrainEventRow[]> {
+/** Recent events for the Pulse feed (most recent first). Optional folder (project) OR
+ *  space scope — events are scoped via their item's folder_id/space_id (brain_event has
+ *  no folder/space column of its own). Folder takes precedence when both are given. */
+export async function getEvents(userId: string, workspaceId: string, limit = 40, folderId?: string | null, spaceId?: string | null): Promise<BrainEventRow[]> {
   await ensureBrainEventSchema();
   return query<BrainEventRow>(
     `SELECT e.kind, e.source, e.source_id, e.actor, e.from_state, e.to_state, e.title, e.occurred_at
        FROM brain_event e
        LEFT JOIN knowledge_item ki ON ki.id = e.item_id
-      WHERE e.user_id=$1 AND e.workspace_id=$2 AND ($3::uuid IS NULL OR ki.folder_id=$3)
+      WHERE e.user_id=$1 AND e.workspace_id=$2
+        AND ($3::uuid IS NULL OR ki.folder_id=$3)
+        AND ($4::uuid IS NULL OR ki.space_id=$4)
       ORDER BY e.occurred_at DESC NULLS LAST, e.created_at DESC LIMIT ${limit}`,
-    [userId, workspaceId, folderId ?? null],
+    [userId, workspaceId, folderId ?? null, spaceId ?? null],
   ).catch(() => []);
 }

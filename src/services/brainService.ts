@@ -37,10 +37,10 @@ export async function syncBrain(workspaceId: string): Promise<{ syncedAt: string
 
 export interface BrainAlert { type: string; severity: string; title: string; detail?: string; intent?: string; url?: string | null }
 
-export async function getBrainAlerts(workspaceId: string, folderId?: string | null): Promise<BrainAlert[]> {
+export async function getBrainAlerts(workspaceId: string, folderId?: string | null, spaceId?: string | null): Promise<BrainAlert[]> {
   try {
     const token = await getIdToken();
-    const fq = folderId ? `&folder=${encodeURIComponent(folderId)}` : '';
+    const fq = folderId ? `&folder=${encodeURIComponent(folderId)}` : spaceId ? `&space=${encodeURIComponent(spaceId)}` : '';
     const r = await baseFetch(`${API_BASE}/brain/alerts?workspace=${encodeURIComponent(workspaceId)}${fq}`, {
       headers: { 'Content-Type': 'application/json', Authorization: token },
     });
@@ -50,10 +50,10 @@ export async function getBrainAlerts(workspaceId: string, folderId?: string | nu
   } catch { return []; }
 }
 
-export async function getBrainPulse(workspaceId: string, folderId?: string | null): Promise<BrainEvent[]> {
+export async function getBrainPulse(workspaceId: string, folderId?: string | null, spaceId?: string | null): Promise<BrainEvent[]> {
   try {
     const token = await getIdToken();
-    const fq = folderId ? `&folder=${encodeURIComponent(folderId)}` : '';
+    const fq = folderId ? `&folder=${encodeURIComponent(folderId)}` : spaceId ? `&space=${encodeURIComponent(spaceId)}` : '';
     const r = await baseFetch(`${API_BASE}/brain/pulse?workspace=${encodeURIComponent(workspaceId)}${fq}`, {
       headers: { 'Content-Type': 'application/json', Authorization: token },
     });
@@ -78,11 +78,12 @@ export async function getBrainNode(workspaceId: string, id: string): Promise<Bra
   }
 }
 
-/** `folderId` scopes to one project; omit for the whole-workspace aggregate. */
-export async function getBrainGraph(workspaceId: string, folderId?: string | null): Promise<{ nodes: BrainNode[]; links: BrainLink[] }> {
+/** `folderId` scopes to one project, else `spaceId` scopes to one space; omit both for the
+ *  whole-workspace aggregate. Folder takes precedence over space. */
+export async function getBrainGraph(workspaceId: string, folderId?: string | null, spaceId?: string | null): Promise<{ nodes: BrainNode[]; links: BrainLink[] }> {
   try {
     const token = await getIdToken();
-    const fq = folderId ? `&folder=${encodeURIComponent(folderId)}` : '';
+    const fq = folderId ? `&folder=${encodeURIComponent(folderId)}` : spaceId ? `&space=${encodeURIComponent(spaceId)}` : '';
     const r = await baseFetch(`${API_BASE}/brain/graph?workspace=${encodeURIComponent(workspaceId)}${fq}`, {
       headers: { 'Content-Type': 'application/json', Authorization: token },
     });

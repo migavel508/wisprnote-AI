@@ -30,6 +30,8 @@ import './connectors/registry'; // registers the no-op connector
 import './connectors/jira';      // registers the Jira (Atlassian MCP) connector
 import './connectors/github';    // registers the GitHub (remote MCP) connector
 import { ensurePeopleSchema, upsertPerson } from './people';
+import { activeWorkspaceId, ensureWorkspacePartition, ensureWorkspacePartitionSchema, validateOwnedWorkspaceId } from './workspaceScope';
+import { ensureSpacesSchema, migrateFoldersToSpacesOnce, reconcileSpaces, resolveDefaultSpaceId, validateOwnedSpaceId } from './spaces';
 
 // Desktop deep-link the OAuth provider redirects back to (validated client-side,
 // like the Google sign-in callback). If a provider's DCR rejects custom schemes,
@@ -389,12 +391,13 @@ export const handler = async (event: APIGatewayProxyEvent): Promise<APIGatewayPr
       case 'ledger':     return await handleLedger(method, segments, userId, event);
       case 'storage':    return await handleStorage(method, segments, userId, event);
       case 'workspaces': return await handleWorkspaces(method, segments, userId, event);
+      case 'spaces':     return await handleSpaces(method, segments, userId, event);
       case 'folders':    return await handleFolders(method, segments, userId, event);
       case 'connectors': return await handleConnectors(method, segments, userId, event);
       case 'proposals':  return await handleProposals(method, segments, userId, event);
       case 'brain':      return await handleBrain(method, segments, userId, event);
       case 'contacts':   return await handleContacts(method, userId, event);
-      case 'bootstrap':  return await handleBootstrap(userId);
+      case 'bootstrap':  return await handleBootstrap(userId, event);
       case 'billing':    return await handleBilling(method, segments, userId, getUserEmail());
       case 'ai':         return await handleAI(method, segments, userId, event);
       default:           return notFound();
@@ -465,10 +468,23 @@ async function handleTasks(method: string, segments: string[], userId: string, e
       }
     }
 
+    // Partition every new recording into a workspace (the user's vault). Honor a
+    // client-supplied workspace_id when it belongs to the user (W2), else fall back to
+    // the default workspace — so a row is NEVER left unpartitioned.
+    await ensureWorkspacePartitionSchema();
+    await ensureSpacesSchema();
+    const taskWorkspaceId = (await validateOwnedWorkspaceId(userId, body.workspace_id))
+      || (await activeWorkspaceId(event, userId, getUserEmail()));
+    // No note lives directly under a workspace — file every recording into a space
+    // (a client-supplied one it owns, else the workspace's default "My notes" space),
+    // optionally into a folder within it.
+    const taskSpaceId = (await validateOwnedSpaceId(userId, taskWorkspaceId, body.space_id))
+      || (await resolveDefaultSpaceId(userId, taskWorkspaceId));
+    const taskFolderId = body.folder_id ?? null;
     const row = await queryOne(
-      `INSERT INTO task_history (user_id, filename, transcription, summary, notes, audio_url, status, duration, prompt, personal_note, visualization_image, attendees, source)
-       VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13) RETURNING *`,
-      [userId, body.filename, body.transcription, body.summary, body.notes, body.audio_url, body.status, body.duration || 0, body.prompt, body.personal_note, body.visualization_image, JSON.stringify(body.attendees ?? []), source]
+      `INSERT INTO task_history (user_id, workspace_id, space_id, folder_id, filename, transcription, summary, notes, audio_url, status, duration, prompt, personal_note, visualization_image, attendees, source)
+       VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16) RETURNING *`,
+      [userId, taskWorkspaceId, taskSpaceId, taskFolderId, body.filename, body.transcription, body.summary, body.notes, body.audio_url, body.status, body.duration || 0, body.prompt, body.personal_note, body.visualization_image, JSON.stringify(body.attendees ?? []), source]
     );
     // Fast-path: kick this meeting's KG pipeline immediately (async self-invoke,
     // best-effort) so the graph is ready before the user ever opens it. The cron
@@ -497,7 +513,8 @@ async function handleTasks(method: string, segments: string[], userId: string, e
     // that runs on every note open — it's lazy-loaded via the route above.
     const row = await queryOne(
       `SELECT id, user_id, created_at, filename, transcription, summary, notes,
-              audio_url, status, duration, prompt, personal_note, attendees
+              audio_url, status, duration, prompt, personal_note, attendees,
+              space_id, folder_id
        FROM task_history WHERE id=$1 AND user_id=$2`,
       [taskId, userId]
     );
@@ -510,8 +527,11 @@ async function handleTasks(method: string, segments: string[], userId: string, e
     const full = qs.full === 'true';
     const search = qs.search?.trim() || '';
 
-    let whereClause = 'user_id=$1';
-    const params: any[] = [userId];
+    // W1: scope the listing to the ACTIVE workspace (the user's vault). The client
+    // sends X-Workspace-Id; absent/invalid → the user's default workspace.
+    const listWorkspaceId = await activeWorkspaceId(event, userId, getUserEmail());
+    let whereClause = 'user_id=$1 AND workspace_id=$2';
+    const params: any[] = [userId, listWorkspaceId];
 
     if (search) {
       params.push(`%${search}%`);
@@ -526,8 +546,8 @@ async function handleTasks(method: string, segments: string[], userId: string, e
     // exclude it so bulk fetches don't transfer hundreds of MB. The lightweight
     // list stays minimal (+ attendees for the People chip).
     const fields = full
-      ? 'id, user_id, created_at, filename, transcription, summary, notes, audio_url, status, duration, prompt, personal_note, attendees'
-      : 'id, created_at, filename, summary, status, duration, attendees';
+      ? 'id, user_id, created_at, filename, transcription, summary, notes, audio_url, status, duration, prompt, personal_note, attendees, space_id, folder_id'
+      : 'id, created_at, filename, summary, status, duration, attendees, space_id, folder_id';
     const rows = await query(
       `SELECT ${fields} FROM task_history WHERE ${whereClause} ORDER BY created_at DESC LIMIT $${params.length + 1} OFFSET $${params.length + 2}`,
       [...params, pageSize, page * pageSize]
@@ -645,12 +665,16 @@ async function handleConnectors(method: string, segments: string[], userId: stri
       [userId, qsWorkspace],
     );
     const byId = new Map(creds.map((c) => [c.source, c]));
-    const connectors = Object.values(MCP_SERVERS).map((s) => ({
+    const { isConnectorAvailable } = await import('./mcp/customConnectors');
+    const connectors = await Promise.all(Object.values(MCP_SERVERS).map(async (s) => ({
       id: s.id,
       connected: byId.has(s.id),
       account: byId.get(s.id)?.account ?? null,
       status: s.status,
-    }));
+      // available = has a usable endpoint now (pinned for jira/github; configured for google/slack).
+      // The client shows a "coming soon" connector as connectable once this flips true.
+      available: await isConnectorAvailable(s.id, userId, qsWorkspace).catch(() => false),
+    })));
     return ok({ enabled: true, workspace: qsWorkspace, connectors });
   }
 
@@ -790,14 +814,36 @@ async function handleConnectors(method: string, segments: string[], userId: stri
     return ok({ connected: true });
   }
 
+  // POST /connectors/{id}/configure { workspace, url, oauthClientId?, oauthClientSecret?, auth? }
+  // → bring-your-own MCP endpoint for a catalog connector (Slack/Gmail/…). Stores the endpoint so
+  // the next oauth-url/exchange (or no-auth connect) resolves it. The reference's `mcp add` model.
+  if (method === 'POST' && id && segments[2] === 'configure') {
+    const body = parseBody(event);
+    const workspaceId = String(body.workspace || ACCOUNT_SCOPE);
+    const url = String(body.url || '').trim();
+    if (!/^https:\/\//i.test(url)) return badRequest('A valid https MCP server URL is required.');
+    const { configureCatalogConnector } = await import('./mcp/customConnectors');
+    await configureCatalogConnector(userId, workspaceId, id, {
+      url,
+      oauthClientId: body.oauthClientId ? String(body.oauthClientId) : null,
+      oauthClientSecret: body.oauthClientSecret ? String(body.oauthClientSecret) : null,
+      auth: body.auth === 'none' ? 'none' : 'oauth',
+    });
+    return ok({ configured: true, needsAuth: body.auth !== 'none' });
+  }
+
   // POST /connectors/{id}/oauth-url { workspace } → discover → (pre-registered client OR DCR) → PKCE URL.
   if (method === 'POST' && id && segments[2] === 'oauth-url') {
     const workspaceId = String(parseBody(event).workspace || ACCOUNT_SCOPE);
-    const { getServerConfig, getCustomConnectorOAuthClient } = await import('./mcp/customConnectors');
+    const { getServerConfig, getCustomConnectorOAuthClient, getRegistryOAuthClient } = await import('./mcp/customConnectors');
     const server = await getServerConfig(userId, workspaceId, id);
     if (!server || !server.url) return badRequest('connector has no MCP endpoint');
-    const customClient = id.startsWith('custom-') ? await getCustomConnectorOAuthClient(userId, workspaceId, id).catch(() => null) : null;
-    const { authorizeUrl, inflight } = await beginMcpOAuth(server, CONNECTOR_REDIRECT_URI, customClient || undefined);
+    // A pre-registered OAuth client: custom connectors carry their own; Google/Slack registry
+    // connectors use the operator-configured client (they don't support dynamic registration).
+    const providedClient = id.startsWith('custom-')
+      ? await getCustomConnectorOAuthClient(userId, workspaceId, id).catch(() => null)
+      : await getRegistryOAuthClient(id, userId, workspaceId).catch(() => null);
+    const { authorizeUrl, inflight } = await beginMcpOAuth(server, CONNECTOR_REDIRECT_URI, providedClient || undefined);
     await query(
       `INSERT INTO oauth_state (state, user_id, source, workspace_id, inflight) VALUES ($1,$2,$3,$4,$5)
        ON CONFLICT (state) DO UPDATE SET inflight=EXCLUDED.inflight, workspace_id=EXCLUDED.workspace_id, created_at=NOW()`,
@@ -895,25 +941,30 @@ async function handleBrain(method: string, segments: string[], userId: string, e
   if (method === 'GET' && segments[1] === 'alerts') {
     const ws = event.queryStringParameters?.workspace;
     if (!ws) return badRequest('workspace required');
-    // Optional folder (project) scope: present → just that project; absent → whole workspace.
-    // `$3::uuid IS NULL OR col=$3` makes one query serve both (null = aggregate).
+    // Optional folder (project) OR space scope: present → just that project/space; absent →
+    // whole workspace. `$3::uuid IS NULL OR <col>=$3` serves both (null = aggregate). Folder
+    // takes precedence; otherwise scope by the meeting's space_id. (Column name is chosen from
+    // a fixed allow-list below, never user input.)
     const folder = event.queryStringParameters?.folder || null;
+    const space = event.queryStringParameters?.space || null;
+    const scopeId = folder || space || null;
+    const sc = folder ? 'folder_id' : 'space_id';   // which column $3 filters on
     const alerts: any[] = [];
     // 1) Divergent work — a commit/PR went a different direction than the meeting/task intended.
     const diverged = await query<any>(
       `SELECT di.title impl, di.links->>'url' url, e.rationale, si.title intent
          FROM brain_edge e JOIN knowledge_item si ON si.id::text=e.src_id JOIN knowledge_item di ON di.id::text=e.dst_id
         WHERE e.user_id=$1 AND e.workspace_id=$2 AND e.verdict='divergent'
-          AND ($3::uuid IS NULL OR di.folder_id=$3) ORDER BY e.created_at DESC LIMIT 15`,
-      [userId, ws, folder],
+          AND ($3::uuid IS NULL OR di.${sc}=$3 OR si.${sc}=$3) ORDER BY e.created_at DESC LIMIT 15`,
+      [userId, ws, scopeId],
     ).catch(() => []);
     for (const d of diverged) alerts.push({ type: 'divergent', severity: 'high', title: d.impl, detail: d.rationale || `Diverges from "${d.intent}"`, intent: d.intent, url: d.url ?? null });
     // 2) Risky commits — the co-architect flagged an architectural risk.
     const risky = await query<any>(
       `SELECT title, advisory_assessment, advisory_note, links->>'url' url FROM knowledge_item
         WHERE user_id=$1 AND workspace_id=$2 AND advisory_assessment IN ('risk','concern')
-          AND ($3::uuid IS NULL OR folder_id=$3) ORDER BY (advisory_assessment='risk') DESC, synced_at DESC LIMIT 20`,
-      [userId, ws, folder],
+          AND ($3::uuid IS NULL OR ${sc}=$3) ORDER BY (advisory_assessment='risk') DESC, synced_at DESC LIMIT 20`,
+      [userId, ws, scopeId],
     ).catch(() => []);
     for (const r of risky) alerts.push({ type: r.advisory_assessment === 'risk' ? 'risk' : 'concern', severity: r.advisory_assessment === 'risk' ? 'high' : 'low', title: r.title, detail: r.advisory_note || 'Architectural attention suggested', url: r.url ?? null });
     // 3) Stalled work — a task in progress with no update for over a week.
@@ -921,8 +972,8 @@ async function handleBrain(method: string, segments: string[], userId: string, e
       `SELECT title, status, occurred_at, links->>'url' url FROM knowledge_item
         WHERE user_id=$1 AND workspace_id=$2 AND source='jira' AND status ~* 'progress|review|doing'
           AND occurred_at < NOW() - INTERVAL '7 days'
-          AND ($3::uuid IS NULL OR folder_id=$3) ORDER BY occurred_at ASC LIMIT 15`,
-      [userId, ws, folder],
+          AND ($3::uuid IS NULL OR ${sc}=$3) ORDER BY occurred_at ASC LIMIT 15`,
+      [userId, ws, scopeId],
     ).catch(() => []);
     for (const s of stalled) alerts.push({ type: 'stalled', severity: 'medium', title: s.title, detail: `Stuck in "${s.status}" since ${new Date(s.occurred_at).toISOString().slice(0, 10)}`, url: s.url ?? null });
     // 4) Untracked decisions — a meeting (>7d ago) that HAD action items / decisions but never
@@ -935,13 +986,13 @@ async function handleBrain(method: string, segments: string[], userId: string, e
          JOIN knowledge_graph kg ON kg.task_id::text = ki.source_id AND kg.user_id = ki.user_id
         WHERE ki.user_id=$1 AND ki.workspace_id=$2 AND ki.source='meeting'
           AND ki.occurred_at < NOW() - INTERVAL '7 days'
-          AND ($3::uuid IS NULL OR ki.folder_id=$3)
+          AND ($3::uuid IS NULL OR ki.${sc}=$3)
           AND (jsonb_array_length(COALESCE(kg.action_items, '[]'::jsonb)) > 0 OR jsonb_array_length(COALESCE(kg.decisions, '[]'::jsonb)) > 0)
           AND NOT EXISTS (
             SELECT 1 FROM brain_edge e JOIN knowledge_item ji ON ji.id::text = e.dst_id
              WHERE e.user_id=ki.user_id AND e.workspace_id=ki.workspace_id AND e.src_id = ki.id::text AND ji.source='jira')
         ORDER BY ki.occurred_at DESC LIMIT 15`,
-      [userId, ws, folder],
+      [userId, ws, scopeId],
     ).catch(() => []);
     for (const u of untracked) alerts.push({ type: 'untracked', severity: 'medium', title: u.title, detail: `Had ${u.ai} action item(s) / ${u.dec} decision(s) but no Jira task exists — decided ${new Date(u.occurred_at).toISOString().slice(0, 10)}`, url: null });
     return ok({ enabled: true, alerts });
@@ -952,7 +1003,7 @@ async function handleBrain(method: string, segments: string[], userId: string, e
     const ws = event.queryStringParameters?.workspace;
     if (!ws) return badRequest('workspace required');
     const { getEvents } = await import('./connectors/brainEvents');
-    const events = await getEvents(userId, ws, 40, event.queryStringParameters?.folder || null);
+    const events = await getEvents(userId, ws, 40, event.queryStringParameters?.folder || null, event.queryStringParameters?.space || null);
     return ok({ enabled: true, events: events.map((e) => ({ kind: e.kind, source: e.source, sourceId: e.source_id, actor: e.actor, from: e.from_state, to: e.to_state, title: e.title, at: e.occurred_at })) });
   }
   // GET /brain/node?workspace=&id=item:123 → the full info card for one node: its content
@@ -1025,6 +1076,7 @@ async function handleBrain(method: string, segments: string[], userId: string, e
     const ws = event.queryStringParameters?.workspace;
     if (!ws) return badRequest('workspace required');
     const folder = event.queryStringParameters?.folder || null;
+    const space = event.queryStringParameters?.space || null;
     const edges = await getBrainEdges(userId, ws, 1500);
     // Meetings are now knowledge_item rows (source='meeting'), so this single query covers
     // every brain node — meetings, Jira, GitHub. Scoping NODES by folder is enough: the client
@@ -1033,10 +1085,16 @@ async function handleBrain(method: string, segments: string[], userId: string, e
     // to this project PLUS any item directly linked to one of them. So a meeting filed elsewhere
     // that discusses this project, an as-yet-untagged commit, or a dev session all show CONNECTED —
     // accurate lineage beats a strict tag filter (which would orphan cross-project nodes + drop edges).
-    const items = folder
+    // Folder (project) and SPACE views both render the CONNECTED SUBGRAPH: the items
+    // tagged to that folder/space (the core) PLUS anything directly linked to one of them
+    // (so a space's brain = ITS meetings + the Jira/GitHub/dev records they connect to).
+    // Folder takes precedence; then space; else the whole-workspace aggregate.
+    const scopeCol = folder ? 'folder_id' : 'space_id';   // fixed allow-list, never user input
+    const scopeId = folder || space || null;
+    const items = scopeId
       ? await query<any>(
           `WITH core AS (
-             SELECT id FROM knowledge_item WHERE user_id=$1 AND workspace_id=$2 AND folder_id=$3
+             SELECT id FROM knowledge_item WHERE user_id=$1 AND workspace_id=$2 AND ${scopeCol}=$3
            ), nbr AS (
              SELECT DISTINCT (CASE WHEN e.src_id = c.id::text THEN e.dst_id ELSE e.src_id END) AS oid
                FROM brain_edge e JOIN core c ON (e.src_id = c.id::text OR e.dst_id = c.id::text)
@@ -1046,7 +1104,7 @@ async function handleBrain(method: string, segments: string[], userId: string, e
             WHERE user_id=$1 AND workspace_id=$2
               AND (id IN (SELECT id FROM core) OR id::text IN (SELECT oid FROM nbr))
             LIMIT 2000`,
-          [userId, ws, folder],
+          [userId, ws, scopeId],
         ).catch(() => [])
       : await query<any>(
           `SELECT id, source, type, title, source_id, links, status FROM knowledge_item
@@ -1189,7 +1247,16 @@ async function handleKnowledgeGraph(method: string, segments: string[], userId: 
   }
 
   if (method === 'GET' && !taskId) {
-    const rows = await query('SELECT * FROM knowledge_graph WHERE user_id=$1 ORDER BY created_at DESC', [userId]);
+    // W1: scope the knowledge graph to the active workspace (join task_history's
+    // workspace partition), so KG-driven features see only the active vault.
+    const kgWorkspaceId = await activeWorkspaceId(event, userId, getUserEmail());
+    const rows = await query(
+      `SELECT kg.* FROM knowledge_graph kg
+         JOIN task_history th ON th.id = kg.task_id
+        WHERE kg.user_id=$1 AND th.workspace_id=$2
+        ORDER BY kg.created_at DESC`,
+      [userId, kgWorkspaceId],
+    );
     return ok(rows);
   }
 
@@ -1224,6 +1291,10 @@ async function handleChat(method: string, userId: string, event: APIGatewayProxy
   if (method === 'POST') {
     const body = parseBody(event);
     const messages = Array.isArray(body) ? body : [body];
+    // W2: every chat message belongs to a workspace. An explicit workspace_id (the
+    // workspace chat surface) wins; otherwise the all-meetings chat is stamped with
+    // the ACTIVE workspace from the header — so chat history is per-vault.
+    const chatWorkspaceId = await activeWorkspaceId(event, userId, getUserEmail());
     const results: any[] = [];
     for (const m of messages) {
       const row = await queryOne(
@@ -1231,7 +1302,7 @@ async function handleChat(method: string, userId: string, event: APIGatewayProxy
          VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12) RETURNING *`,
         [userId, m.task_id || null, m.role, m.text, m.image || null, m.thread_id || null,
          JSON.stringify(m.citations || []), JSON.stringify(m.retrieval_meta || {}),
-         m.agent_status || null, JSON.stringify(m.agent_plan || []), m.workspace_id || null,
+         m.agent_status || null, JSON.stringify(m.agent_plan || []), m.workspace_id || chatWorkspaceId,
          m.trace ? JSON.stringify(m.trace) : null]
       );
       results.push(row);
@@ -1243,12 +1314,12 @@ async function handleChat(method: string, userId: string, event: APIGatewayProxy
     // Durable thread list derived from chat_history — so the chat history is
     // reliable even if the client's localStorage thread index is lost.
     if (qs.threads) {
-      // A workspace's chat threads are scoped to that workspace; the GLOBAL chat
-      // list excludes them (workspace_id IS NULL) so the two never mix.
-      const scope = qs.workspaceId
-        ? 'ch.workspace_id = $2'
-        : 'ch.workspace_id IS NULL';
-      const params = qs.workspaceId ? [userId, qs.workspaceId] : [userId];
+      // W2: chat threads are ALWAYS workspace-scoped. An explicit workspaceId (the
+      // workspace chat surface) wins; otherwise the all-meetings thread list is the
+      // ACTIVE workspace's threads (from the header).
+      const threadsWorkspaceId = qs.workspaceId || await activeWorkspaceId(event, userId, getUserEmail());
+      const scope = 'ch.workspace_id = $2';
+      const params = [userId, threadsWorkspaceId];
       const rows = await query(
         `SELECT ch.thread_id,
                 ch.task_id,
@@ -1537,12 +1608,24 @@ async function handleStorage(method: string, segments: string[], userId: string,
 // of history, the workspace membership index, the chat-thread list, and the
 // ledger. Collapses ~6 cold-start round-trips into a single Lambda invoke —
 // dramatically faster first paint on slow networks, and cheaper (fewer invokes).
-async function handleBootstrap(userId: string): Promise<APIGatewayProxyResult> {
+async function handleBootstrap(userId: string, event: APIGatewayProxyEvent): Promise<APIGatewayProxyResult> {
   const pageSize = 24;
   await ensureChatSchema(); // workspace_id column referenced below
+  // W0: guarantee a default workspace exists for this user and that every existing
+  // recording is partitioned into a workspace (idempotent + guarded).
+  const defaultWsId = await ensureWorkspacePartition(userId, getUserEmail());
+  // Spaces layer: turn the user's top-level folders into real SPACES (one-time) and
+  // guarantee a default "My notes" private space.
+  await migrateFoldersToSpacesOnce(userId, defaultWsId);
+  // Self-healing: every workspace has a default space and no note sits directly under
+  // a workspace (idempotent — catches users whose one-time migration already ran).
+  await reconcileSpaces(userId, defaultWsId);
+  // W1: the first page of history is scoped to the ACTIVE workspace (vault). The
+  // workspaces list below is still the FULL set so the switcher can show all vaults.
+  const bootWorkspaceId = await activeWorkspaceId(event, userId, getUserEmail());
   const [taskRows, taskTotal, workspaces, folders, taskWorkspaces, taskFolders, threads, ledger, userPlan] = await Promise.all([
-    query('SELECT id, created_at, filename, summary, status, duration, attendees FROM task_history WHERE user_id=$1 ORDER BY created_at DESC LIMIT $2', [userId, pageSize]),
-    queryCount('SELECT COUNT(*) FROM task_history WHERE user_id=$1', [userId]),
+    query('SELECT id, created_at, filename, summary, status, duration, attendees, space_id, folder_id FROM task_history WHERE user_id=$1 AND workspace_id=$2 ORDER BY created_at DESC LIMIT $3', [userId, bootWorkspaceId, pageSize]),
+    queryCount('SELECT COUNT(*) FROM task_history WHERE user_id=$1 AND workspace_id=$2', [userId, bootWorkspaceId]),
     query('SELECT * FROM workspaces WHERE user_id=$1 ORDER BY created_at ASC', [userId]),
     query('SELECT f.* FROM folders f JOIN workspaces w ON w.id=f.workspace_id WHERE w.user_id=$1 ORDER BY f.created_at ASC', [userId]),
     query('SELECT tw.task_id, tw.workspace_id FROM task_workspaces tw JOIN workspaces w ON w.id=tw.workspace_id WHERE w.user_id=$1', [userId]),
@@ -1555,11 +1638,11 @@ async function handleBootstrap(userId: string): Promise<APIGatewayProxyResult> {
               th.filename AS task_title
        FROM chat_history ch
        LEFT JOIN task_history th ON th.id = ch.task_id
-       WHERE ch.user_id=$1 AND ch.workspace_id IS NULL AND ch.thread_id IS NOT NULL
+       WHERE ch.user_id=$1 AND ch.workspace_id=$2 AND ch.thread_id IS NOT NULL
        GROUP BY ch.thread_id, ch.task_id, th.filename
        ORDER BY MAX(ch.created_at) DESC
        LIMIT 200`,
-      [userId],
+      [userId, bootWorkspaceId],
     ),
     queryOne('SELECT * FROM user_ledger_state WHERE user_id=$1', [userId]),
     getUserPlan(userId, getUserEmail()),
@@ -1694,10 +1777,11 @@ async function handleWorkspaces(method: string, segments: string[], userId: stri
   if (method === 'POST' && sub === 'folders') {
     const body = parseBody(event);
     if (!body.name?.trim()) return badRequest('name is required');
+    await ensureWorkspacePartitionSchema(); // parent_id column (space→folder nesting)
     const row = await queryOne(
       `INSERT INTO folders
-         (workspace_id, user_id, name, emoji, color, description, icon_type, icon_name, favorite)
-       VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9) RETURNING *`,
+         (workspace_id, user_id, name, emoji, color, description, icon_type, icon_name, favorite, parent_id)
+       VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10) RETURNING *`,
       [
         workspaceId, userId, body.name.trim(),
         body.emoji ?? null,
@@ -1706,6 +1790,8 @@ async function handleWorkspaces(method: string, segments: string[], userId: stri
         body.icon_type ?? body.iconType ?? 'icon',
         body.icon_name ?? body.iconName ?? null,
         body.favorite === true,
+        // A child folder's parent must belong to THIS workspace (vault boundary).
+        body.parent_id ?? null,
       ]
     );
     return created(row);
@@ -1784,6 +1870,132 @@ async function handleWorkspaces(method: string, segments: string[], userId: stri
 
 // ─── FOLDERS ─────────────────────────────────────────────────────────────────
 
+// ─── SPACES ──────────────────────────────────────────────────────────────────
+// A space is a membership-scoped grouping inside the active workspace; it contains
+// folders. Every op is scoped to the caller (vault boundary).
+async function handleSpaces(method: string, segments: string[], userId: string, event: APIGatewayProxyEvent): Promise<APIGatewayProxyResult> {
+  await ensureSpacesSchema();
+  // Path is `spaces/{id}/{sub}/{subId}` with NO leading empty segment (segments[0]
+  // is the resource), matching every other handler (taskId = segments[1]).
+  const spaceId = segments[1];
+  const sub = segments[2];
+  const workspaceId = await activeWorkspaceId(event, userId, getUserEmail());
+
+  // List the active workspace's spaces with folder + member counts.
+  if (method === 'GET' && !spaceId) {
+    const spaces = await query<any>(
+      'SELECT * FROM spaces WHERE workspace_id=$1 AND user_id=$2 ORDER BY is_default DESC, created_at ASC',
+      [workspaceId, userId],
+    );
+    const out = [];
+    for (const s of spaces) {
+      const folder_count = await queryCount('SELECT COUNT(*) FROM folders WHERE space_id=$1', [s.id]);
+      const member_count = await queryCount('SELECT COUNT(*) FROM space_members WHERE space_id=$1', [s.id]);
+      out.push({ ...s, folder_count, member_count });
+    }
+    return ok(out);
+  }
+
+  // Create a space (optionally with members) in the active workspace.
+  if (method === 'POST' && !spaceId) {
+    const body = parseBody(event);
+    if (!body.name?.trim()) return badRequest('name is required');
+    const row = await queryOne<any>(
+      'INSERT INTO spaces (workspace_id, user_id, name, emoji, color, shared_all) VALUES ($1,$2,$3,$4,$5,$6) RETURNING *',
+      [workspaceId, userId, body.name.trim(), body.emoji ?? null, body.color ?? null, body.shared_all === true],
+    );
+    if (Array.isArray(body.members)) {
+      for (const m of body.members) {
+        if (typeof m === 'string' && m.trim()) {
+          await query('INSERT INTO space_members (space_id, email) VALUES ($1,$2) ON CONFLICT DO NOTHING', [row!.id, m.trim().toLowerCase()]);
+        }
+      }
+    }
+    return created(row);
+  }
+
+  // Ownership guard for space-specific operations (vault boundary).
+  const space = spaceId ? await queryOne<any>('SELECT * FROM spaces WHERE id=$1 AND user_id=$2', [spaceId, userId]) : null;
+  if (spaceId && !space) return notFound();
+
+  if (method === 'GET' && spaceId && sub === 'folders') {
+    return ok(await query('SELECT * FROM folders WHERE space_id=$1 ORDER BY created_at ASC', [spaceId]));
+  }
+
+  // Meetings filed directly in this space (user-scoped defense-in-depth).
+  if (method === 'GET' && spaceId && sub === 'meetings') {
+    return ok(await query(
+      'SELECT id, filename, created_at, duration, status, summary FROM task_history WHERE user_id=$1 AND space_id=$2 ORDER BY created_at DESC',
+      [userId, spaceId],
+    ));
+  }
+
+  // Move a note INTO this space (optionally into a folder within it). Stamps the
+  // note's space_id/folder_id; user-scoped so you can only move your own notes.
+  if (method === 'POST' && spaceId && sub === 'meetings') {
+    const body = parseBody(event);
+    if (!body.task_id) return badRequest('task_id is required');
+    // Stamp the space's PARENT workspace too — note lists (history, brain, all-notes
+    // chat) partition by workspace_id, so a note moved into a space in another
+    // workspace would otherwise be stranded in its old workspace partition.
+    await query(
+      'UPDATE task_history SET workspace_id=$1, space_id=$2, folder_id=$3 WHERE id=$4 AND user_id=$5',
+      [space.workspace_id, spaceId, body.folder_id ?? null, body.task_id, userId],
+    );
+    return ok({ ok: true });
+  }
+
+  if (method === 'POST' && spaceId && sub === 'folders') {
+    const body = parseBody(event);
+    if (!body.name?.trim()) return badRequest('name is required');
+    const row = await queryOne(
+      `INSERT INTO folders (workspace_id, user_id, name, emoji, color, description, icon_type, icon_name, favorite, space_id)
+       VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10) RETURNING *`,
+      [space.workspace_id, userId, body.name.trim(), body.emoji ?? null, body.color ?? null, body.description ?? '',
+       body.icon_type ?? body.iconType ?? 'icon', body.icon_name ?? body.iconName ?? null, body.favorite === true, spaceId],
+    );
+    return created(row);
+  }
+
+  if (method === 'GET' && spaceId && sub === 'members') {
+    return ok(await query('SELECT * FROM space_members WHERE space_id=$1 ORDER BY invited_at ASC', [spaceId]));
+  }
+
+  if (method === 'POST' && spaceId && sub === 'members') {
+    const body = parseBody(event);
+    if (!body.email?.trim()) return badRequest('email is required');
+    await query('INSERT INTO space_members (space_id, email, role) VALUES ($1,$2,$3) ON CONFLICT (space_id,email) DO NOTHING',
+      [spaceId, body.email.trim().toLowerCase(), body.role || 'viewer']);
+    return ok({ ok: true });
+  }
+
+  if (method === 'DELETE' && spaceId && sub === 'members') {
+    const email = decodeURIComponent(segments[3] || '');
+    await query('DELETE FROM space_members WHERE space_id=$1 AND lower(email)=lower($2)', [spaceId, email]);
+    return noContent();
+  }
+
+  if (method === 'PUT' && spaceId && !sub) {
+    const body = parseBody(event);
+    const row = await queryOne(
+      'UPDATE spaces SET name=COALESCE($1,name), emoji=COALESCE($2,emoji), color=COALESCE($3,color), updated_at=now() WHERE id=$4 RETURNING *',
+      [body.name?.trim() || null, body.emoji || null, body.color || null, spaceId],
+    );
+    return ok(row);
+  }
+
+  if (method === 'DELETE' && spaceId && !sub) {
+    if (space.is_default) return badRequest('The default space cannot be deleted');
+    // Orphan the space's folders + meetings back to the workspace root (never delete data).
+    await query('UPDATE folders SET space_id=NULL WHERE space_id=$1', [spaceId]);
+    await query('UPDATE task_history SET space_id=NULL, folder_id=NULL WHERE space_id=$1 AND user_id=$2', [spaceId, userId]);
+    await query('DELETE FROM spaces WHERE id=$1', [spaceId]); // cascades space_members
+    return noContent();
+  }
+
+  return notFound();
+}
+
 async function handleFolders(method: string, segments: string[], userId: string, event: APIGatewayProxyEvent): Promise<APIGatewayProxyResult> {
   const folderId = segments[1];
   const sub = segments[2];
@@ -1812,8 +2024,9 @@ async function handleFolders(method: string, segments: string[], userId: string,
          description = COALESCE($4,description),
          icon_type   = COALESCE($5,icon_type),
          icon_name   = COALESCE($6,icon_name),
-         favorite    = COALESCE($7,favorite)
-       WHERE id=$8 RETURNING *`,
+         favorite    = COALESCE($7,favorite),
+         space_id    = COALESCE($8,space_id)
+       WHERE id=$9 RETURNING *`,
       [
         body.name?.trim() || null,
         body.emoji ?? null,
@@ -1822,6 +2035,7 @@ async function handleFolders(method: string, segments: string[], userId: string,
         body.icon_type ?? body.iconType ?? null,
         body.icon_name ?? body.iconName ?? null,
         typeof body.favorite === 'boolean' ? body.favorite : null,
+        body.space_id ?? null, // move this folder into a space
         folderId,
       ]
     );
@@ -1829,12 +2043,17 @@ async function handleFolders(method: string, segments: string[], userId: string,
   }
 
   if (method === 'GET' && sub === 'meetings') {
-    // SECURITY: user-scope the JOIN so a foreign task_id placed in this folder
-    // can never be read back.
+    // Canonical filing is task_history.folder_id; also union the legacy task_folders
+    // M:N so notes filed under the old model still surface. User-scoped throughout so
+    // a foreign task_id placed in this folder can never be read back.
     const rows = await query(
       `SELECT th.id, th.filename, th.created_at, th.duration, th.status, th.summary
-       FROM task_folders tf JOIN task_history th ON th.id=tf.task_id
-       WHERE tf.folder_id=$1 AND th.user_id=$2 ORDER BY tf.added_at DESC`,
+       FROM task_history th
+       WHERE th.user_id=$2 AND (
+         th.folder_id=$1
+         OR th.id IN (SELECT task_id FROM task_folders WHERE folder_id=$1)
+       )
+       ORDER BY th.created_at DESC`,
       [folderId, userId]
     );
     return ok(rows);
@@ -1843,7 +2062,14 @@ async function handleFolders(method: string, segments: string[], userId: string,
   if (method === 'POST' && sub === 'meetings') {
     const body = parseBody(event);
     if (!body.task_id) return badRequest('task_id is required');
-    // SECURITY: only insert if the caller OWNS the task being added.
+    // SECURITY: only act if the caller OWNS the task being added. Stamp the canonical
+    // task_history.folder_id (+ the folder's space) so the note shows in the folder
+    // and space views; keep the legacy task_folders row for back-compat.
+    await query(
+      `UPDATE task_history SET folder_id=$2, space_id=COALESCE($3, space_id)
+       WHERE id=$1 AND user_id=$4`,
+      [body.task_id, folderId, (folder as any).space_id ?? null, userId]
+    );
     await query(
       `INSERT INTO task_folders (task_id, folder_id)
        SELECT $1,$2 WHERE EXISTS (SELECT 1 FROM task_history WHERE id=$1 AND user_id=$3)
@@ -1854,6 +2080,8 @@ async function handleFolders(method: string, segments: string[], userId: string,
   }
 
   if (method === 'DELETE' && sub === 'meetings' && subId) {
+    // Unfile from both the canonical column and the legacy M:N (user-scoped).
+    await query('UPDATE task_history SET folder_id=NULL WHERE id=$1 AND user_id=$2', [subId, userId]);
     await query('DELETE FROM task_folders WHERE task_id=$1 AND folder_id=$2', [subId, folderId]);
     return noContent();
   }
