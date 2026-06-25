@@ -291,7 +291,7 @@ export default function CreateFolderModal({ workspaces, defaultWorkspaceId, onCl
                   {isPrivateDest ? (
                     <><span className="font-medium text-app-fg">Private</span> Only people added to the folder can view.</>
                   ) : (
-                    <>Workspace — visible to all members.</>
+                    <>Shared space — visible to members.</>
                   )}
                 </div>
               </div>

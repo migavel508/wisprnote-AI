@@ -31,6 +31,7 @@ import { CHAT_MODELS, getChatModelId, setChatModelId, getChatModel, type ChatMod
 import Markdown from 'react-markdown';
 import remarkGfm from 'remark-gfm';
 import { assistantMarkdownComponents } from '../components/chatMarkdown';
+import MessageActions from '../components/MessageActions';
 import { ChatPageSkeleton } from '../components/Skeleton';
 import { formatDisplayName } from '../lib/displayName';
 
@@ -41,14 +42,32 @@ interface AgentStep {
   status: 'pending' | 'running' | 'done' | 'error';
   detail?: string;
   type?: 'search-tool' | 'plan';
-  searchKind?: 'notes' | 'people';
+  searchKind?: 'notes' | 'people' | 'analyze' | 'read';
   searchQuery?: string;
   searchResults?: Array<{ meetingId: string; meetingTitle: string; score: number }>;
   planSteps?: string[];
+  subSteps?: Array<{ id: string; label: string; status: 'pending' | 'running' | 'done' | 'error'; detail?: string }>;
 }
 
 // ─── Step icon ────────────────────────────────────────────────────────────────
-function StepIcon({ status, type }: { status: AgentStep['status']; type?: string }) {
+function StepIcon({ status, type, searchKind }: { status: AgentStep['status']; type?: string; searchKind?: string }) {
+  // Deep-analysis SUB-AGENT spawn — distinct brand-green node-graph icon so it
+  // never reads as a plain "search". Pulses while the sub-agent is fanning out.
+  if (searchKind === 'analyze') {
+    return (
+      <span className="relative flex-shrink-0 w-[18px] h-[18px] flex items-center justify-center">
+        <Network className={`w-[14px] h-[14px] text-[#819C1F] ${status === 'running' ? 'animate-pulse' : ''}`} strokeWidth={2} />
+      </span>
+    );
+  }
+  // read_meeting_notes — a Read, not a Search: distinct document icon.
+  if (searchKind === 'read') {
+    return (
+      <span className="relative flex-shrink-0 w-[18px] h-[18px] flex items-center justify-center">
+        <FileText className={`w-[13px] h-[13px] text-zinc-500 dark:text-zinc-400 ${status === 'running' ? 'animate-pulse' : ''}`} />
+      </span>
+    );
+  }
   if (status === 'running') {
     return (
       <span className="relative flex-shrink-0 w-[18px] h-[18px] flex items-center justify-center">
@@ -146,24 +165,30 @@ function ThoughtProcess({ steps, isLive }: { steps: AgentStep[]; isLive: boolean
 
                     {/* Icon */}
                     <div className="mt-[3px]">
-                      <StepIcon status={step.status} type={step.type} />
+                      <StepIcon status={step.status} type={step.type} searchKind={step.searchKind} />
                     </div>
 
                     {/* Content */}
                     <div className="flex-1 min-w-0 pb-3">
                       <span className={`text-[13px] leading-snug ${
-                        step.type === 'plan'
-                          ? 'text-zinc-700 dark:text-zinc-200 font-medium'
-                          : step.status === 'running'
-                            ? 'text-zinc-800 dark:text-zinc-200 font-medium'
-                            : 'text-zinc-500 dark:text-zinc-400'
+                        step.searchKind === 'analyze'
+                          ? 'text-[#6f871a] dark:text-[#acc36a] font-semibold'
+                          : step.type === 'plan'
+                            ? 'text-zinc-700 dark:text-zinc-200 font-medium'
+                            : step.status === 'running'
+                              ? 'text-zinc-800 dark:text-zinc-200 font-medium'
+                              : 'text-zinc-500 dark:text-zinc-400'
                       }`}>
                         {step.type === 'plan'
                           ? 'Planned approach'
                           : step.type === 'search-tool'
-                            ? (step.searchKind === 'people'
-                                ? (step.status === 'running' ? 'Searching people' : 'Searched people')
-                                : (step.status === 'running' ? 'Searching notes' : 'Searched notes'))
+                            ? (step.searchKind === 'analyze'
+                                ? (step.status === 'running' ? 'Spawned deep-analysis agent' : 'Deep-analysis agent')
+                                : step.searchKind === 'read'
+                                  ? (step.label || (step.status === 'running' ? 'Reading meeting' : 'Read meeting'))
+                                  : step.searchKind === 'people'
+                                    ? (step.status === 'running' ? 'Searching people' : 'Searched people')
+                                    : (step.status === 'running' ? 'Searching notes' : 'Searched notes'))
                             : step.label}
                         {step.type === 'search-tool' && step.searchQuery && (
                           <span className="ml-1.5 text-zinc-400 dark:text-zinc-500 font-normal">
@@ -171,6 +196,25 @@ function ThoughtProcess({ steps, isLive }: { steps: AgentStep[]; isLive: boolean
                           </span>
                         )}
                       </span>
+
+                      {/* Sub-agent spawn — nested child steps streamed live: each
+                          meeting read in full, then the synthesis. */}
+                      {(step.subSteps?.length ?? 0) > 0 && (
+                        <div className="mt-1.5 ml-[1px] pl-3 border-l border-[#819C1F]/30 dark:border-[#819C1F]/40 space-y-1 max-h-[220px] overflow-y-auto">
+                          {step.subSteps!.map((ss) => (
+                            <div key={ss.id} className="flex items-center gap-1.5 text-[11.5px] leading-snug text-zinc-500 dark:text-zinc-400">
+                              {ss.status === 'done'
+                                ? <Check className="w-3 h-3 text-[#819C1F] flex-shrink-0" strokeWidth={2.6} />
+                                : <Loader2 className="w-3 h-3 animate-spin text-zinc-400 flex-shrink-0" />}
+                              <span className="truncate">
+                                {ss.id.startsWith('analyze-read-') ? <span className="text-zinc-400 dark:text-zinc-500">Read </span> : null}
+                                {ss.label}
+                              </span>
+                              {ss.detail && <span className="text-zinc-400/70 dark:text-zinc-500/70 flex-shrink-0">· {ss.detail}</span>}
+                            </div>
+                          ))}
+                        </div>
+                      )}
 
                       {/* Plan sub-row: the goal + the ordered steps the agent will take */}
                       {step.type === 'plan' && (step.planSteps?.length ?? 0) > 0 && (
@@ -218,6 +262,24 @@ function ThoughtProcess({ steps, isLive }: { steps: AgentStep[]; isLive: boolean
                   </motion.div>
                 );
               })}
+
+              {/* Live finalize row — fills the gap between the last step completing and
+                  the answer rendering (the model is still composing the response). Without
+                  this the steps look finished while nothing happens, which reads as frozen. */}
+              {isLive && steps.length > 0 && steps.every(s => s.status === 'done') && (
+                <motion.div
+                  initial={{ opacity: 0 }}
+                  animate={{ opacity: 1 }}
+                  className="flex gap-2.5"
+                >
+                  <div className="mt-[3px]">
+                    <span className="flex-shrink-0 w-[18px] h-[18px] flex items-center justify-center">
+                      <Loader2 className="w-[13px] h-[13px] animate-spin text-[#819C1F]" />
+                    </span>
+                  </div>
+                  <span className="text-[13px] text-zinc-600 dark:text-zinc-300 font-medium pb-2">Preparing your response…</span>
+                </motion.div>
+              )}
 
               {/* Done row */}
               {!isLive && steps.length > 0 && (
@@ -1017,28 +1079,8 @@ export default function ChatPage({
                     <img src={msg.image} alt="Visualization" className="w-full h-auto" />
                   </div>
                 )}
-                {msg.role === 'model' && msg.retrievalMeta && (
-                  <div className="mt-2 ml-10 text-[10px] text-zinc-500 dark:text-zinc-500">
-                    Scope: {msg.retrievalMeta.scope === 'many' ? 'All meetings' : 'This meeting'}
-                    {typeof msg.retrievalMeta.confidence === 'number'
-                      ? ` • Confidence ${Math.round(msg.retrievalMeta.confidence * 100)}%`
-                      : ''}
-                    {typeof msg.retrievalMeta.tokenUsageTotal === 'number' && msg.retrievalMeta.tokenUsageTotal > 0
-                      ? ` • Context ${msg.retrievalMeta.tokenUsageTotal} tok`
-                      : ''}
-                    {typeof msg.retrievalMeta.coveredMeetingsCount === 'number' &&
-                    typeof msg.retrievalMeta.totalMeetingsCount === 'number'
-                      ? ` • Coverage ${msg.retrievalMeta.coveredMeetingsCount}/${msg.retrievalMeta.totalMeetingsCount}`
-                      : ''}
-                  </div>
-                )}
-                {msg.role === 'model' && !msg.image && !isGeneratingImage && (
-                  <div className="mt-3 ml-10">
-                    <button onClick={() => handleVisualize(msg.text.substring(0, 100))}
-                      className="flex items-center gap-1.5 text-[12px] text-zinc-600 dark:text-zinc-300 hover:text-zinc-900 dark:hover:text-white transition-colors bg-zinc-100 dark:bg-app-raised hover:bg-zinc-200 dark:hover:bg-app-chip px-3 py-1.5 rounded-lg">
-                      <ImageIcon className="w-3 h-3" /> Visualize
-                    </button>
-                  </div>
+                {msg.role === 'model' && !!msg.text?.trim() && (
+                  <MessageActions text={msg.text} className="mt-2 ml-10" />
                 )}
               </div>
             </motion.div>

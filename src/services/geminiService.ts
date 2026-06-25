@@ -1572,7 +1572,7 @@ export interface AgentSearchStep {
   query: string;
   filters?: { recent_days?: number };
   status: 'running' | 'done';
-  kind?: 'notes' | 'contacts';
+  kind?: 'notes' | 'contacts' | 'analyze' | 'read';
   results?: Array<{ meetingId: string; meetingTitle: string; score: number; date?: string }>;
   contacts?: Array<{
     name: string;
@@ -1603,6 +1603,41 @@ export interface AgentChatCallbacks {
     meetings: NonNullable<AgentSearchStep['results']>;
     contextText: string;
   }>;
+  /** Read ONE meeting's FULL notes + transcript on demand (Read-style tool). Used
+   *  for per-meeting extraction/recap so the agent sees complete content, not a
+   *  relevance-filtered snippet. */
+  readNotesFn?: (meetingId: string) => Promise<{ contextText: string; title?: string }>;
+  /** Spawn a deep-analysis SUB-AGENT (Task-style fan-out). The sub-agent reads
+   *  EACH meeting in scope IN FULL via a programmatic map-reduce and returns a
+   *  single synthesized result — so the parent agent delegates broad per-meeting
+   *  work without pulling every transcript into its own context window. Scope by
+   *  explicit `meetingIds`, else `recentDays`, else all meetings. */
+  analyzeMeetingsFn?: (
+    instructions: string,
+    opts: { meetingIds?: string[]; recentDays?: number },
+  ) => Promise<{ contextText: string; results: AgentSearchStep['results'] }>;
+}
+
+// Parse the analyze_meetings tool args uniformly across providers. Falls back to
+// the user's query as the per-meeting instruction when the model omits it.
+function parseAnalyzeArgs(
+  args: any,
+  fallbackInstructions: string,
+): { instructions: string; meetingIds?: string[]; recentDays?: number } {
+  const instructions = typeof args?.instructions === 'string' && args.instructions.trim()
+    ? args.instructions
+    : fallbackInstructions;
+  const ids = Array.isArray(args?.meeting_ids)
+    ? args.meeting_ids.filter((x: any) => typeof x === 'string')
+    : undefined;
+  const recentDays = typeof args?.recent_days === 'number' ? args.recent_days : undefined;
+  return { instructions, meetingIds: ids && ids.length ? ids : undefined, recentDays };
+}
+
+function analyzeLabel(meetingIds?: string[]): string {
+  return meetingIds?.length
+    ? `Analyzing ${meetingIds.length} meeting${meetingIds.length !== 1 ? 's' : ''} in depth`
+    : 'Analyzing meetings in depth';
 }
 
 function scoreKeywordMatch(query: string, text: string): number {
@@ -1717,16 +1752,28 @@ export async function agentChatAllMeetings(
   const weekStartLabel = weekStart.toLocaleDateString('en-US', { month: 'short', day: 'numeric' });
   const todayLabel = now.toLocaleDateString('en-US', { month: 'short', day: 'numeric' });
 
-  const meetingIndex = meetings
+  // SCALE: never enumerate the whole catalogue into the prompt — at thousands of
+  // meetings that alone overflows the context window. Show only the most-recent
+  // slice as orientation; everything else is reached via the search/read/analyze
+  // tools (retrieve, don't enumerate). The disclosure tells the model the rest
+  // exists and how to get to it.
+  const MEETING_INDEX_LIMIT = 40;
+  const sortedMeetings = meetings
     .slice()
-    .sort((a, b) => (b.createdAt ?? '').localeCompare(a.createdAt ?? ''))
+    .sort((a, b) => (b.createdAt ?? '').localeCompare(a.createdAt ?? ''));
+  const indexShown = sortedMeetings.slice(0, MEETING_INDEX_LIMIT);
+  const indexHidden = sortedMeetings.length - indexShown.length;
+  const meetingIndex = indexShown
     .map((m, i) => {
       const date = m.createdAt
         ? new Date(m.createdAt).toLocaleDateString('en-US', { weekday: 'short', month: 'short', day: 'numeric', year: 'numeric' })
         : 'unknown date';
-      return `${i + 1}. "${m.title}" (${date})`;
+      return `${i + 1}. "${m.title}" (${date}) [task_id: ${m.meetingId}]`;
     })
-    .join('\n');
+    .join('\n')
+    + (indexHidden > 0
+        ? `\n…and ${indexHidden} older meeting${indexHidden !== 1 ? 's' : ''} NOT listed here. This is only the ${indexShown.length} most recent — to reach older meetings, use search_notes (by topic/person, or empty query + recent_days for a window) or analyze_meetings. Do NOT assume the user only has ${indexShown.length} meetings.`
+        : '');
 
   let systemInstruction = `Today's date: ${today}
 Current week: ${weekStartLabel} – ${todayLabel} (Monday through today)
@@ -1745,6 +1792,30 @@ How to use the search_notes tool:
 - limit: ONLY applies to topic/keyword searches (non-empty query); it caps how many semantically-matching meetings come back (1–10). It does NOT cap empty-query date-range listings — those always return everything in the window. When a topic could span multiple meetings, pass a higher limit (8–10).
 - search_notes uses Turbopuffer semantic similarity (ANN + BM25 hybrid) over transcript chunks, so it surfaces meetings that discuss the topic even when the wording differs from the query (e.g. "obsidian changes" finds meetings discussing "migrating notes into the vault" or "Granola export"). Always pick the higher limit when the question is open-ended like "what changes do I need to make on X" — the answer likely spans several meetings.
 - You may call search_notes multiple times: e.g. one empty-query date-range call to list all meetings, then targeted follow-up calls with specific names or topics.
+
+How to use the read_meeting_notes tool (READ a single meeting IN FULL):
+- read_meeting_notes(meeting_id) returns the COMPLETE notes + transcript of ONE meeting — not a relevance-filtered snippet. The meeting_id is the task_id shown in the meeting index and in search_notes results.
+- For PER-MEETING EXTRACTION tasks — listing my action items / to-dos, weekly recaps, "what did I commit to", coaching reviews, anything that must cover every meeting — do NOT answer from a single search_notes call. Its snippets are relevance-filtered and WILL MISS commitments phrased as "I'll…", "let me handle…", "I'll look into…". Instead:
+  1. Call search_notes with an EMPTY query + the right recent_days to LIST the meetings in scope.
+  2. Then call read_meeting_notes for EACH meeting in scope — you may issue many read_meeting_notes calls in a single turn (fan out) — and extract from each meeting's FULL notes.
+  3. Only write "No action items found" / "No notes generated" for a meeting AFTER you have actually read it with read_meeting_notes and confirmed it has none.
+- This read-each-meeting approach is REQUIRED for completeness: never report a meeting as empty based only on a search snippet.
+
+MANDATORY for extraction/"list across meetings" tasks: For ANY request to list action items / to-dos / commitments / follow-ups, write a recap, or otherwise gather items ACROSS multiple meetings, you MUST call analyze_meetings. Do NOT answer such a request from a search_notes listing — the listing only hydrates a SUBSET of meetings, so its content is partial and WILL miss commitments and entire meetings. Answering an extraction/recap task without analyze_meetings (or, for one specific meeting, read_meeting_notes) is INCORRECT. Think first, then call the tool, then write the answer from the tool's result — never produce the answer before the tool call.
+
+How to use the analyze_meetings tool (SPAWN a deep-analysis sub-agent — preferred for BROAD per-meeting work):
+- analyze_meetings(instructions, [recent_days | meeting_ids]) spawns a sub-agent that reads EACH meeting in scope IN FULL and returns ONE synthesized result. Use it INSTEAD of fanning out many read_meeting_notes calls yourself whenever the task spans MANY meetings — extracting all action items / to-dos across a week or month, weekly recaps, coaching reviews, "what did everyone commit to", surfacing themes/blind-spots/risks across the history.
+- Pass clear instructions describing exactly what to extract or analyze per meeting (the sub-agent applies them to every meeting independently). The sub-agent reads each meeting in full, so you do NOT need to call read_meeting_notes for those meetings afterwards.
+- SCOPE IT TO MATCH THE TASK — this is critical for completeness:
+  • If the user names a time window ("this week", "last month", "since Monday"), pass recent_days for exactly that window.
+  • If the user says "all / every / everything / across my meetings" with NO time window, OMIT recent_days AND omit meeting_ids — that makes the sub-agent cover EVERY meeting, not just recent ones. Do not silently restrict a global request to the last 30 days.
+  • Pass meeting_ids only when you already have a specific shortlist of ids to analyze.
+- Call analyze_meetings AT MOST ONCE per query. Spawn it ONLY for genuinely BROAD cross-meeting work (extract action items / recaps / coaching / themes across many meetings). For a SINGLE fact or ONE specific meeting, do NOT spawn — use search_notes or read_meeting_notes instead. Spawning a sub-agent for a simple lookup is wasteful.
+- The returned synthesis is your evidence — answer directly from it; do not re-search the same scope. If it carries a COVERAGE note saying some meetings were not covered, relay that to the user and offer to continue.
+
+CRITICAL tool hygiene (do NOT waste tool calls):
+- search_notes is for TOPIC / PERSON / KEYWORD text only. NEVER pass a task_id / meeting id (e.g. a UUID like "ec5ddb12-…") as the search_notes query — that is not a keyword and returns nothing. To pull up a meeting by its id, use read_meeting_notes(meeting_id), not search_notes.
+- After analyze_meetings or read_meeting_notes returns content, that content IS your evidence. Do NOT then call search_notes for the same meetings/ids to "verify" them — just write the answer. Issuing extra searches after you already have the full content is wrong and wastes the user's time.
 
 How to use the search_contacts tool (this is the AUTHORITATIVE tool for person queries):
 - query: a person's name, email fragment, role, or company.
@@ -1815,6 +1886,43 @@ How to answer:
           required: ['query'],
         },
       },
+      {
+        name: 'read_meeting_notes',
+        description: 'Read ONE meeting IN FULL by its task_id — returns the COMPLETE notes + transcript, not a snippet. REQUIRED for per-meeting extraction (action items / to-dos / recaps / coaching): after listing meetings, call this for EACH meeting in scope (fan out many calls in one turn) and extract from the full content. Only report a meeting as empty after reading it here.',
+        parameters: {
+          type: Type.OBJECT,
+          properties: {
+            meeting_id: {
+              type: Type.STRING,
+              description: 'The task_id of the meeting (from the meeting index or search_notes results).',
+            },
+          },
+          required: ['meeting_id'],
+        },
+      },
+      {
+        name: 'analyze_meetings',
+        description: 'Spawn a deep-analysis SUB-AGENT that reads EACH meeting in scope IN FULL and returns ONE synthesized result. PREFER this over many read_meeting_notes calls for BROAD per-meeting work spanning many meetings (action items across a week/month, weekly recaps, coaching reviews, themes/blind-spots). Call AT MOST ONCE per query.',
+        parameters: {
+          type: Type.OBJECT,
+          properties: {
+            instructions: {
+              type: Type.STRING,
+              description: 'What to extract or analyze per meeting (applied to every meeting in scope independently).',
+            },
+            recent_days: {
+              type: Type.INTEGER,
+              description: 'Scope by recency: 7 = this week, 30 = last month. Use this OR meeting_ids.',
+            },
+            meeting_ids: {
+              type: Type.ARRAY,
+              items: { type: Type.STRING },
+              description: 'Explicit list of task_ids to analyze. Use this OR recent_days.',
+            },
+          },
+          required: ['instructions'],
+        },
+      },
     ],
   };
 
@@ -1854,7 +1962,11 @@ How to answer:
   const searchOpts = { dateRange: dateScope, offTrack: wantsOffTrack };
 
   const recentHistory = trimHistoryToTokenBudget(history, 1200);
-  const MAX_STEPS = 5;
+  // Turn budget for the agentic loop. With analyze_meetings doing broad work in a
+  // single spawn, most complex tasks finish in 2-3 turns; the extra headroom (→10)
+  // covers: list → spawn analyze_meetings → (a targeted read or two) → synthesize,
+  // without being cut off. The sub-agent — not extra parent turns — carries scale.
+  const MAX_STEPS = 10;
   let callIndex = 0;
 
   // Gemini drives the agentic tool-calling retrieval loop (the search engine).
@@ -1918,6 +2030,30 @@ ${evidenceCtx}
           required: ['query'],
         },
       },
+      {
+        name: 'read_meeting_notes',
+        description: 'Read ONE meeting IN FULL by its task_id — returns the COMPLETE notes + transcript, not a snippet. REQUIRED for per-meeting extraction (action items / to-dos / recaps / coaching): after listing meetings, call this for EACH meeting in scope (fan out many calls in one turn) and extract from the full content. Only report a meeting as empty after reading it here.',
+        input_schema: {
+          type: 'object',
+          properties: {
+            meeting_id: { type: 'string', description: 'The task_id of the meeting (from the meeting index or search_notes results).' },
+          },
+          required: ['meeting_id'],
+        },
+      },
+      {
+        name: 'analyze_meetings',
+        description: 'Spawn a deep-analysis SUB-AGENT that reads EACH meeting in scope IN FULL and returns ONE synthesized result. PREFER this over many read_meeting_notes calls for BROAD per-meeting work spanning many meetings (action items across a week/month, weekly recaps, coaching reviews, themes/blind-spots). Call AT MOST ONCE per query.',
+        input_schema: {
+          type: 'object',
+          properties: {
+            instructions: { type: 'string', description: 'What to extract or analyze per meeting (applied to every meeting in scope independently).' },
+            recent_days: { type: 'integer', description: 'Scope by recency: 7 = this week, 30 = last month. Use this OR meeting_ids.' },
+            meeting_ids: { type: 'array', items: { type: 'string' }, description: 'Explicit list of task_ids to analyze. Use this OR recent_days.' },
+          },
+          required: ['instructions'],
+        },
+      },
     ];
 
     const messages: any[] = recentHistory
@@ -1948,6 +2084,27 @@ ${evidenceCtx}
       } catch (e) {
         log.warn('claude_agent_contacts_fallback', { error: e instanceof Error ? e : undefined });
         return { contacts: [], meetings: [], contextText: 'Contacts lookup unavailable.' };
+      }
+    };
+    const runReadNotes = async (id: string): Promise<{ contextText: string; title?: string }> => {
+      try {
+        return callbacks.readNotesFn
+          ? await callbacks.readNotesFn(id)
+          : { contextText: 'read_meeting_notes is unavailable in this context.' };
+      } catch {
+        return { contextText: 'Could not read that meeting.' };
+      }
+    };
+    const runAnalyze = async (
+      instructions: string,
+      opts: { meetingIds?: string[]; recentDays?: number },
+    ): Promise<{ contextText: string; results: AgentSearchStep['results'] }> => {
+      try {
+        return callbacks.analyzeMeetingsFn
+          ? await callbacks.analyzeMeetingsFn(instructions, opts)
+          : { contextText: 'analyze_meetings is unavailable in this context.', results: [] };
+      } catch {
+        return { contextText: 'The deep-analysis sub-agent failed.', results: [] };
       }
     };
 
@@ -2006,6 +2163,19 @@ ${evidenceCtx}
           callbacks.onToolCallStart({ callId, query, status: 'running', kind: 'contacts' });
           const { contacts, meetings: cm, contextText } = await runContacts(query, limit);
           callbacks.onToolCallDone({ callId, query, status: 'done', kind: 'contacts', contacts, results: cm });
+          toolResults.push({ type: 'tool_result', tool_use_id: tu.id, content: contextText });
+        } else if (tu.name === 'read_meeting_notes') {
+          const mid: string = typeof args.meeting_id === 'string' ? args.meeting_id : '';
+          callbacks.onToolCallStart({ callId, query: mid, status: 'running', kind: 'read' });
+          const { contextText, title } = await runReadNotes(mid);
+          callbacks.onToolCallDone({ callId, query: title || mid, status: 'done', kind: 'read', results: [] });
+          toolResults.push({ type: 'tool_result', tool_use_id: tu.id, content: contextText });
+        } else if (tu.name === 'analyze_meetings') {
+          const { instructions, meetingIds, recentDays } = parseAnalyzeArgs(args, userQuery);
+          const label = analyzeLabel(meetingIds);
+          callbacks.onToolCallStart({ callId, query: label, status: 'running', kind: 'analyze' });
+          const { contextText, results } = await runAnalyze(instructions, { meetingIds, recentDays });
+          callbacks.onToolCallDone({ callId, query: label, status: 'done', kind: 'analyze', results });
           toolResults.push({ type: 'tool_result', tool_use_id: tu.id, content: contextText });
         } else {
           const filters: { recent_days?: number } | undefined =
@@ -2103,6 +2273,36 @@ ${evidenceCtx}
           },
         },
       },
+      {
+        type: 'function',
+        function: {
+          name: 'read_meeting_notes',
+          description: 'Read ONE meeting IN FULL by its task_id — returns the COMPLETE notes + transcript, not a snippet. REQUIRED for per-meeting extraction (action items / to-dos / recaps / coaching): after listing meetings, call this for EACH meeting in scope and extract from the full content. Only report a meeting as empty after reading it here.',
+          parameters: {
+            type: 'object',
+            properties: {
+              meeting_id: { type: 'string', description: 'The task_id of the meeting (from the meeting index or search_notes results).' },
+            },
+            required: ['meeting_id'],
+          },
+        },
+      },
+      {
+        type: 'function',
+        function: {
+          name: 'analyze_meetings',
+          description: 'Spawn a deep-analysis SUB-AGENT that reads EACH meeting in scope IN FULL and returns ONE synthesized result. PREFER this over many read_meeting_notes calls for BROAD per-meeting work spanning many meetings (action items across a week/month, weekly recaps, coaching reviews, themes/blind-spots). Call AT MOST ONCE per query.',
+          parameters: {
+            type: 'object',
+            properties: {
+              instructions: { type: 'string', description: 'What to extract or analyze per meeting (applied to every meeting in scope independently).' },
+              recent_days: { type: 'integer', description: 'Scope by recency: 7 = this week, 30 = last month. Use this OR meeting_ids.' },
+              meeting_ids: { type: 'array', items: { type: 'string' }, description: 'Explicit list of task_ids to analyze. Use this OR recent_days.' },
+            },
+            required: ['instructions'],
+          },
+        },
+      },
     ];
 
     const messages: any[] = [
@@ -2190,6 +2390,31 @@ ${evidenceCtx}
 
           evidence.push(contextText);
         messages.push({ role: 'tool', tool_call_id: tc.id, content: contextText });
+          continue;
+        }
+
+        if (toolName === 'read_meeting_notes') {
+          const mid: string = typeof args.meeting_id === 'string' ? args.meeting_id : '';
+          callbacks.onToolCallStart({ callId, query: mid, status: 'running', kind: 'read' });
+          const { contextText: rc, title } = callbacks.readNotesFn
+            ? await callbacks.readNotesFn(mid)
+            : { contextText: 'read_meeting_notes is unavailable.', title: undefined };
+          callbacks.onToolCallDone({ callId, query: title || mid, status: 'done', kind: 'read', results: [] });
+          evidence.push(rc);
+          messages.push({ role: 'tool', tool_call_id: tc.id, content: rc });
+          continue;
+        }
+
+        if (toolName === 'analyze_meetings') {
+          const { instructions, meetingIds, recentDays } = parseAnalyzeArgs(args, userQuery);
+          const label = analyzeLabel(meetingIds);
+          callbacks.onToolCallStart({ callId, query: label, status: 'running', kind: 'analyze' });
+          const { contextText: ac, results } = callbacks.analyzeMeetingsFn
+            ? await callbacks.analyzeMeetingsFn(instructions, { meetingIds, recentDays })
+            : { contextText: 'analyze_meetings is unavailable.', results: [] };
+          callbacks.onToolCallDone({ callId, query: label, status: 'done', kind: 'analyze', results });
+          evidence.push(ac);
+          messages.push({ role: 'tool', tool_call_id: tc.id, content: ac });
           continue;
         }
 
@@ -2292,6 +2517,31 @@ ${evidenceCtx}
         continue;
       }
 
+      if (toolName === 'read_meeting_notes') {
+        const mid: string = typeof fc.args?.meeting_id === 'string' ? fc.args.meeting_id : '';
+        callbacks.onToolCallStart({ callId, query: mid, status: 'running', kind: 'read' });
+        const { contextText: rc, title } = callbacks.readNotesFn
+          ? await callbacks.readNotesFn(mid)
+          : { contextText: 'read_meeting_notes is unavailable.', title: undefined };
+        callbacks.onToolCallDone({ callId, query: title || mid, status: 'done', kind: 'read', results: [] });
+        evidence.push(rc);
+        toolResponseParts.push({ functionResponse: { name: fc.name, response: { content: rc } } });
+        continue;
+      }
+
+      if (toolName === 'analyze_meetings') {
+        const { instructions, meetingIds, recentDays } = parseAnalyzeArgs(fc.args, userQuery);
+        const label = analyzeLabel(meetingIds);
+        callbacks.onToolCallStart({ callId, query: label, status: 'running', kind: 'analyze' });
+        const { contextText: ac, results } = callbacks.analyzeMeetingsFn
+          ? await callbacks.analyzeMeetingsFn(instructions, { meetingIds, recentDays })
+          : { contextText: 'analyze_meetings is unavailable.', results: [] };
+        callbacks.onToolCallDone({ callId, query: label, status: 'done', kind: 'analyze', results });
+        evidence.push(ac);
+        toolResponseParts.push({ functionResponse: { name: fc.name, response: { content: ac } } });
+        continue;
+      }
+
       const rawFilters = fc.args?.filters;
       const filters: { recent_days?: number } | undefined =
         rawFilters && typeof rawFilters === 'object' && !Array.isArray(rawFilters)
@@ -2318,6 +2568,196 @@ ${evidenceCtx}
   }
 
   return await finalize('I was unable to find a definitive answer after searching the meeting notes.');
+  }
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Programmatic map-reduce extraction (P3+) — for "read every meeting and extract"
+// Gems over potentially huge histories.
+//
+// The agentic loop (agentChatAllMeetings) reads meetings on demand via a tool, but
+// every read result accumulates in ONE model context — which pressures the window
+// once the history is large. This path inverts that: it MAPs a focused, cheap
+// extraction call over each meeting independently (concurrency-capped), so the
+// parent only ever holds COMPACT per-meeting findings, then REDUCEs those findings
+// into the final answer. No raw transcript ever reaches the synthesis step, so the
+// context stays bounded no matter how many meetings are in scope.
+// ─────────────────────────────────────────────────────────────────────────────
+
+export interface ExtractMeetingRef {
+  meetingId: string;
+  title: string;
+  dateLabel?: string;   // human label, used for headings/grouping in the reduce
+}
+
+export interface ExtractMeetingContent {
+  notes?: string;
+  summary?: string;
+  transcript?: string;
+}
+
+export interface ExtractAcrossMeetingsParams {
+  /** The user's extraction instructions (the Gem prompt, routing directive stripped). */
+  instructions: string;
+  /** Meetings to map over — caller scopes + orders these (most-recent-first). */
+  meetings: ExtractMeetingRef[];
+  /** Hydrate ONE meeting's full content on demand (server fetch when paginated history omitted it). */
+  loadContent: (meetingId: string) => Promise<ExtractMeetingContent | null>;
+  /** Progress callback so the UI can stream each per-meeting read + the synthesis,
+   *  the way a sub-agent streams its nested tool calls. */
+  onProgress?: (ev: ExtractProgress) => void;
+  /** Max concurrent per-meeting extraction calls. Default 4. */
+  concurrency?: number;
+}
+
+/** Live progress events from the map-reduce. One 'map' event fires as EACH meeting
+ *  finishes being read; one 'reduce' event fires when synthesis starts. */
+export type ExtractProgress =
+  | { phase: 'map'; completed: number; total: number; title: string; hadItems: boolean }
+  | { phase: 'reduce'; total: number; withItems: number };
+
+// Cap the transcript fed into a single per-meeting extraction call. NOTES/SUMMARY
+// are the authoritative source for action items/decisions; the transcript is a
+// fallback, so truncating it keeps each MAP call cheap without losing fidelity.
+const EXTRACT_PER_MEETING_TRANSCRIPT_CAP = 8000;
+
+async function mapExtractOneMeeting(
+  instructions: string,
+  ref: ExtractMeetingRef,
+  content: ExtractMeetingContent,
+): Promise<string> {
+  const notes = (content.notes ?? '').trim();
+  const summary = (content.summary ?? '').trim();
+  const transcript = (content.transcript ?? '').trim();
+
+  const source = [
+    notes ? `NOTES:\n${notes}` : '',
+    summary ? `SUMMARY:\n${summary}` : '',
+    transcript
+      ? `TRANSCRIPT:\n${transcript.length > EXTRACT_PER_MEETING_TRANSCRIPT_CAP
+          ? `${transcript.slice(0, EXTRACT_PER_MEETING_TRANSCRIPT_CAP)}… [truncated — NOTES above are authoritative]`
+          : transcript}`
+      : '',
+  ].filter(Boolean).join('\n\n') || '(No notes generated for this meeting.)';
+
+  const prompt = `You are extracting from ONE meeting as part of a larger task spanning many meetings. Apply the extraction task below to THIS meeting ONLY, reading its full content. Return ONLY the concrete items found in this meeting as concise markdown bullet points — no preamble, no meeting title, no commentary, no closing remarks. If this meeting genuinely has nothing relevant to the task, return exactly the single word NONE.
+
+=== EXTRACTION TASK ===
+${instructions}
+
+=== MEETING: ${ref.title}${ref.dateLabel ? ` (${ref.dateLabel})` : ''} ===
+${source}`;
+
+  const res = await generateWithFallback({
+    model: MODELS.singleMeetingChat.primary,
+    contents: prompt,
+    config: { temperature: 0.2 },
+  });
+  return (res.text || '').trim();
+}
+
+export async function extractAcrossMeetings(params: ExtractAcrossMeetingsParams): Promise<string> {
+  const { instructions, meetings, loadContent, onProgress, concurrency = 4 } = params;
+
+  if (!meetings.length) {
+    return "I couldn't find any meetings to analyze yet. Record or import a meeting and try again.";
+  }
+
+  // ── MAP: focused per-meeting extraction, concurrency-capped. Results land in a
+  //    fixed-index array so the final order matches the (recency-sorted) input. ──
+  interface Finding { ref: ExtractMeetingRef; items: string; }
+  const findings: (Finding | undefined)[] = new Array(meetings.length);
+  let cursor = 0;
+  let completed = 0;
+  const worker = async () => {
+    while (cursor < meetings.length) {
+      const idx = cursor++;
+      const ref = meetings[idx];
+      let items = 'NONE';
+      try {
+        const content = await loadContent(ref.meetingId);
+        items = (content ? await mapExtractOneMeeting(instructions, ref, content) : 'NONE') || 'NONE';
+      } catch (err) {
+        log.warn('map_extract_meeting_failed', { error: err instanceof Error ? err : undefined });
+        items = 'NONE';
+      }
+      findings[idx] = { ref, items };
+      completed++;
+      onProgress?.({ phase: 'map', completed, total: meetings.length, title: ref.title, hadItems: items.trim().toUpperCase() !== 'NONE' });
+    }
+  };
+  await Promise.all(
+    Array.from({ length: Math.min(Math.max(1, concurrency), meetings.length) }, () => worker()),
+  );
+
+  // ── REDUCE: synthesize from the COMPACT findings only — never the transcripts. ──
+  const withItems = findings.filter(
+    (f): f is Finding => !!f && !!f.items && f.items.trim().toUpperCase() !== 'NONE',
+  );
+  if (!withItems.length) {
+    return `I read ${meetings.length} recent meeting${meetings.length !== 1 ? 's' : ''} in full, but none of them contained anything matching this request.`;
+  }
+
+  onProgress?.({ phase: 'reduce', total: meetings.length, withItems: withItems.length });
+
+  const cards = withItems.map(
+    f => `### ${f.ref.title}${f.ref.dateLabel ? ` — ${f.ref.dateLabel}` : ''}\n${f.items.trim()}`,
+  );
+  return foldAndReduceCards(instructions, cards);
+}
+
+// ── Hierarchical reduce (compaction). Folds compact per-meeting "cards" into the
+//    final answer. When the card set is large, a single reducer prompt would balloon —
+//    so we condense in BATCHES into partial digests, then reduce the digests. This
+//    bounds the reducer context no matter how many meetings were read, the same way the
+//    reference compacts a long agent loop instead of carrying everything. ──
+async function foldAndReduceCards(instructions: string, cards: string[]): Promise<string> {
+  if (!cards.length) return '';
+  const REDUCE_BATCH = 30;
+  let foldedInput = cards.join('\n\n');
+  if (cards.length > REDUCE_BATCH) {
+    const batches: string[][] = [];
+    for (let i = 0; i < cards.length; i += REDUCE_BATCH) batches.push(cards.slice(i, i + REDUCE_BATCH));
+    log.debug('fold_and_reduce', { cards: cards.length, batches: batches.length });
+    const partials = await Promise.all(
+      batches.map(async (b) => {
+        const bCompact = b.join('\n\n');
+        try {
+          const r = await generateWithFallback({
+            model: MODELS.crossMeetingSynth.primary,
+            contents: `Condense the following per-meeting findings into a tight digest that PRESERVES every concrete item and its source meeting + date. Do not drop, merge, or invent items. This digest will be combined with others to answer: "${instructions.slice(0, 400)}"\n\n${bCompact}`,
+            config: { temperature: 0.2 },
+          });
+          return (r.text || '').trim() || bCompact;
+        } catch {
+          return bCompact; // never drop a batch — fall back to its raw cards
+        }
+      }),
+    );
+    foldedInput = partials.join('\n\n');
+  }
+
+  const reducePrompt = `You are completing an extraction task across multiple meetings. Below are the per-meeting findings ALREADY extracted (most recent first). Produce the final answer for the user by following the task's instructions and output format exactly. Use ONLY these findings — do not invent meetings, items, dates, or owners. Keep attribution to the source meeting wherever the task calls for it, and order most-recent-first unless the task says otherwise.
+
+=== TASK ===
+${instructions}
+
+=== PER-MEETING FINDINGS ===
+${foldedInput}`;
+
+  // Production safety: if the final synthesis call fails or returns empty, fall back
+  // to the raw grouped findings. The user gets the actual extracted items, never a
+  // mid-response error — the deep work is never lost to a single flaky model call.
+  try {
+    const res = await generateWithFallback({
+      model: MODELS.crossMeetingSynth.primary,
+      contents: reducePrompt,
+      config: { temperature: 0.4 },
+    });
+    return (res.text || '').trim() || cards.join('\n\n');
+  } catch (err) {
+    log.warn('fold_and_reduce_final_failed', { error: err instanceof Error ? err : undefined });
+    return cards.join('\n\n');
   }
 }
 

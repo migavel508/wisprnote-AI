@@ -31,14 +31,24 @@ interface WorkspaceSwitcherProps {
   onSignOut: () => void;
 }
 
-function Avatar({ ws, size = 20 }: { ws?: Workspace | null; size?: number }) {
+function Avatar({ ws, size = 20, userPicture, userName }: { ws?: Workspace | null; size?: number; userPicture?: string | null; userName?: string }) {
+  // The DEFAULT workspace is the user's own vault → show their profile photo (or a
+  // gradient with their initial), never a generic lock.
   if (ws && isDefaultWorkspace(ws)) {
+    if (userPicture) {
+      return (
+        <div className="rounded-md flex-shrink-0 overflow-hidden" style={{ width: size, height: size }}>
+          <img src={userPicture} alt={userName ?? 'You'} className="w-full h-full object-cover" />
+        </div>
+      );
+    }
+    const [d1, d2, d3] = getAvatarGradient(userName || ws.name || 'you');
     return (
       <div
-        className="rounded-md flex items-center justify-center bg-app-nav-hover-bg flex-shrink-0"
-        style={{ width: size, height: size }}
+        className="rounded-md flex items-center justify-center text-white font-semibold flex-shrink-0"
+        style={{ width: size, height: size, background: `linear-gradient(135deg, ${d1} 0%, ${d2} 55%, ${d3} 100%)`, fontSize: Math.max(8, size * 0.55) }}
       >
-        <Lock size={size * 0.5} strokeWidth={1.8} className="text-app-fg-muted" />
+        <span className="tracking-tight">{(userName?.charAt(0) || ws.name?.charAt(0) || '?').toUpperCase()}</span>
       </div>
     );
   }
@@ -88,6 +98,12 @@ export default function WorkspaceSwitcher({
   const active = workspaces.find(w => w.id === activeWorkspaceId) ?? workspaces[0] ?? null;
   const memberCount = 1; // stub; can be wired to getWorkspaceMembers later
 
+  // The default workspace shows the USER's name + photo (it's their personal vault).
+  const userName = session?.user?.name || session?.user?.email?.split('@')[0] || 'Workspace';
+  const userPicture = (session?.user as any)?.picture || (session?.user as any)?.image || null;
+  const displayName = (ws?: Workspace | null) => (ws && isDefaultWorkspace(ws) ? userName : (ws?.name ?? 'Personal'));
+  const atWorkspaceLimit = workspaces.length >= 5;
+
   useEffect(() => {
     if (!open) return;
     const onDoc = (e: MouseEvent) => {
@@ -127,11 +143,9 @@ export default function WorkspaceSwitcher({
         onClick={() => setOpen(v => !v)}
         className="w-full flex items-center gap-2 px-2 py-1.5 rounded-lg text-app-nav-fg hover:bg-app-nav-hover-bg hover:text-app-nav-fg-hover transition-all duration-200"
       >
-        <div className="w-[22px] h-[22px] rounded-full bg-app-chip flex items-center justify-center flex-shrink-0 text-[10px] font-semibold text-app-fg-muted">
-          {(session?.user?.name ?? session?.user?.email ?? '?').charAt(0).toUpperCase()}
-        </div>
+        <Avatar ws={active} size={22} userPicture={userPicture} userName={userName} />
         <span className="flex-1 text-left text-[12.5px] font-medium tracking-[-0.01em] truncate">
-          {formatDisplayName(session?.user?.email, session?.user?.name, 'Account')}
+          {displayName(active)}
         </span>
         <ChevronsUpDown size={12} strokeWidth={1.8} className="text-app-fg-subtle flex-shrink-0" />
       </button>
@@ -144,10 +158,10 @@ export default function WorkspaceSwitcher({
           {/* Workspace header */}
           <div className="px-3 pt-3 pb-2.5">
             <div className="flex items-center gap-2.5">
-              <Avatar ws={active} size={32} />
+              <Avatar ws={active} size={32} userPicture={userPicture} userName={userName} />
               <div className="flex-1 min-w-0">
                 <div className="text-[13px] font-semibold text-app-fg tracking-[-0.01em] truncate">
-                  {active?.name ?? 'Personal'}
+                  {displayName(active)}
                 </div>
                 <div className="text-[11px] text-app-fg-subtle tracking-[-0.01em]">
                   {memberCount} {memberCount === 1 ? 'member' : 'members'}
@@ -190,6 +204,9 @@ export default function WorkspaceSwitcher({
             <WorkspaceList
               workspaces={workspaces}
               activeId={active?.id}
+              userName={userName}
+              userPicture={userPicture}
+              atLimit={atWorkspaceLimit}
               onSwitch={(ws) => handle(() => onSwitchWorkspace(ws))()}
               onCreate={handle(onCreateWorkspace)}
             />
@@ -218,13 +235,17 @@ export default function WorkspaceSwitcher({
 const VISIBLE_THRESHOLD = 2;
 
 function WorkspaceList({
-  workspaces, activeId, onSwitch, onCreate,
+  workspaces, activeId, userName, userPicture, atLimit, onSwitch, onCreate,
 }: {
   workspaces: Workspace[];
   activeId?: string;
+  userName: string;
+  userPicture?: string | null;
+  atLimit: boolean;
   onSwitch: (ws: Workspace) => void;
   onCreate: () => void;
 }) {
+  const nameOf = (ws: Workspace) => (isDefaultWorkspace(ws) ? userName : ws.name);
   const [showMore, setShowMore] = useState(false);
   const moreRef = useRef<HTMLButtonElement>(null);
   const subRef = useRef<HTMLDivElement>(null);
@@ -241,10 +262,10 @@ function WorkspaceList({
     return () => document.removeEventListener('mousedown', onDoc);
   }, [showMore]);
 
-  // Always show "My notes" first (locked default), then the others
+  // Always show the user's default (home) workspace first, then the others by age.
   const sorted = [...workspaces].sort((a, b) => {
-    if (a.name === 'My notes') return -1;
-    if (b.name === 'My notes') return 1;
+    if (isDefaultWorkspace(a)) return -1;
+    if (isDefaultWorkspace(b)) return 1;
     return new Date(a.created_at).getTime() - new Date(b.created_at).getTime();
   });
 
@@ -261,8 +282,8 @@ function WorkspaceList({
             onClick={() => onSwitch(ws)}
             className="w-full flex items-center gap-2 px-1 py-1.5 rounded-lg hover:bg-app-nav-hover-bg transition-colors text-left"
           >
-            <Avatar ws={ws} size={20} />
-            <span className="flex-1 text-[12.5px] text-app-fg truncate tracking-[-0.01em]">{ws.name}</span>
+            <Avatar ws={ws} size={20} userPicture={userPicture} userName={userName} />
+            <span className="flex-1 text-[12.5px] text-app-fg truncate tracking-[-0.01em]">{nameOf(ws)}</span>
             {isActive && <Check size={13} strokeWidth={2} className="text-app-fg flex-shrink-0" />}
           </button>
         );
@@ -295,23 +316,25 @@ function WorkspaceList({
                     onClick={() => { setShowMore(false); onSwitch(ws); }}
                     className="w-full flex items-center gap-2 px-2 py-1.5 rounded-lg hover:bg-app-nav-hover-bg transition-colors text-left"
                   >
-                    <Avatar ws={ws} size={20} />
-                    <span className="flex-1 text-[12.5px] text-app-fg truncate tracking-[-0.01em]">{ws.name}</span>
+                    <Avatar ws={ws} size={20} userPicture={userPicture} userName={userName} />
+                    <span className="flex-1 text-[12.5px] text-app-fg truncate tracking-[-0.01em]">{nameOf(ws)}</span>
                     {isActive && <Check size={13} strokeWidth={2} className="text-app-fg flex-shrink-0" />}
                   </button>
                 );
               })}
-              <button
-                onClick={() => { setShowMore(false); onCreate(); }}
-                className="w-full flex items-center gap-2 px-2 py-1.5 rounded-lg text-app-fg hover:bg-app-nav-hover-bg transition-colors text-left"
-              >
-                <Plus size={14} strokeWidth={1.8} className="flex-shrink-0 text-app-fg-subtle" />
-                <span className="text-[12.5px] tracking-[-0.01em]">Add workspace</span>
-              </button>
+              {!atLimit && (
+                <button
+                  onClick={() => { setShowMore(false); onCreate(); }}
+                  className="w-full flex items-center gap-2 px-2 py-1.5 rounded-lg text-app-fg hover:bg-app-nav-hover-bg transition-colors text-left"
+                >
+                  <Plus size={14} strokeWidth={1.8} className="flex-shrink-0 text-app-fg-subtle" />
+                  <span className="text-[12.5px] tracking-[-0.01em]">Add workspace</span>
+                </button>
+              )}
             </div>
           )}
         </div>
-      ) : (
+      ) : !atLimit ? (
         <button
           onClick={onCreate}
           className="w-full flex items-center gap-2 px-1 py-1.5 rounded-lg text-app-fg-muted hover:bg-app-nav-hover-bg hover:text-app-fg transition-colors text-left"
@@ -321,7 +344,7 @@ function WorkspaceList({
           </div>
           <span className="text-[12.5px] tracking-[-0.01em]">Add workspace</span>
         </button>
-      )}
+      ) : null}
     </div>
   );
 }

@@ -116,8 +116,10 @@ export interface ServerChatResult {
  */
 export async function serverChat(opts: {
   query: string;
-  scope?: 'all' | 'workspace' | 'single';
+  scope?: 'all' | 'workspace' | 'space' | 'single';
   workspaceId?: string;
+  /** When scope==='space': restrict retrieval to meetings filed in this space. */
+  spaceId?: string;
   taskId?: string;
   history?: Array<{ role: 'user' | 'model'; text: string }>;
   model?: 'gemini' | 'claude';

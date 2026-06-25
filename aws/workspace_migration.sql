@@ -75,5 +75,23 @@ CREATE TABLE IF NOT EXISTS task_folders (
 CREATE INDEX IF NOT EXISTS idx_task_folders_folder ON task_folders(folder_id);
 
 -- ============================================================
--- Done. Workspace tables added.
+-- 14. WORKSPACE PARTITION (W0) — workspace as the master scope ("second primary id")
+-- Also applied lazily at runtime by aws/api/src/workspaceScope.ts:ensureWorkspacePartitionSchema().
+-- ============================================================
+
+-- Master partition column: every recording belongs to exactly one workspace.
+ALTER TABLE task_history ADD COLUMN IF NOT EXISTS workspace_id UUID;
+CREATE INDEX IF NOT EXISTS idx_task_history_user_ws ON task_history(user_id, workspace_id, created_at DESC);
+
+-- The user's default (home) workspace — username + profile photo, undeletable.
+ALTER TABLE workspaces ADD COLUMN IF NOT EXISTS is_default BOOLEAN NOT NULL DEFAULT false;
+
+-- Backfill runs per-user at runtime (resolveDefaultWorkspaceId + backfillUserWorkspacePartition):
+--   • a task already in task_workspaces keeps that workspace as its home;
+--   • all other tasks go to the user's default workspace;
+--   • a user with no workspace gets a default created (named from email until the client
+--     renames it to the user's name + photo).
+
+-- ============================================================
+-- Done. Workspace tables + partition added.
 -- ============================================================

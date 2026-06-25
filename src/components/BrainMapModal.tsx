@@ -29,7 +29,7 @@ const VERDICT_HUE: Record<string, { light: string; dark: string }> = {
   unrelated: { light: '#c44d47', dark: '#e0635c' },
 };
 
-export default function BrainMapModal({ workspaceId, workspaceName, folderId = null, folderName, onClose }: { workspaceId: string; workspaceName: string; folderId?: string | null; folderName?: string; onClose: () => void }) {
+export default function BrainMapModal({ workspaceId, workspaceName, folderId = null, folderName, spaceId = null, onClose }: { workspaceId: string; workspaceName: string; folderId?: string | null; folderName?: string; spaceId?: string | null; onClose: () => void }) {
   const [data, setData] = useState<{ nodes: BrainNode[]; links: BrainLink[] }>({ nodes: [], links: [] });
   const [loading, setLoading] = useState(true);
   const fgRef = useRef<any>(null);
@@ -58,7 +58,7 @@ export default function BrainMapModal({ workspaceId, workspaceName, folderId = n
   };
 
   const reloadView = async (cancelledRef?: { v: boolean }) => {
-    const [g, p, a] = await Promise.all([getBrainGraph(workspaceId, folderId), getBrainPulse(workspaceId, folderId), getBrainAlerts(workspaceId, folderId)]);
+    const [g, p, a] = await Promise.all([getBrainGraph(workspaceId, folderId, spaceId), getBrainPulse(workspaceId, folderId, spaceId), getBrainAlerts(workspaceId, folderId, spaceId)]);
     if (cancelledRef?.v) return;
     setData(g); setPulse(p); setAlerts(a);
   };
@@ -74,12 +74,12 @@ export default function BrainMapModal({ workspaceId, workspaceName, folderId = n
   useEffect(() => {
     const ref = { v: false };
     // 1) paint the CURRENT brain instantly, 2) sync-on-open in the background, then refresh.
-    getBrainGraph(workspaceId, folderId).then((g) => { if (!ref.v) setData(g); }).finally(() => { if (!ref.v) setLoading(false); });
-    getBrainPulse(workspaceId, folderId).then((p) => { if (!ref.v) setPulse(p); });
-    getBrainAlerts(workspaceId, folderId).then((a) => { if (!ref.v) setAlerts(a); });
+    getBrainGraph(workspaceId, folderId, spaceId).then((g) => { if (!ref.v) setData(g); }).finally(() => { if (!ref.v) setLoading(false); });
+    getBrainPulse(workspaceId, folderId, spaceId).then((p) => { if (!ref.v) setPulse(p); });
+    getBrainAlerts(workspaceId, folderId, spaceId).then((a) => { if (!ref.v) setAlerts(a); });
     doSync(ref);
     return () => { ref.v = true; };
-  }, [workspaceId, folderId]);
+  }, [workspaceId, folderId, spaceId]);
 
   // Responsive canvas: fill the available area (the graph needs ROOM to breathe).
   useEffect(() => {
@@ -184,7 +184,7 @@ export default function BrainMapModal({ workspaceId, workspaceName, folderId = n
           <div className="flex items-center gap-2 min-w-0">
             <BrainCircuit size={16} className="text-app-accent flex-shrink-0" />
             <h3 className="text-[15px] font-semibold text-app-fg truncate">Brain map · {workspaceName}{folderName ? ` › ${folderName}` : ''}</h3>
-            <span className="text-[10px] text-app-fg-subtle px-1.5 py-0.5 rounded-full bg-app-chip flex-shrink-0">{folderId ? 'project' : 'all projects'}</span>
+            <span className="text-[10px] text-app-fg-subtle px-1.5 py-0.5 rounded-full bg-app-chip flex-shrink-0">{folderId ? 'project' : spaceId ? 'space' : 'all projects'}</span>
             {!loading && <span className="text-[11px] text-app-fg-subtle">{data.nodes.length} nodes · {data.links.length} links</span>}
           </div>
           <button onClick={onClose} className="w-7 h-7 flex items-center justify-center rounded-md text-app-fg-subtle hover:bg-app-nav-hover-bg hover:text-app-fg transition-colors"><X size={15} /></button>
@@ -213,7 +213,9 @@ export default function BrainMapModal({ workspaceId, workspaceName, folderId = n
             <div className="absolute inset-0 flex items-center justify-center"><Loader2 className="animate-spin text-app-fg-subtle" size={22} /></div>
           ) : data.nodes.length === 0 ? (
             <div className="absolute inset-0 flex items-center justify-center text-[13px] text-app-fg-subtle px-8 text-center">
-              No connected-tool records in this workspace's brain yet. Connect Jira/GitHub and let the sync run.
+              {spaceId && !folderId
+                ? "This space's brain is empty. Add meetings to the space and connect Jira/GitHub, then let the sync run."
+                : "No connected-tool records in this workspace's brain yet. Connect Jira/GitHub and let the sync run."}
             </div>
           ) : (
             <ForceGraph2D

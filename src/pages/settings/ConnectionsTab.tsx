@@ -4,7 +4,7 @@ import { CONNECTORS, CONNECTOR_CATEGORIES, type ConnectorDef } from '../../confi
 import {
   isConnectorsEnabled, listConnectors, getConnectorOAuthUrl, disconnectConnector, setConnectorToken,
   getProjectMapping, setProjectMapping,
-  listCustomConnectors, createCustomConnector, deleteCustomConnector,
+  listCustomConnectors, createCustomConnector, deleteCustomConnector, configureConnector,
   type ConnectorStatus,
 } from '../../services/connectorService';
 import {
@@ -26,17 +26,22 @@ import { useConnectorOAuth, setPendingConnector } from './useConnectorOAuth';
 const isTauri = typeof window !== 'undefined' && !!(window as any).__TAURI_INTERNALS__;
 
 function ConnectorCard({
-  c, connected, busy, onConnect, onDisconnect, onLocalSetup, onManageTools,
+  c, connected, busy, available, onConnect, onConfigure, onDisconnect, onLocalSetup, onManageTools,
 }: {
-  c: ConnectorDef; connected: boolean; busy: boolean;
-  onConnect: (id: string) => void; onDisconnect: (id: string) => void;
+  c: ConnectorDef; connected: boolean; busy: boolean; available?: boolean;
+  onConnect: (id: string) => void; onConfigure: (c: ConnectorDef) => void; onDisconnect: (id: string) => void;
   onLocalSetup: (c: ConnectorDef) => void;
   onManageTools: (c: ConnectorDef) => void;
 }) {
   const Icon = c.icon;
   const enabled = isConnectorsEnabled();
-  const actionable = enabled && c.status === 'live';
+  // Actionable = endpoint known now (pinned, or the server reports it configured). Otherwise an MCP
+  // connector is still CONNECTABLE via bring-your-own endpoint (the reference's `mcp add`): clicking
+  // Connect asks for the MCP server URL. Only non-MCP / feature-off cards stay "coming soon".
+  const actionable = enabled && (c.status === 'live' || available === true);
   const isLocal = c.via === 'local';
+  const canConfigure = enabled && !isLocal && !actionable;     // BYO-endpoint path
+  const showConnect = actionable || canConfigure;
 
   return (
     <div className="rounded-xl border border-app-border bg-app-panel p-4 flex flex-col gap-3 transition-colors hover:border-app-border-strong">
@@ -54,7 +59,7 @@ function ConnectorCard({
           <span className="text-[9px] font-medium uppercase tracking-wide px-2 py-0.5 rounded-full bg-app-accent/15 text-app-accent border border-app-accent/30 whitespace-nowrap flex items-center gap-1 flex-shrink-0">
             <Check size={10} strokeWidth={2.5} /> Connected
           </span>
-        ) : !actionable ? (
+        ) : !showConnect ? (
           <span className="text-[9px] font-medium uppercase tracking-wide px-2 py-0.5 rounded-full bg-app-chip text-app-fg-subtle border border-app-border whitespace-nowrap flex-shrink-0">
             Coming soon
           </span>
@@ -100,15 +105,16 @@ function ConnectorCard({
         </div>
       ) : (
         <button
-          onClick={() => actionable && onConnect(c.id)} disabled={!actionable || busy}
+          onClick={() => { if (busy) return; if (actionable) onConnect(c.id); else if (canConfigure) onConfigure(c); }}
+          disabled={!showConnect || busy}
           className={`mt-1 w-full py-2 rounded-lg text-[12px] font-medium transition-colors flex items-center justify-center gap-2 ${
-            actionable
+            showConnect
               ? 'bg-app-accent text-app-accent-fg hover:bg-app-accent-hover disabled:opacity-60'
               : 'bg-app-chip text-app-fg-subtle border border-app-border cursor-not-allowed'
           }`}
         >
           {busy && <Loader2 size={13} className="animate-spin" />}
-          {actionable ? (busy ? 'Connecting…' : 'Connect') : 'Connect — coming soon'}
+          {showConnect ? (busy ? 'Connecting…' : 'Connect') : 'Connect — coming soon'}
         </button>
       )}
     </div>
@@ -215,6 +221,15 @@ export default function ConnectionsTab({ fixedWorkspaceId, embedded }: Connectio
   const [addClientSecret, setAddClientSecret] = useState('');
   const [adding, setAdding] = useState(false);
   const [addError, setAddError] = useState<string | null>(null);
+
+  // BYO-endpoint configure dialog for a catalog connector (Slack/Gmail/…).
+  const [configFor, setConfigFor] = useState<ConnectorDef | null>(null);
+  const [configUrl, setConfigUrl] = useState('');
+  const [configAdvOpen, setConfigAdvOpen] = useState(false);
+  const [configClientId, setConfigClientId] = useState('');
+  const [configClientSecret, setConfigClientSecret] = useState('');
+  const [configuring, setConfiguring] = useState(false);
+  const [configError, setConfigError] = useState<string | null>(null);
   const loadCustom = useCallback(() => { if (workspaceId) void listCustomConnectors(workspaceId).then(setCustomConns).catch(() => {}); else setCustomConns([]); }, [workspaceId]);
   useEffect(() => { loadCustom(); }, [loadCustom]);
 
@@ -320,6 +335,27 @@ export default function ConnectionsTab({ fixedWorkspaceId, embedded }: Connectio
     finally { setAdding(false); }
   }, [workspaceId, addName, addUrl, addClientId, addClientSecret, adding, refresh, loadCustom, onConnect]);
 
+  const openConfigure = useCallback((c: ConnectorDef) => {
+    setConfigError(null); setConfigUrl(''); setConfigClientId(''); setConfigClientSecret(''); setConfigAdvOpen(false);
+    setConfigFor(c);
+  }, []);
+
+  const submitConfigure = useCallback(async () => {
+    if (!configFor || !configUrl.trim() || configuring) return;
+    setConfiguring(true); setConfigError(null);
+    try {
+      const id = configFor.id;
+      const res = await configureConnector(id, {
+        url: configUrl.trim(),
+        oauthClientId: configClientId.trim() || undefined, oauthClientSecret: configClientSecret.trim() || undefined,
+      }, workspaceId ?? undefined);
+      setConfigFor(null); setConfigUrl(''); setConfigClientId(''); setConfigClientSecret(''); setConfigAdvOpen(false);
+      await refresh();
+      if (res.needsAuth) onConnect(id);   // endpoint stored → kick off the OAuth sign-in
+    } catch (e: any) { setConfigError(e?.message || 'Could not configure the connector.'); }
+    finally { setConfiguring(false); }
+  }, [configFor, configUrl, configClientId, configClientSecret, configuring, workspaceId, refresh, onConnect]);
+
   // Map stored custom connectors → ConnectorDef so they render with the SAME card + connect/tools logic.
   const customDefs: ConnectorDef[] = customConns.map((cc) => ({
     id: cc.slug, name: cc.name, description: cc.url, category: 'Custom connectors',
@@ -414,7 +450,9 @@ export default function ConnectionsTab({ fixedWorkspaceId, embedded }: Connectio
                     c={c}
                     connected={c.via === 'local' ? localConfigured : !!statusById[c.id]?.connected}
                     busy={busyId === c.id}
+                    available={statusById[c.id]?.available}
                     onConnect={onConnect}
+                    onConfigure={openConfigure}
                     onDisconnect={onDisconnect}
                     onLocalSetup={openLocalSetup}
                     onManageTools={setToolsFor}
@@ -442,7 +480,7 @@ export default function ConnectionsTab({ fixedWorkspaceId, embedded }: Connectio
                     key={c.id} c={c}
                     connected={!!statusById[c.id]?.connected}
                     busy={busyId === c.id}
-                    onConnect={onConnect} onDisconnect={onDisconnect}
+                    onConnect={onConnect} onConfigure={openConfigure} onDisconnect={onDisconnect}
                     onLocalSetup={openLocalSetup} onManageTools={setToolsFor}
                   />
                 ))}
@@ -580,6 +618,48 @@ export default function ConnectionsTab({ fixedWorkspaceId, embedded }: Connectio
               <button onClick={submitAddCustom} disabled={adding || !addName.trim() || !/^https:\/\//i.test(addUrl.trim())}
                 className="px-3.5 py-1.5 rounded-lg text-[12.5px] font-semibold bg-app-accent text-app-accent-fg hover:bg-app-accent-hover disabled:opacity-50 flex items-center gap-1.5">
                 {adding ? <Loader2 size={13} className="animate-spin" /> : <Plus size={13} />} Add
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
+
+      {configFor && (
+        <div className="fixed inset-0 z-[9999] flex items-center justify-center bg-black/30 backdrop-blur-sm" onClick={() => !configuring && setConfigFor(null)}>
+          <div className="bg-app-canvas rounded-2xl border border-app-divider shadow-xl w-[560px] max-w-[94vw] max-h-[88vh] overflow-y-auto p-5" onClick={(e) => e.stopPropagation()}>
+            <div className="flex items-center justify-between mb-1">
+              <h3 className="text-[15px] font-semibold text-app-fg">Connect {configFor.name}</h3>
+              <button onClick={() => !configuring && setConfigFor(null)} className="w-7 h-7 flex items-center justify-center rounded-md text-app-fg-subtle hover:bg-app-nav-hover-bg hover:text-app-fg"><X size={15} /></button>
+            </div>
+            <p className="text-[12px] text-app-fg-subtle leading-relaxed mb-4">
+              {configFor.name} connects through your own MCP server endpoint. Paste its URL below — its tools are discovered automatically and governed by per-tool permissions.
+              {configFor.docs && (
+                <> <a href={configFor.docs} target="_blank" rel="noreferrer" className="text-app-accent hover:underline inline-flex items-center gap-0.5">Setup guide <ExternalLink size={10} /></a>.</>
+              )}
+            </p>
+
+            <input autoFocus value={configUrl} onChange={(e) => setConfigUrl(e.target.value)} placeholder="MCP server URL (https://…)"
+              className="w-full text-[13px] bg-app-panel border border-app-border rounded-lg px-3 py-2 text-app-fg outline-none focus:border-app-accent placeholder:text-app-fg-subtle mb-3" />
+
+            <button onClick={() => setConfigAdvOpen((v) => !v)} className="flex items-center gap-1 text-[12.5px] text-app-fg-muted hover:text-app-fg mb-2">
+              <ChevronDown size={14} className={`transition-transform ${configAdvOpen ? 'rotate-180' : ''}`} /> Advanced settings
+            </button>
+            {configAdvOpen && (
+              <div className="space-y-2.5 mb-3">
+                <input value={configClientId} onChange={(e) => setConfigClientId(e.target.value)} placeholder="OAuth Client ID (optional)"
+                  className="w-full text-[13px] bg-app-panel border border-app-border rounded-lg px-3 py-2 text-app-fg outline-none focus:border-app-accent placeholder:text-app-fg-subtle" />
+                <input type="password" value={configClientSecret} onChange={(e) => setConfigClientSecret(e.target.value)} placeholder="OAuth Client Secret (optional)"
+                  className="w-full text-[13px] bg-app-panel border border-app-border rounded-lg px-3 py-2 text-app-fg outline-none focus:border-app-accent placeholder:text-app-fg-subtle" />
+                <p className="text-[11px] text-app-fg-subtle leading-relaxed">Leave blank to auto-register (DCR). Google and Slack need a pre-registered OAuth app — provide its Client ID/Secret here.</p>
+              </div>
+            )}
+
+            {configError && <p className="text-[11.5px] text-red-500 mb-2">{configError}</p>}
+            <div className="flex justify-end gap-2 mt-2">
+              <button onClick={() => setConfigFor(null)} disabled={configuring} className="px-3 py-1.5 rounded-lg text-[12.5px] text-app-fg hover:bg-app-nav-hover-bg disabled:opacity-50">Cancel</button>
+              <button onClick={submitConfigure} disabled={configuring || !/^https:\/\//i.test(configUrl.trim())}
+                className="px-3.5 py-1.5 rounded-lg text-[12.5px] font-semibold bg-app-accent text-app-accent-fg hover:bg-app-accent-hover disabled:opacity-50 flex items-center gap-1.5">
+                {configuring ? <Loader2 size={13} className="animate-spin" /> : <Check size={13} />} Connect
               </button>
             </div>
           </div>

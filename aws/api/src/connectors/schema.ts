@@ -117,6 +117,11 @@ async function migrateExisting(): Promise<void> {
   // meeting never links to the wrong project's Jira/GitHub. Populated in later phases.
   await query(`ALTER TABLE knowledge_item        ADD COLUMN IF NOT EXISTS folder_id UUID`);
   await query(`CREATE INDEX IF NOT EXISTS knowledge_item_folder_idx ON knowledge_item (user_id, workspace_id, folder_id)`);
+  // Space-scoped brain: which SPACE this item belongs to (a meeting's canonical
+  // task_history.space_id). NULL = unfiled / workspace-wide. Drives the per-SPACE brain
+  // map so a space's brain is built from ITS meetings + the connector records they link to.
+  await query(`ALTER TABLE knowledge_item        ADD COLUMN IF NOT EXISTS space_id UUID`);
+  await query(`CREATE INDEX IF NOT EXISTS knowledge_item_space_idx ON knowledge_item (user_id, workspace_id, space_id)`);
 
   // 2) Backfill NULLs: attach legacy connections/items to the user's default
   //    (earliest) workspace so they keep working in-place; sentinel if none.

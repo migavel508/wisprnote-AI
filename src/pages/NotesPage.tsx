@@ -13,14 +13,12 @@ import { MeetingNoteTab } from '../components/ManualNotes/MeetingNoteTab';
 import { formatDisplayName, formatDisplayInitials } from '../lib/displayName';
 import ShareModal from '../components/ShareModal';
 import {
-  Workspace, Folder as FolderType,
-  getWorkspacesForTask, getFolders, getFolderMeetings,
-  createWorkspace, createFolder,
-  addMeetingToWorkspace, removeMeetingFromWorkspace,
-  addMeetingToFolder, removeMeetingFromFolder,
-  isDefaultWorkspace,
+  Workspace, Space, Folder as FolderType,
+  getSpaces, getSpaceFolders,
+  createSpace, createFolderInSpace, moveNoteToSpace,
 } from '../services/workspaceService';
 import CreateFolderModal, { type FolderDraft } from '../components/CreateFolderModal';
+import { onVaultEvent } from '../lib/vaultEvents';
 
 interface NotesPageProps {
   selectedTask: TaskHistory | null;
@@ -59,19 +57,22 @@ export default function NotesPage({ selectedTask, isLoading = false, isLoadingDe
   const [visualizationImage, setVisualizationImage] = useState<string | null>(selectedTask?.visualization_image || null);
   const [isShareOpen, setIsShareOpen] = useState(false);
 
-  // Metadata chips state
-  const [workspaces, setWorkspaces] = useState<(Workspace & { has_task: boolean })[]>([]);
-  const [foldersByWs, setFoldersByWs] = useState<Record<string, FolderType[]>>({});
-  const [assignedFolderIds, setAssignedFolderIds] = useState<Set<string>>(new Set());
-  const [showWorkspacePicker, setShowWorkspacePicker] = useState(false);
+  // Space picker state — a note lives in ONE space (+ optional folder), never directly
+  // under a workspace. Picking a space/folder MOVES the note there (single location).
+  const [spaces, setSpaces] = useState<Space[]>([]);
+  const [foldersBySpace, setFoldersBySpace] = useState<Record<string, FolderType[]>>({});
+  const [currentSpaceId, setCurrentSpaceId] = useState<string | null>(selectedTask?.space_id ?? null);
+  const [currentFolderId, setCurrentFolderId] = useState<string | null>(selectedTask?.folder_id ?? null);
+  const [showSpacePicker, setShowSpacePicker] = useState(false);
   const [showPeoplePicker, setShowPeoplePicker] = useState(false);
-  const [wsSearch, setWsSearch] = useState('');
-  const [newWsName, setNewWsName] = useState('');
-  const [creatingWs, setCreatingWs] = useState(false);
-  const [togglingWsId, setTogglingWsId] = useState<string | null>(null);
-  const [togglingFolderId, setTogglingFolderId] = useState<string | null>(null);
+  const [spaceSearch, setSpaceSearch] = useState('');
+  const [newSpaceName, setNewSpaceName] = useState('');
+  const [creatingSpace, setCreatingSpace] = useState(false);
+  const [movingTo, setMovingTo] = useState<string | null>(null);
   const [showNewFolderModal, setShowNewFolderModal] = useState(false);
-  const wsPicker = useRef<HTMLDivElement>(null);
+  // Bumped when spaces/folders change anywhere so the picker list stays current.
+  const [spacesTick, setSpacesTick] = useState(0);
+  const spacePicker = useRef<HTMLDivElement>(null);
   const peoplePicker = useRef<HTMLDivElement>(null);
 
   // Attendee state — synced from task, persisted on change
@@ -216,142 +217,116 @@ export default function NotesPage({ selectedTask, isLoading = false, isLoadingDe
     return () => { cancelled = true; };
   }, [selectedTask?.id, selectedTask?.visualization_image]);
 
-  // Load task workspaces whenever task changes
+  // Load the active workspace's spaces (+ their folders) and the note's current
+  // location whenever the task changes.
   useEffect(() => {
-    if (!selectedTask?.id) {
-      setWorkspaces([]); setFoldersByWs({}); setAssignedFolderIds(new Set());
-      return;
-    }
-    const taskId = selectedTask.id;
-    getWorkspacesForTask(taskId).then(async (ws) => {
-      setWorkspaces(ws);
-      // Load folders for all known workspaces (assigned + not yet assigned)
-      const allFolders = await Promise.all(
-        ws.map(w => getFolders(w.id).then(f => ({ id: w.id, f })).catch(() => ({ id: w.id, f: [] as FolderType[] })))
+    setCurrentSpaceId(selectedTask?.space_id ?? null);
+    setCurrentFolderId(selectedTask?.folder_id ?? null);
+    if (!selectedTask?.id) { setSpaces([]); setFoldersBySpace({}); return; }
+    getSpaces().then(async (sp) => {
+      setSpaces(sp);
+      const all = await Promise.all(
+        sp.map(s => getSpaceFolders(s.id).then(f => ({ id: s.id, f })).catch(() => ({ id: s.id, f: [] as FolderType[] })))
       );
       const map: Record<string, FolderType[]> = {};
-      for (const r of allFolders) map[r.id] = r.f;
-      setFoldersByWs(map);
-      // Determine which folders the task is in (only check folders of workspaces task is in)
-      const assignedWs = ws.filter(w => w.has_task);
-      const assignedFolders = new Set<string>();
-      await Promise.all(assignedWs.flatMap(w =>
-        (map[w.id] || []).map(f =>
-          getFolderMeetings(f.id)
-            .then(meetings => { if (meetings.some(m => m.id === taskId)) assignedFolders.add(f.id); })
-            .catch(() => {})
-        )
-      ));
-      setAssignedFolderIds(assignedFolders);
-    }).catch(() => setWorkspaces([]));
+      for (const r of all) map[r.id] = r.f;
+      setFoldersBySpace(map);
+    }).catch(() => setSpaces([]));
+  }, [selectedTask?.id, selectedTask?.space_id, selectedTask?.folder_id, spacesTick]);
+
+  // Stay in sync with the rest of the app: spaces/folders changing anywhere reloads
+  // the picker list; the open note being moved elsewhere updates its current location.
+  useEffect(() => {
+    const offSpaces = onVaultEvent('spaces:changed', () => setSpacesTick(t => t + 1));
+    const offNotes = onVaultEvent('notes:changed', ({ taskId, spaceId, folderId }) => {
+      if (selectedTask?.id && taskId === selectedTask.id) {
+        setCurrentSpaceId(spaceId);
+        setCurrentFolderId(folderId);
+      }
+    });
+    return () => { offSpaces(); offNotes(); };
   }, [selectedTask?.id]);
 
   // Close pickers on outside click
   useEffect(() => {
     const handler = (e: MouseEvent) => {
-      if (wsPicker.current && !wsPicker.current.contains(e.target as Node)) setShowWorkspacePicker(false);
+      if (spacePicker.current && !spacePicker.current.contains(e.target as Node)) setShowSpacePicker(false);
       if (peoplePicker.current && !peoplePicker.current.contains(e.target as Node)) setShowPeoplePicker(false);
     };
     document.addEventListener('mousedown', handler);
     return () => document.removeEventListener('mousedown', handler);
   }, []);
 
-  const toggleWorkspace = async (ws: Workspace & { has_task: boolean }) => {
-    if (!selectedTask?.id || togglingWsId) return;
-    const taskId = selectedTask.id;
-    // If the note is filed inside one of this workspace's folders, the workspace row
-    // isn't a second "location" — it's the parent. Clicking it files the note at the
-    // workspace ROOT (out of the subfolder) rather than toggling membership, so we never
-    // strand a folder membership or drop the note out of the workspace entirely.
-    const wsFolders = (foldersByWs[ws.id] || []).filter(f => assignedFolderIds.has(f.id));
-    setTogglingWsId(ws.id);
+  // Move the note to a space ROOT (out of any folder).
+  const moveToSpace = async (spaceId: string) => {
+    if (!selectedTask?.id || movingTo) return;
+    setMovingTo(spaceId);
     try {
-      if (wsFolders.length > 0) {
-        await Promise.all(wsFolders.map(f => removeMeetingFromFolder(f.id, taskId)));
-        setAssignedFolderIds(prev => { const n = new Set(prev); wsFolders.forEach(f => n.delete(f.id)); return n; });
-        // Workspace membership stays (has_task already true) — the note now lives at the root.
-      } else if (ws.has_task) {
-        await removeMeetingFromWorkspace(ws.id, taskId);
-        setWorkspaces(prev => prev.map(w => w.id === ws.id ? { ...w, has_task: false } : w));
-      } else {
-        await addMeetingToWorkspace(ws.id, taskId);
-        setWorkspaces(prev => prev.map(w => w.id === ws.id ? { ...w, has_task: true } : w));
-      }
+      await moveNoteToSpace(spaceId, selectedTask.id, null);
+      setCurrentSpaceId(spaceId);
+      setCurrentFolderId(null);
+      onTaskUpdated?.({ ...selectedTask, space_id: spaceId, folder_id: null });
     } finally {
-      setTogglingWsId(null);
+      setMovingTo(null);
     }
   };
 
-  const handleCreateWorkspace = async () => {
-    if (!newWsName.trim() || !selectedTask?.id) return;
-    setCreatingWs(true);
+  // Move the note into a folder within a space.
+  const moveToFolder = async (spaceId: string, folderId: string) => {
+    if (!selectedTask?.id || movingTo) return;
+    setMovingTo(folderId);
     try {
-      const ws = await createWorkspace(newWsName.trim());
-      await addMeetingToWorkspace(ws.id, selectedTask.id);
-      setWorkspaces(prev => [...prev, { ...ws, has_task: true }]);
-      setNewWsName('');
+      await moveNoteToSpace(spaceId, selectedTask.id, folderId);
+      setCurrentSpaceId(spaceId);
+      setCurrentFolderId(folderId);
+      onTaskUpdated?.({ ...selectedTask, space_id: spaceId, folder_id: folderId });
     } finally {
-      setCreatingWs(false);
+      setMovingTo(null);
     }
   };
 
-  const toggleFolder = async (ws: Workspace & { has_task: boolean }, folder: FolderType) => {
-    if (!selectedTask?.id || togglingFolderId) return;
-    setTogglingFolderId(folder.id);
+  const handleCreateSpace = async () => {
+    if (!newSpaceName.trim() || !selectedTask?.id) return;
+    setCreatingSpace(true);
     try {
-      const isAssigned = assignedFolderIds.has(folder.id);
-      if (isAssigned) {
-        await removeMeetingFromFolder(folder.id, selectedTask.id);
-        setAssignedFolderIds(prev => { const n = new Set(prev); n.delete(folder.id); return n; });
-      } else {
-        // Ensure note is also in the workspace
-        if (!ws.has_task) {
-          await addMeetingToWorkspace(ws.id, selectedTask.id);
-          setWorkspaces(prev => prev.map(w => w.id === ws.id ? { ...w, has_task: true } : w));
-        }
-        await addMeetingToFolder(folder.id, selectedTask.id);
-        setAssignedFolderIds(prev => new Set(prev).add(folder.id));
-      }
+      const sp = await createSpace(newSpaceName.trim());
+      setSpaces(prev => [...prev, sp]);
+      await moveNoteToSpace(sp.id, selectedTask.id, null);
+      setCurrentSpaceId(sp.id);
+      setCurrentFolderId(null);
+      setNewSpaceName('');
+      onTaskUpdated?.({ ...selectedTask, space_id: sp.id, folder_id: null });
     } finally {
-      setTogglingFolderId(null);
+      setCreatingSpace(false);
     }
   };
 
   const handleCreateFolderFromPicker = async (draft: FolderDraft) => {
     if (!selectedTask?.id) return;
-    const created = await createFolder(draft.workspaceId, draft.title, {
+    // The modal's destination field carries the target SPACE id (we feed it spaces).
+    const spaceId = draft.workspaceId;
+    const created = await createFolderInSpace(spaceId, draft.title, {
       iconType: draft.iconType,
       iconName: draft.iconName,
       color: draft.iconColor,
       emoji: draft.emoji,
-      description: draft.description,
     });
-    // Ensure workspace has the task
-    const ws = workspaces.find(w => w.id === draft.workspaceId);
-    if (ws && !ws.has_task) {
-      await addMeetingToWorkspace(ws.id, selectedTask.id).catch(() => {});
-      setWorkspaces(prev => prev.map(w => w.id === ws.id ? { ...w, has_task: true } : w));
-    }
-    await addMeetingToFolder(created.id, selectedTask.id).catch(() => {});
-    setFoldersByWs(p => ({ ...p, [draft.workspaceId]: [...(p[draft.workspaceId] || []), created] }));
-    setAssignedFolderIds(prev => new Set(prev).add(created.id));
+    setFoldersBySpace(p => ({ ...p, [spaceId]: [...(p[spaceId] || []), created] }));
+    await moveNoteToSpace(spaceId, selectedTask.id, created.id).catch(() => {});
+    setCurrentSpaceId(spaceId);
+    setCurrentFolderId(created.id);
     setShowNewFolderModal(false);
+    onTaskUpdated?.({ ...selectedTask, space_id: spaceId, folder_id: created.id });
   };
 
-  const assignedWorkspaces = workspaces.filter(w => w.has_task);
-  const assignedFolders = workspaces.flatMap(w =>
-    (foldersByWs[w.id] || []).filter(f => assignedFolderIds.has(f.id)).map(f => ({ folder: f, ws: w }))
-  );
-  // A note inside a folder is ALSO a member of the folder's workspace (required so it shows
-  // in the workspace's master view). In the picker that read as "ticked in two places". So we
-  // treat a workspace as a *location* only when the note sits at its ROOT (not inside one of
-  // its folders); otherwise the folder is the location and the workspace is just its parent.
-  const wsHasAssignedFolder = (wsId: string) =>
-    (foldersByWs[wsId] || []).some(f => assignedFolderIds.has(f.id));
-  const rootWorkspaces = assignedWorkspaces.filter(w => !wsHasAssignedFolder(w.id));
-  const filteredWs = workspaces.filter(w =>
-    !wsSearch || w.name.toLowerCase().includes(wsSearch.toLowerCase()) ||
-    (foldersByWs[w.id] || []).some(f => f.name.toLowerCase().includes(wsSearch.toLowerCase()))
+  const currentSpace = spaces.find(s => s.id === currentSpaceId) || null;
+  const currentFolder = currentSpace
+    ? (foldersBySpace[currentSpaceId!] || []).find(f => f.id === currentFolderId) || null
+    : null;
+  const spaceQuery = spaceSearch.toLowerCase();
+  const filteredSpaces = spaces.filter(s =>
+    !spaceQuery || s.name.toLowerCase().includes(spaceQuery) ||
+    (foldersBySpace[s.id] || []).some(f => f.name.toLowerCase().includes(spaceQuery))
   );
 
   // Show skeleton while loading
@@ -508,7 +483,7 @@ export default function NotesPage({ selectedTask, isLoading = false, isLoadingDe
             {/* People chip */}
             <div className="relative" ref={peoplePicker}>
               <button
-                onClick={() => { setShowPeoplePicker(v => !v); setShowWorkspacePicker(false); }}
+                onClick={() => { setShowPeoplePicker(v => !v); setShowSpacePicker(false); }}
                 className="flex items-center gap-1 px-2.5 py-1 rounded-full border border-zinc-200 dark:border-app-border text-[11.5px] text-zinc-500 dark:text-app-fg-muted hover:border-zinc-400 dark:hover:border-app-fg-subtle hover:text-zinc-700 dark:hover:text-app-fg transition-all"
               >
                 <Users className="w-3 h-3 flex-shrink-0" />
@@ -606,107 +581,97 @@ export default function NotesPage({ selectedTask, isLoading = false, isLoadingDe
               )}
             </div>
 
-            {/* Assigned workspace chips — only workspaces the note is filed in directly
-                (at the root). When it's inside a folder, the folder chip below represents
-                that location and the workspace is its parent (shown in the picker). */}
-            {rootWorkspaces.map(ws => (
+            {/* Current location chip — the ONE space (and folder) this note lives in.
+                Click to open the picker and move it elsewhere. */}
+            {currentSpace && (
               <button
-                key={ws.id}
-                onClick={() => { setShowWorkspacePicker(true); setShowPeoplePicker(false); setWsSearch(''); }}
+                onClick={() => { setShowSpacePicker(true); setShowPeoplePicker(false); setSpaceSearch(''); }}
                 className="flex items-center gap-1 px-2.5 py-1 rounded-full border border-zinc-200 dark:border-app-border text-[11.5px] text-zinc-500 dark:text-app-fg-muted hover:border-zinc-400 dark:hover:border-app-fg-subtle hover:text-zinc-700 dark:hover:text-app-fg transition-all"
               >
-                {isDefaultWorkspace(ws)
+                {currentSpace.is_default
                   ? <Lock className="w-3 h-3 flex-shrink-0" />
-                  : ws.emoji
-                    ? <span className="text-[12px] leading-none flex-shrink-0">{ws.emoji}</span>
+                  : currentSpace.emoji
+                    ? <span className="text-[12px] leading-none flex-shrink-0">{currentSpace.emoji}</span>
                     : <FolderOpen className="w-3 h-3 flex-shrink-0" />}
-                <span className="max-w-[120px] truncate">{ws.name}</span>
-              </button>
-            ))}
-
-            {/* Assigned folder chip (first folder + count) */}
-            {assignedFolders.length > 0 && (
-              <button
-                onClick={() => { setShowWorkspacePicker(true); setShowPeoplePicker(false); setWsSearch(''); }}
-                className="flex items-center gap-1 px-2.5 py-1 rounded-full border border-zinc-200 dark:border-app-border text-[11.5px] text-zinc-500 dark:text-app-fg-muted hover:border-zinc-400 dark:hover:border-app-fg-subtle hover:text-zinc-700 dark:hover:text-app-fg transition-all"
-              >
-                {assignedFolders[0].folder.emoji
-                  ? <span className="text-[12px] leading-none flex-shrink-0">{assignedFolders[0].folder.emoji}</span>
-                  : <FolderIcon className="w-3 h-3 flex-shrink-0" style={{ color: assignedFolders[0].folder.color || undefined }} />}
-                <span className="max-w-[120px] truncate">{assignedFolders[0].folder.name}</span>
-                {assignedFolders.length > 1 && (
-                  <span className="text-app-fg-subtle">+{assignedFolders.length - 1}</span>
+                <span className="max-w-[120px] truncate">{currentSpace.name}</span>
+                {currentFolder && (
+                  <>
+                    <span className="text-app-fg-subtle">/</span>
+                    {currentFolder.emoji
+                      ? <span className="text-[12px] leading-none flex-shrink-0">{currentFolder.emoji}</span>
+                      : <FolderIcon className="w-3 h-3 flex-shrink-0" style={{ color: currentFolder.color || undefined }} />}
+                    <span className="max-w-[100px] truncate">{currentFolder.name}</span>
+                  </>
                 )}
               </button>
             )}
 
-            {/* Add to space */}
-            <div className="relative" ref={wsPicker}>
+            {/* Move to a space (and optionally a folder within it). A note lives in
+                exactly one space — picking another MOVES it there. */}
+            <div className="relative" ref={spacePicker}>
               <button
-                onClick={() => { setShowWorkspacePicker(v => !v); setShowPeoplePicker(false); setWsSearch(''); }}
+                onClick={() => { setShowSpacePicker(v => !v); setShowPeoplePicker(false); setSpaceSearch(''); }}
                 className="flex items-center gap-1 px-2.5 py-1 rounded-full border border-dashed border-zinc-300 dark:border-app-border/70 text-[11.5px] text-zinc-400 dark:text-app-fg-subtle hover:border-zinc-400 dark:hover:border-app-fg-subtle hover:text-zinc-600 dark:hover:text-app-fg-muted transition-all"
               >
                 <Plus className="w-3 h-3 flex-shrink-0" />
-                <span>{assignedWorkspaces.length === 0 ? 'Add to space' : 'Add more'}</span>
+                <span>{currentSpace ? 'Move' : 'Add to space'}</span>
               </button>
-              {showWorkspacePicker && (
+              {showSpacePicker && (
                 <div className="absolute top-full left-0 mt-1.5 z-50 bg-app-panel border border-app-border rounded-2xl shadow-xl w-72 overflow-hidden">
                   <div className="flex items-center gap-2 px-3 pt-3 pb-2 border-b border-app-border">
                     <Search className="w-3.5 h-3.5 text-app-fg-subtle flex-shrink-0" />
                     <input
                       autoFocus
-                      value={wsSearch}
-                      onChange={e => setWsSearch(e.target.value)}
+                      value={spaceSearch}
+                      onChange={e => setSpaceSearch(e.target.value)}
                       placeholder="Search spaces…"
                       className="flex-1 text-[13px] text-app-fg bg-transparent outline-none placeholder:text-app-fg-subtle"
                     />
                   </div>
                   <div className="py-1.5 max-h-72 overflow-y-auto">
-                    {filteredWs.map(ws => {
-                      const q = wsSearch.toLowerCase();
-                      const wsFolders = (foldersByWs[ws.id] || []).filter(f => !q || f.name.toLowerCase().includes(q));
+                    {filteredSpaces.map(s => {
+                      const sFolders = (foldersBySpace[s.id] || []).filter(f => !spaceQuery || f.name.toLowerCase().includes(spaceQuery));
+                      const isHere = currentSpaceId === s.id && !currentFolderId;
                       return (
-                        <div key={ws.id}>
+                        <div key={s.id}>
                           <button
-                            onClick={() => toggleWorkspace(ws)}
-                            disabled={togglingWsId === ws.id}
-                            title={wsHasAssignedFolder(ws.id) ? 'Note is in a folder below — click to move it to the workspace root' : ws.has_task ? 'Remove from workspace' : 'Add to workspace'}
+                            onClick={() => moveToSpace(s.id)}
+                            disabled={movingTo === s.id}
+                            title="Move note to this space"
                             className="w-full flex items-center gap-3 px-3 py-2 hover:bg-app-nav-hover-bg transition-colors text-left disabled:opacity-60"
                           >
-                            {isDefaultWorkspace(ws) ? (
+                            {s.is_default ? (
                               <span className="w-5 flex-shrink-0 flex items-center justify-center">
                                 <span className="w-5 h-5 rounded-md bg-app-nav-hover-bg flex items-center justify-center">
                                   <Lock className="w-3 h-3 text-app-fg-muted" />
                                 </span>
                               </span>
                             ) : (
-                              <span className="text-base leading-none w-5 flex-shrink-0">{ws.emoji}</span>
+                              <span className="text-base leading-none w-5 flex-shrink-0">{s.emoji || '📁'}</span>
                             )}
-                            <span className="flex-1 text-[13px] text-app-fg truncate">{ws.name}</span>
-                            {togglingWsId === ws.id ? (
+                            <span className="flex-1 text-[13px] text-app-fg truncate">{s.name}</span>
+                            {movingTo === s.id ? (
                               <Loader2 className="w-3.5 h-3.5 animate-spin text-app-fg-subtle" />
-                            ) : (ws.has_task && !wsHasAssignedFolder(ws.id)) ? (
+                            ) : isHere ? (
                               <Check className="w-3.5 h-3.5 text-emerald-500" />
-                            ) : wsHasAssignedFolder(ws.id) ? (
-                              <span className="text-[10.5px] text-app-fg-subtle">in folder</span>
                             ) : null}
                           </button>
-                          {wsFolders.map(f => {
-                            const isAssigned = assignedFolderIds.has(f.id);
+                          {sFolders.map(f => {
+                            const isHereFolder = currentFolderId === f.id;
                             return (
                               <button
                                 key={f.id}
-                                onClick={() => toggleFolder(ws, f)}
-                                disabled={togglingFolderId === f.id}
+                                onClick={() => moveToFolder(s.id, f.id)}
+                                disabled={movingTo === f.id}
                                 className="w-full flex items-center gap-3 pl-8 pr-3 py-1.5 hover:bg-app-nav-hover-bg transition-colors text-left disabled:opacity-60"
                               >
                                 {f.emoji
                                   ? <span className="text-[13px] leading-none w-4 flex-shrink-0">{f.emoji}</span>
                                   : <FolderIcon className="w-3.5 h-3.5 flex-shrink-0" style={{ color: f.color || undefined }} />}
                                 <span className="flex-1 text-[12.5px] text-app-fg-muted truncate">{f.name}</span>
-                                {togglingFolderId === f.id ? (
+                                {movingTo === f.id ? (
                                   <Loader2 className="w-3.5 h-3.5 animate-spin text-app-fg-subtle" />
-                                ) : isAssigned ? (
+                                ) : isHereFolder ? (
                                   <Check className="w-3.5 h-3.5 text-emerald-500" />
                                 ) : null}
                               </button>
@@ -715,42 +680,42 @@ export default function NotesPage({ selectedTask, isLoading = false, isLoadingDe
                         </div>
                       );
                     })}
-                    {filteredWs.length === 0 && wsSearch && (
-                      <p className="px-4 py-3 text-[12px] text-app-fg-subtle">No spaces or folders found</p>
+                    {filteredSpaces.length === 0 && (
+                      <p className="px-4 py-3 text-[12px] text-app-fg-subtle">{spaceSearch ? 'No spaces or folders found' : 'No spaces yet'}</p>
                     )}
                   </div>
                   <div className="border-t border-app-border px-3 py-2.5 space-y-1">
                     <button
-                      onClick={() => { setShowNewFolderModal(true); setShowWorkspacePicker(false); }}
+                      onClick={() => { setShowNewFolderModal(true); setShowSpacePicker(false); }}
                       className="w-full flex items-center gap-2.5 text-[12px] text-[#10b981] font-medium hover:opacity-80 transition-opacity"
                     >
                       <FolderPlus className="w-3.5 h-3.5" />
                       New folder
                     </button>
-                    {newWsName ? (
+                    {newSpaceName ? (
                       <div className="flex items-center gap-2 pt-1">
                         <input
                           autoFocus
-                          value={newWsName}
-                          onChange={e => setNewWsName(e.target.value)}
-                          onKeyDown={e => { if (e.key === 'Enter') handleCreateWorkspace(); if (e.key === 'Escape') setNewWsName(''); }}
-                          placeholder="Workspace name…"
+                          value={newSpaceName}
+                          onChange={e => setNewSpaceName(e.target.value)}
+                          onKeyDown={e => { if (e.key === 'Enter') handleCreateSpace(); if (e.key === 'Escape') setNewSpaceName(''); }}
+                          placeholder="Space name…"
                           className="flex-1 text-[11.5px] text-app-fg bg-app-status-bg border border-app-border rounded-lg px-2.5 py-1.5 outline-none focus:ring-1 focus:ring-[#f06060]/30 placeholder:text-app-fg-subtle"
                         />
-                        <button onClick={handleCreateWorkspace} disabled={creatingWs} className="p-1.5 rounded-lg bg-app-fg text-app-canvas disabled:opacity-40">
-                          {creatingWs ? <Loader2 className="w-3 h-3 animate-spin" /> : <Check className="w-3 h-3" />}
+                        <button onClick={handleCreateSpace} disabled={creatingSpace} className="p-1.5 rounded-lg bg-app-fg text-app-canvas disabled:opacity-40">
+                          {creatingSpace ? <Loader2 className="w-3 h-3 animate-spin" /> : <Check className="w-3 h-3" />}
                         </button>
-                        <button onClick={() => setNewWsName('')} className="p-1.5 rounded-lg hover:bg-app-nav-hover-bg text-app-fg-subtle">
+                        <button onClick={() => setNewSpaceName('')} className="p-1.5 rounded-lg hover:bg-app-nav-hover-bg text-app-fg-subtle">
                           <X className="w-3 h-3" />
                         </button>
                       </div>
                     ) : (
                       <button
-                        onClick={() => setNewWsName(' ')}
+                        onClick={() => setNewSpaceName(' ')}
                         className="w-full flex items-center gap-2.5 text-[11.5px] text-app-fg-subtle hover:text-app-fg transition-colors"
                       >
                         <Plus className="w-3.5 h-3.5" />
-                        New workspace
+                        New space
                       </button>
                     )}
                   </div>
@@ -760,8 +725,8 @@ export default function NotesPage({ selectedTask, isLoading = false, isLoadingDe
 
             {showNewFolderModal && (
               <CreateFolderModal
-                workspaces={workspaces.map(({ has_task: _, ...rest }) => rest)}
-                defaultWorkspaceId={assignedWorkspaces[0]?.id || workspaces[0]?.id}
+                workspaces={spaces as unknown as Workspace[]}
+                defaultWorkspaceId={currentSpaceId || spaces[0]?.id}
                 onClose={() => setShowNewFolderModal(false)}
                 onCreate={handleCreateFolderFromPicker}
               />

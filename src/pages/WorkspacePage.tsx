@@ -5,20 +5,20 @@ import {
   Folder as FolderIcon, Search, Paperclip,
 } from 'lucide-react';
 import {
-  Workspace, Folder as FolderType, WorkspaceMeeting,
-  ensureDefaultWorkspace, isDefaultWorkspace,
-  getFolders, createFolder,
+  Workspace, Folder as FolderType, WorkspaceMeeting, Space,
+  isDefaultWorkspace,
   deleteFolder, renameFolder,
-  updateWorkspace, deleteWorkspace,
-  getWorkspaceMeetings, getFolderMeetings,
-  addMeetingToWorkspace, removeMeetingFromWorkspace,
+  getFolderMeetings,
   getWorkspaceDescription, setWorkspaceDescription,
   getWorkspaceImage, getAvatarGradient,
+  getSpaces, getSpaceFolders, getSpaceMeetings, createFolderInSpace,
+  updateSpace, deleteSpace, moveNoteToSpace,
 } from '../services/workspaceService';
 import { setWorkspaceSelection, useWorkspaceSelection } from '../services/workspaceSelection';
 import type { TaskHistory } from '../services/awsService';
 import { getTaskById, getWorkspaceKnowledgeGraph } from '../services/awsService';
 import WorkspaceChat from '../components/WorkspaceChat';
+import { onVaultEvent } from '../lib/vaultEvents';
 import type { SearchableMeeting } from '../services/geminiService';
 import type { KGLite } from '../services/meetingEvidence';
 import CreateFolderModal, { type FolderDraft } from '../components/CreateFolderModal';
@@ -368,41 +368,60 @@ export default function WorkspacePage({ allTasks, onSelectTask }: WorkspacePageP
   const [addSearch, setAddSearch] = useState('');
   const [addingTaskId, setAddingTaskId] = useState<string | null>(null);
   const headerMenuRef = useRef<HTMLDivElement>(null);
-
-  // Load workspaces
+  // Bumped by vault events so this page refreshes when a note is moved or spaces/
+  // folders change ANYWHERE in the app — keeps every page in sync without a reload.
+  const [spacesTick, setSpacesTick] = useState(0);
+  const [notesTick, setNotesTick] = useState(0);
   useEffect(() => {
-    ensureDefaultWorkspace().then(ws => {
-      setWorkspaces(ws);
-      // If nothing selected, pick the default
-      if (!selection.workspaceId && ws.length > 0) {
-        setWorkspaceSelection(ws[0].id, null);
+    const offSpaces = onVaultEvent('spaces:changed', () => setSpacesTick(t => t + 1));
+    const offNotes = onVaultEvent('notes:changed', () => setNotesTick(t => t + 1));
+    return () => { offSpaces(); offNotes(); };
+  }, []);
+
+  // This page renders the active SPACE (a space has a name, folders, meetings,
+  // members, brain map + connectors). We load the workspace's SPACES as the unit
+  // list; `selection.folderId` carries the selected space (or a folder within it).
+  useEffect(() => {
+    getSpaces().then(spaces => {
+      setWorkspaces(spaces as unknown as Workspace[]);
+      // Default to the private "My notes" space when nothing is selected.
+      if (!selection.folderId && spaces.length > 0) {
+        const def = spaces.find(s => s.is_default) || spaces[0];
+        setWorkspaceSelection(selection.workspaceId, def.id);
       }
-      // Prefetch folders for all workspaces so picker works
-      Promise.all(ws.map(w => getFolders(w.id).then(f => ({ id: w.id, f })).catch(() => ({ id: w.id, f: [] as FolderType[] }))))
+      // Prefetch each space's folders so the picker + counts + drilldown work.
+      Promise.all(spaces.map(s => getSpaceFolders(s.id).then(f => ({ id: s.id, f })).catch(() => ({ id: s.id, f: [] as FolderType[] }))))
         .then(rows => {
           const m: Record<string, FolderType[]> = {};
           for (const r of rows) m[r.id] = r.f;
           setFoldersByWs(m);
         });
     }).finally(() => setLoading(false));
-  }, []);
+    // Re-run when spaces/folders change anywhere (spacesTick) so the unit list,
+    // folder lists and counts stay current without a manual refresh.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [spacesTick]);
 
-  // Active workspace and folder
-  const activeWs = workspaces.find(w => w.id === selection.workspaceId) || null;
-  const activeFolder = activeWs && selection.folderId
-    ? (foldersByWs[activeWs.id] || []).find(f => f.id === selection.folderId) || null
-    : null;
-  const isPrivate = isDefaultWorkspace(activeWs);
+  // Active SPACE (held in `activeWs`) + an optional folder drilled within it.
+  const selId = selection.folderId;
+  const activeWs = workspaces.find(w => w.id === selId)
+    || workspaces.find(w => (foldersByWs[w.id] || []).some(f => f.id === selId))
+    || null;
+  const activeFolder = activeWs ? (foldersByWs[activeWs.id] || []).find(f => f.id === selId) || null : null;
+  const isPrivate = isDefaultWorkspace(activeWs); // is_default flag → the private "My notes" space
+  // Connectors, brain map, KG and proposals are WORKSPACE-level features (data is
+  // keyed by workspace, not space), so they always use the master workspace id.
+  const masterWorkspaceId = selection.workspaceId;
 
-  // Load the agent's pending proposals (+ Jira meta for the cards) for team workspaces.
-  const activeWsId = activeWs?.id ?? null;
+  // Load the agent's pending proposals (+ Jira meta) — workspace-level, shown on
+  // non-private spaces.
   useEffect(() => {
-    if (!activeWsId || isPrivate || !isConnectorsEnabled()) { setProposals([]); return; }
+    if (!masterWorkspaceId || isPrivate || !isConnectorsEnabled()) { setProposals([]); return; }
     let cancelled = false;
-    void listProposals(activeWsId).then((p) => { if (!cancelled) setProposals(p); }).catch(() => {});
-    void getJiraMeta(activeWsId).then((m) => { if (!cancelled) setJiraMeta(m); }).catch(() => {});
+    void listProposals(masterWorkspaceId).then((p) => { if (!cancelled) setProposals(p); }).catch(() => {});
+    void getJiraMeta(masterWorkspaceId).then((m) => { if (!cancelled) setJiraMeta(m); }).catch(() => {});
     return () => { cancelled = true; };
-  }, [activeWsId, isPrivate]);
+  }, [masterWorkspaceId, isPrivate]);
 
   const onProposalResolved = (id: string, status: 'executed' | 'dismissed', result?: unknown) => {
     setProposals((prev) => prev.filter((x) => x.id !== id));
@@ -438,10 +457,10 @@ export default function WorkspacePage({ allTasks, onSelectTask }: WorkspacePageP
         }
 
         const folders = foldersByWs[activeWs.id] || [];
-        // Fetch the workspace's own meetings and every folder's meetings in ONE
-        // parallel batch (was: ws call awaited first, then a second await wave).
+        // Fetch the SPACE's own meetings and every folder's meetings in ONE parallel
+        // batch — the space root lists every note in the space (filed or not).
         const [wsMeetings, folderResults] = await Promise.all([
-          getWorkspaceMeetings(activeWs.id),
+          getSpaceMeetings(activeWs.id),
           Promise.all(
             folders.map(f => getFolderMeetings(f.id).then(list => ({ folderId: f.id, list })).catch(() => ({ folderId: f.id, list: [] as WorkspaceMeeting[] })))
           ),
@@ -471,8 +490,10 @@ export default function WorkspacePage({ allTasks, onSelectTask }: WorkspacePageP
     // Depend on THIS workspace's folder list (stable) rather than the whole
     // foldersByWs object, whose identity changes when the mount prefetch resolves
     // — that previously triggered a redundant second N+1 reload of every folder.
+    // notesTick re-runs this when a note is moved anywhere, so the space's meeting
+    // list adds/drops the note immediately.
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [activeWs?.id, activeFolder?.id, foldersByWs[activeWs?.id ?? '']]);
+  }, [activeWs?.id, activeFolder?.id, foldersByWs[activeWs?.id ?? ''], notesTick]);
 
   // Full-text evidence for the workspace chat (transcription/notes/summary).
   // Reuse the already-loaded `allTasks` where present; lazily hydrate the rest
@@ -490,7 +511,7 @@ export default function WorkspacePage({ allTasks, onSelectTask }: WorkspacePageP
       // cards + the "off-track" filter in the workspace chat.
       const kgByTask = new Map<string, KGLite>();
       try {
-        const kg = await getWorkspaceKnowledgeGraph(activeWs.id);
+        const kg = await getWorkspaceKnowledgeGraph(masterWorkspaceId ?? activeWs.id);
         for (const e of kg) kgByTask.set(e.task_id, { topics: e.topics, decisions: e.decisions, action_items: e.action_items, people: e.people });
       } catch { /* non-fatal — cards still carry date/attendees */ }
 
@@ -552,17 +573,18 @@ export default function WorkspacePage({ allTasks, onSelectTask }: WorkspacePageP
   };
 
   const handleCreateFolder = async (draft: FolderDraft) => {
-    if (!draft.workspaceId) return;
-    const created = await createFolder(draft.workspaceId, draft.title, {
+    // Folders live INSIDE a space. Create the folder in the active SPACE so it shows
+    // up under it (the old createFolder made a workspace-folder with no space_id).
+    if (!activeWs) return;
+    const created = await createFolderInSpace(activeWs.id, draft.title, {
       iconType: draft.iconType,
       iconName: draft.iconName,
       color: draft.iconColor,
       emoji: draft.emoji,
-      description: draft.description,
     });
-    setFoldersByWs(p => ({ ...p, [draft.workspaceId]: [...(p[draft.workspaceId] || []), created] }));
+    setFoldersByWs(p => ({ ...p, [activeWs.id]: [...(p[activeWs.id] || []), created] }));
     setShowCreateFolder(false);
-    setWorkspaceSelection(draft.workspaceId, created.id);
+    setWorkspaceSelection(selection.workspaceId, created.id);
   };
 
   const handleRename = async () => {
@@ -570,8 +592,9 @@ export default function WorkspacePage({ allTasks, onSelectTask }: WorkspacePageP
     const name = renameTarget.name.trim();
     if (!name) { setRenameTarget(null); return; }
     if (renameTarget.type === 'ws') {
-      const upd = await updateWorkspace(renameTarget.id, { name }).catch(() => null);
-      if (upd) setWorkspaces(prev => prev.map(w => w.id === upd.id ? upd : w));
+      // `activeWs` is a SPACE here — rename via the space endpoint.
+      const upd = await updateSpace(renameTarget.id, { name }).catch(() => null);
+      if (upd) setWorkspaces(prev => prev.map(w => w.id === renameTarget.id ? { ...w, name } : w));
     } else {
       const upd = await renameFolder(renameTarget.id, name).catch(() => null);
       if (upd) {
@@ -588,7 +611,7 @@ export default function WorkspacePage({ allTasks, onSelectTask }: WorkspacePageP
   const handleDeleteWs = async () => {
     if (!activeWs || isDefaultWorkspace(activeWs)) return;
     if (!window.confirm(`Delete "${activeWs.name}"?`)) return;
-    await deleteWorkspace(activeWs.id).catch(() => {});
+    await deleteSpace(activeWs.id).catch(() => {}); // `activeWs` is a SPACE here
     const remaining = workspaces.filter(w => w.id !== activeWs.id);
     setWorkspaces(remaining);
     setWorkspaceSelection(remaining[0]?.id || null, null);
@@ -605,42 +628,35 @@ export default function WorkspacePage({ allTasks, onSelectTask }: WorkspacePageP
   const handleAddMeeting = async (taskId: string) => {
     if (!activeWs) return;
     setAddingTaskId(taskId);
-    await addMeetingToWorkspace(activeWs.id, taskId).catch(() => {});
-    const updated = await getWorkspaceMeetings(activeWs.id).catch(() => meetings);
+    await moveNoteToSpace(activeWs.id, taskId, activeFolder?.id ?? null).catch(() => {});
+    const updated = await getSpaceMeetings(activeWs.id).catch(() => meetings);
     setMeetings(updated);
     setAddingTaskId(null);
   };
 
   const handleRemoveMeeting = async (taskId: string) => {
-    if (!activeWs) return;
-    await removeMeetingFromWorkspace(activeWs.id, taskId).catch(() => {});
+    // "Remove from this space" → move the note back to the private "My notes" space.
+    const def = workspaces.find(w => isDefaultWorkspace(w));
+    if (def) await moveNoteToSpace(def.id, taskId, null).catch(() => {});
     setMeetings(prev => prev.filter(m => m.id !== taskId));
   };
 
-  const handleChangeFolder = async (taskId: string, wsId: string, folderId: string | null) => {
+  // Move a note to a SPACE (and optionally a folder within it). `spaceId` is the
+  // picker's selected space id.
+  const handleChangeFolder = async (taskId: string, spaceId: string, folderId: string | null) => {
     if (!activeWs) return;
-    // Remove from current workspace if changing workspace
-    if (wsId !== activeWs.id) {
-      await removeMeetingFromWorkspace(activeWs.id, taskId).catch(() => {});
-    }
-    await addMeetingToWorkspace(wsId, taskId).catch(() => {});
-    // Folder add (best-effort)
-    if (folderId) {
-      const { addMeetingToFolder } = await import('../services/workspaceService');
-      await addMeetingToFolder(folderId, taskId).catch(() => {});
-    }
+    await moveNoteToSpace(spaceId, taskId, folderId).catch(() => {});
     if (activeFolder) {
-      // In a folder view: the meeting leaves this view only if it moved out of THIS folder.
-      if (folderId !== activeFolder.id) setMeetings(prev => prev.filter(m => m.id !== taskId));
+      // Folder view: drops out if it left THIS folder (or this space).
+      if (folderId !== activeFolder.id || spaceId !== activeWs.id) setMeetings(prev => prev.filter(m => m.id !== taskId));
     } else {
-      // In the workspace MASTER view: keep the meeting listed; just re-badge its home folder.
-      // It leaves the list only if it moved to a different workspace.
+      // Space root view: keep it listed; just re-badge its folder. Leaves only if it moved to another space.
       setMeetingFolderMap(prev => {
         const next = { ...prev };
         if (folderId) next[taskId] = folderId; else delete next[taskId];
         return next;
       });
-      if (wsId !== activeWs.id) setMeetings(prev => prev.filter(m => m.id !== taskId));
+      if (spaceId !== activeWs.id) setMeetings(prev => prev.filter(m => m.id !== taskId));
     }
   };
 
@@ -673,7 +689,7 @@ export default function WorkspacePage({ allTasks, onSelectTask }: WorkspacePageP
     ? null
     : isPrivate
       ? 'Notes from all of your private folders.'
-      : 'Notes visible to your entire workspace.';
+      : 'Notes shared across this space.';
 
   return (
     <div className="h-full flex flex-col overflow-hidden bg-app-panel font-sans">
@@ -806,7 +822,7 @@ export default function WorkspacePage({ allTasks, onSelectTask }: WorkspacePageP
 
           {!activeFolder && !isPrivate && (
             <div className="mt-2 flex items-center gap-1 text-[11.5px] text-app-fg-subtle">
-              <UserPlus size={11} strokeWidth={1.7} /> Your team workspace
+              <UserPlus size={11} strokeWidth={1.7} /> Shared team space
             </div>
           )}
 
@@ -885,8 +901,9 @@ export default function WorkspacePage({ allTasks, onSelectTask }: WorkspacePageP
           <div className="px-8 max-w-[920px] mx-auto w-full">
             <WorkspaceChat
               key={activeWs.id}
-              workspaceId={activeWs.id}
+              workspaceId={masterWorkspaceId ?? activeWs.id}
               workspaceName={activeWs.name}
+              spaceId={activeWs.id}
               scopedMeetings={scopedMeetings}
             />
           </div>
@@ -927,7 +944,7 @@ export default function WorkspacePage({ allTasks, onSelectTask }: WorkspacePageP
             ) : meetings.length === 0 ? (
               <div className="text-center py-20">
                 <p className="text-[13px] text-app-fg-subtle mb-3">
-                  {activeFolder ? 'No notes in this folder yet.' : 'No notes in this workspace yet.'}
+                  {activeFolder ? 'No notes in this folder yet.' : 'No notes in this space yet.'}
                 </p>
                 <button
                   onClick={() => setAddMeetingOpen(true)}
@@ -1046,10 +1063,11 @@ export default function WorkspacePage({ allTasks, onSelectTask }: WorkspacePageP
       {showBrainMap && (
         // A folder selected in the sidebar → SCOPED to that project; workspace level → AGGREGATE.
         <BrainMapModal
-          workspaceId={activeWs.id}
+          workspaceId={masterWorkspaceId ?? activeWs.id}
           workspaceName={activeWs.name}
           folderId={activeFolder?.id ?? null}
           folderName={activeFolder?.name}
+          spaceId={activeWs.id}
           onClose={() => setShowBrainMap(false)}
         />
       )}
@@ -1084,7 +1102,7 @@ export default function WorkspacePage({ allTasks, onSelectTask }: WorkspacePageP
                       key={pr.id}
                       proposal={pr.proposal}
                       meta={jiraMeta}
-                      workspaceId={activeWs.id}
+                      workspaceId={masterWorkspaceId ?? activeWs.id}
                       rationale={pr.rationale}
                       sourceTitle={pr.source_title}
                       onResolved={(status, result) => onProposalResolved(pr.id, status, result)}
@@ -1115,7 +1133,7 @@ export default function WorkspacePage({ allTasks, onSelectTask }: WorkspacePageP
             </div>
             <div className="flex-1 overflow-y-auto px-6 py-5">
               {isConnectorsEnabled() ? (
-                <ConnectionsTab fixedWorkspaceId={activeWs.id} embedded />
+                <ConnectionsTab fixedWorkspaceId={masterWorkspaceId ?? activeWs.id} embedded />
               ) : (
                 <p className="text-[13px] text-app-fg-subtle leading-relaxed">
                   Connectors aren’t enabled in this build yet. Once enabled, you’ll connect tools

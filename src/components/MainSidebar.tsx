@@ -21,14 +21,17 @@ import {
 import { AuthSession } from '../services/awsAuthService';
 import { getPendingTaskCount } from '../services/awsService';
 import {
-  ensureDefaultWorkspace, getFolders, createWorkspace, createFolder,
+  ensureDefaultWorkspace, createWorkspace,
   deleteWorkspace, updateWorkspace, renameFolder, deleteFolder,
   isDefaultWorkspace, getWorkspaceImage, getAvatarGradient,
   DEFAULT_WORKSPACE_NAME, DEFAULT_WORKSPACE_EMOJI,
-  type Workspace, type Folder as FolderType,
+  getSpaces, getSpaceFolders, createFolderInSpace, deleteSpace,
+  type Workspace, type Folder as FolderType, type Space,
 } from '../services/workspaceService';
 import { setWorkspaceSelection, useWorkspaceSelection } from '../services/workspaceSelection';
+import { onVaultEvent } from '../lib/vaultEvents';
 import CreateFolderModal, { type FolderDraft } from './CreateFolderModal';
+import CreateSpaceModal from './CreateSpaceModal';
 import WorkspaceCreationWizard from './WorkspaceCreationWizard';
 import WorkspaceSwitcher from './WorkspaceSwitcher';
 import { WisprnoteLogo } from './WisprnoteLogo';
@@ -291,10 +294,13 @@ export default function MainSidebar({
 }: MainSidebarProps) {
   const [pendingSyncCount, setPendingSyncCount] = useState(0);
   const [workspaces, setWorkspaces] = useState<Workspace[]>([]);
-  const [foldersByWs, setFoldersByWs] = useState<Record<string, FolderType[]>>({});
+  const [spaces, setSpaces] = useState<Space[]>([]);
+  const [foldersBySpace, setFoldersBySpace] = useState<Record<string, FolderType[]>>({});
   const [expanded, setExpanded] = useState<Record<string, boolean>>({});
   const [showCreateWizard, setShowCreateWizard] = useState(false);
-  const [folderModalForWs, setFolderModalForWs] = useState<string | null>(null);
+  const [showCreateSpace, setShowCreateSpace] = useState(false);
+  // Create-folder modal targets a SPACE (a folder lives inside a space).
+  const [folderModal, setFolderModal] = useState<{ spaceId: string } | null>(null);
   const [renameTarget, setRenameTarget] = useState<{ type: 'ws' | 'folder'; id: string; name: string } | null>(null);
   const selection = useWorkspaceSelection();
 
@@ -304,66 +310,88 @@ export default function MainSidebar({
     return () => window.clearInterval(timer);
   }, []);
 
-  // Load workspaces (ensuring default exists) + auto-expand default
+  // Load workspaces (ensure the default exists) + select it.
   useEffect(() => {
-    ensureDefaultWorkspace().then(ws => {
+    ensureDefaultWorkspace().then(async ws => {
       setWorkspaces(ws);
-      // Auto-expand the default workspace + currently selected workspace
-      const next: Record<string, boolean> = {};
-      const def = ws.find(w => w.name === DEFAULT_WORKSPACE_NAME);
-      if (def) next[def.id] = true;
-      if (selection.workspaceId) next[selection.workspaceId] = true;
-      setExpanded(prev => ({ ...next, ...prev }));
-      // Prefetch folders for the default workspace
-      if (def) getFolders(def.id).then(f => setFoldersByWs(p => ({ ...p, [def.id]: f }))).catch(() => {});
-      // If nothing is selected yet, pick the default workspace
+      const def = ws.find(w => isDefaultWorkspace(w));
       if (!selection.workspaceId && def) setWorkspaceSelection(def.id, null);
+      // The default workspace IS the user — name it after them (the server seeds it
+      // from the email until the client, which knows the display name, fixes it).
+      const userName = session?.user?.name?.trim();
+      if (def && userName && def.name !== userName) {
+        updateWorkspace(def.id, { name: userName })
+          .then(() => setWorkspaces(prev => prev.map(w => w.id === def.id ? { ...w, name: userName } : w)))
+          .catch(() => {});
+      }
     }).catch(() => {});
-  }, []);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [session?.user?.name]);
+
+  // Workspace → Space → Folder. The sidebar "Spaces" section lists the active
+  // workspace's SPACES; each space expands to its FOLDERS.
+  const defaultWs = workspaces.find(w => isDefaultWorkspace(w)) ?? workspaces[0] ?? null;
+  const activeWorkspaceId = selection.workspaceId ?? defaultWs?.id ?? null;
+  const foldersInSpace = (spaceId: string) => foldersBySpace[spaceId] || [];
+
+  const reloadSpaces = () => { getSpaces().then(setSpaces).catch(() => {}); };
+
+  // Load the spaces whenever the active workspace changes (the header carries the
+  // active workspace, so getSpaces returns that vault's spaces).
+  useEffect(() => {
+    if (activeWorkspaceId) reloadSpaces();
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [activeWorkspaceId]);
+
+  // A space/folder created or renamed ANYWHERE refreshes the sidebar list + any
+  // already-expanded space's folders, so the sidebar never goes stale.
+  useEffect(() => {
+    const off = onVaultEvent('spaces:changed', () => {
+      reloadSpaces();
+      Object.keys(foldersBySpace).forEach(sid => {
+        getSpaceFolders(sid).then(f => setFoldersBySpace(p => ({ ...p, [sid]: f }))).catch(() => {});
+      });
+    });
+    return off;
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [foldersBySpace]);
+
+  const toggleSpace = async (space: Space) => {
+    const next = !expanded[space.id];
+    setExpanded(p => ({ ...p, [space.id]: next }));
+    if (next && !foldersBySpace[space.id]) {
+      try {
+        const f = await getSpaceFolders(space.id);
+        setFoldersBySpace(p => ({ ...p, [space.id]: f }));
+      } catch { /* ignore */ }
+    }
+  };
 
   const handleWorkspaceCreated = (ws: Workspace) => {
     setWorkspaces(prev => prev.some(w => w.id === ws.id) ? prev : [...prev, ws]);
-    setExpanded(prev => ({ ...prev, [ws.id]: true }));
     setWorkspaceSelection(ws.id, null);
     onViewChange('workspace');
   };
 
-  const toggleExpand = async (ws: Workspace) => {
-    setExpanded(prev => ({ ...prev, [ws.id]: !prev[ws.id] }));
-    if (!foldersByWs[ws.id]) {
-      try {
-        const f = await getFolders(ws.id);
-        setFoldersByWs(p => ({ ...p, [ws.id]: f }));
-      } catch {}
-    }
-  };
-
-  const handleSelectWorkspace = (ws: Workspace) => {
-    setWorkspaceSelection(ws.id, null);
-    onViewChange('workspace');
-    if (!foldersByWs[ws.id]) {
-      getFolders(ws.id).then(f => setFoldersByWs(p => ({ ...p, [ws.id]: f }))).catch(() => {});
-    }
-  };
-
-  const handleSelectFolder = (ws: Workspace, f: FolderType) => {
-    setWorkspaceSelection(ws.id, f.id);
-    onViewChange('workspace');
-  };
-
-  const handleFolderCreated = async (wsId: string, draft: FolderDraft) => {
-    const created = await createFolder(wsId, draft.title, {
+  const handleFolderCreated = async (_wsId: string, draft: FolderDraft) => {
+    const spaceId = folderModal?.spaceId;
+    if (!spaceId) { setFolderModal(null); return; }
+    const created = await createFolderInSpace(spaceId, draft.title, {
       iconType: draft.iconType,
       iconName: draft.iconName,
       color: draft.iconColor,
       emoji: draft.emoji,
-      description: draft.description,
     });
-    setFoldersByWs(p => ({ ...p, [wsId]: [...(p[wsId] || []), created] }));
-    setExpanded(p => ({ ...p, [wsId]: true }));
-    setFolderModalForWs(null);
-    setWorkspaceSelection(wsId, created.id);
+    setFoldersBySpace(p => ({ ...p, [spaceId]: [...(p[spaceId] || []), created] }));
+    setExpanded(p => ({ ...p, [spaceId]: true })); // reveal the new folder under its space
+    setFolderModal(null);
+    if (activeWorkspaceId) setWorkspaceSelection(activeWorkspaceId, created.id);
     onViewChange('workspace');
+  };
+
+  const handleSpaceCreated = (_space: Space) => {
+    setShowCreateSpace(false);
+    reloadSpaces();
   };
 
   const handleRenameWorkspace = async (ws: Workspace) => {
@@ -376,11 +404,11 @@ export default function MainSidebar({
     setWorkspaces(prev => prev.filter(w => w.id !== ws.id));
     if (selection.workspaceId === ws.id) setWorkspaceSelection(null, null);
   };
-  const handleDeleteFolderById = async (ws: Workspace, f: FolderType) => {
+  const handleDeleteFolderById = async (spaceId: string, f: FolderType) => {
     if (!window.confirm(`Delete folder "${f.name}"?`)) return;
     await deleteFolder(f.id).catch(() => {});
-    setFoldersByWs(p => ({ ...p, [ws.id]: (p[ws.id] || []).filter(x => x.id !== f.id) }));
-    if (selection.folderId === f.id) setWorkspaceSelection(ws.id, null);
+    setFoldersBySpace(p => ({ ...p, [spaceId]: (p[spaceId] || []).filter(x => x.id !== f.id) }));
+    if (selection.folderId === f.id && activeWorkspaceId) setWorkspaceSelection(activeWorkspaceId, null);
   };
   const commitRename = async () => {
     if (!renameTarget) return;
@@ -392,7 +420,7 @@ export default function MainSidebar({
     } else {
       const updated = await renameFolder(renameTarget.id, newName).catch(() => null);
       if (updated) {
-        setFoldersByWs(p => {
+        setFoldersBySpace(p => {
           const next = { ...p };
           for (const k of Object.keys(next)) {
             next[k] = next[k].map(f => f.id === updated.id ? { ...f, name: updated.name } : f);
@@ -554,48 +582,75 @@ export default function MainSidebar({
           })}
         </nav>
 
-        {/* Spaces — workspaces + folders */}
+        {/* Spaces — top-level SPACES, each expandable to its FOLDERS (Workspace → Space → Folder) */}
         <div className="flex-1 min-h-0 overflow-y-auto px-2 mt-3">
           <div className="group/sp flex items-center justify-between pl-2.5 pr-1 mb-1">
             <span className="text-[12px] font-medium text-app-fg-subtle tracking-[-0.01em]">Spaces</span>
             <button
-              onClick={() => onViewChange('spaces')}
-              title="Manage spaces"
+              onClick={() => setShowCreateSpace(true)}
+              title="Add space"
               className="w-5 h-5 flex items-center justify-center rounded-md text-app-fg-subtle opacity-0 group-hover/sp:opacity-100 hover:bg-app-nav-hover-bg hover:text-app-fg transition-all"
             >
-              <ArrowRight size={14} strokeWidth={1.8} />
+              <Plus size={14} strokeWidth={1.8} />
             </button>
           </div>
           <div className="flex flex-col gap-0.5">
-            {workspaces.slice(0, 2).map(ws => (
-              <WorkspaceRow
-                key={ws.id}
-                ws={ws}
-                folders={foldersByWs[ws.id] || []}
-                expanded={!!expanded[ws.id]}
-                selectedWorkspaceId={selection.workspaceId}
-                selectedFolderId={selection.folderId}
-                onToggleExpand={() => toggleExpand(ws)}
-                onSelectWorkspace={() => handleSelectWorkspace(ws)}
-                onSelectFolder={(f) => handleSelectFolder(ws, f)}
-                onCreateFolder={() => setFolderModalForWs(ws.id)}
-                onRenameWorkspace={() => handleRenameWorkspace(ws)}
-                onShareWorkspace={() => onViewChange('workspace')}
-                onDeleteWorkspace={() => handleDeleteWorkspace(ws)}
-                onRenameFolder={(f) => setRenameTarget({ type: 'folder', id: f.id, name: f.name })}
-                onShareFolder={() => onViewChange('workspace')}
-                onDeleteFolder={(f) => handleDeleteFolderById(ws, f)}
-              />
-            ))}
-            {workspaces.length > 2 && (
+            {spaces.map(space => {
+              const children = foldersInSpace(space.id);
+              const isExpanded = !!expanded[space.id];
+              const isSpaceSel = selection.folderId === space.id;
+              const spaceGlyph = { id: space.id, name: space.name, emoji: space.emoji ?? undefined, color: space.color ?? undefined, iconType: (space.emoji ? 'emoji' : 'icon') as 'emoji' | 'icon' } as FolderType;
+              return (
+                <div key={space.id}>
+                  {/* Space row */}
+                  <div className={`group/space flex items-center gap-1 rounded-lg ${isSpaceSel ? 'bg-app-nav-active-bg' : 'hover:bg-app-nav-hover-bg'}`}>
+                    <button
+                      onClick={() => toggleSpace(space)}
+                      className="w-5 h-7 flex items-center justify-center flex-shrink-0 text-app-fg-subtle"
+                      title={isExpanded ? 'Collapse' : 'Expand'}
+                    >
+                      <ChevronRight size={13} strokeWidth={2} className={`transition-transform ${isExpanded ? 'rotate-90' : ''}`} />
+                    </button>
+                    <button
+                      onClick={() => { if (activeWorkspaceId) { setWorkspaceSelection(activeWorkspaceId, space.id); onViewChange('workspace'); } }}
+                      className={`flex-1 min-w-0 flex items-center gap-2 pr-1 py-[6px] text-[13px] text-left transition-all ${isSpaceSel ? 'text-app-nav-fg-hover' : 'text-app-nav-fg group-hover/space:text-app-nav-fg-hover'}`}
+                    >
+                      <span className="w-4 flex items-center justify-center flex-shrink-0"><FolderGlyph folder={spaceGlyph} /></span>
+                      <span className="truncate tracking-[-0.01em]">{space.name}</span>
+                    </button>
+                    <button
+                      onClick={() => setFolderModal({ spaceId: space.id })}
+                      title="Add folder to this space"
+                      className="w-5 h-7 flex items-center justify-center flex-shrink-0 rounded-md text-app-fg-subtle opacity-0 group-hover/space:opacity-100 hover:bg-app-nav-hover-bg hover:text-app-fg transition-all mr-0.5"
+                    >
+                      <Plus size={13} strokeWidth={1.8} />
+                    </button>
+                  </div>
+                  {/* Folders inside this space */}
+                  {isExpanded && children.map(folder => {
+                    const isFolderSel = selection.folderId === folder.id;
+                    return (
+                      <button
+                        key={folder.id}
+                        onClick={() => { if (activeWorkspaceId) { setWorkspaceSelection(activeWorkspaceId, folder.id); onViewChange('workspace'); } }}
+                        className={`w-full flex items-center gap-2 pl-8 pr-1 py-[5px] text-[12.5px] rounded-lg transition-all ${isFolderSel ? 'bg-app-nav-active-bg text-app-nav-fg-hover' : 'text-app-nav-fg hover:bg-app-nav-hover-bg hover:text-app-nav-fg-hover'}`}
+                      >
+                        <span className="w-3.5 flex items-center justify-center flex-shrink-0"><FolderGlyph folder={folder} size={12} /></span>
+                        <span className="truncate tracking-[-0.01em]">{folder.name}</span>
+                      </button>
+                    );
+                  })}
+                </div>
+              );
+            })}
+            {spaces.length === 0 && (
               <button
-                onClick={() => onViewChange('spaces')}
-                title="View all spaces"
-                className="w-full flex items-center gap-2 pl-1.5 pr-1 py-[6px] text-[13px] rounded-lg text-app-nav-fg hover:bg-app-nav-hover-bg hover:text-app-nav-fg-hover transition-all"
+                onClick={() => setShowCreateSpace(true)}
+                title="Add space"
+                className="w-full flex items-center gap-2 pl-1.5 pr-1 py-[6px] text-[13px] rounded-lg text-app-fg-subtle hover:bg-app-nav-hover-bg hover:text-app-fg transition-all"
               >
-                <span className="w-4 flex-shrink-0" />
-                <MoreHorizontal size={16} strokeWidth={1.8} className="flex-shrink-0 text-app-fg-subtle" />
-                <span className="tracking-[-0.01em]">More</span>
+                <span className="w-4 flex items-center justify-center flex-shrink-0"><FolderPlus size={14} strokeWidth={1.8} /></span>
+                <span className="truncate tracking-[-0.01em]">Add space</span>
               </button>
             )}
           </div>
@@ -629,10 +684,10 @@ export default function MainSidebar({
         <div className="px-2.5 pb-3 pt-2 space-y-1 flex-shrink-0">
           <WorkspaceSwitcher
             workspaces={workspaces}
-            activeWorkspaceId={workspaces[0]?.id ?? null}
+            activeWorkspaceId={activeWorkspaceId}
             session={session}
-            onSwitchWorkspace={(ws) => { setWorkspaceSelection(ws.id, null); onViewChange('workspace'); }}
-            onCreateWorkspace={() => setShowCreateWizard(true)}
+            onSwitchWorkspace={(ws) => { setWorkspaceSelection(ws.id, null); onViewChange('process'); }}
+            onCreateWorkspace={() => { if (workspaces.length >= 5) { window.alert('You can have up to 5 workspaces.'); return; } setShowCreateWizard(true); }}
             onInvite={() => onViewChange('workspace')}
             onManageTemplates={() => onViewChange('settings')}
             onOpenHelp={() => onViewChange('settings')}
@@ -649,12 +704,19 @@ export default function MainSidebar({
           />
         )}
 
-        {folderModalForWs && (
+        {showCreateSpace && (
+          <CreateSpaceModal
+            onClose={() => setShowCreateSpace(false)}
+            onCreated={handleSpaceCreated}
+          />
+        )}
+
+        {folderModal && activeWorkspaceId && (
           <CreateFolderModal
             workspaces={workspaces}
-            defaultWorkspaceId={folderModalForWs}
-            onClose={() => setFolderModalForWs(null)}
-            onCreate={(draft) => handleFolderCreated(draft.workspaceId, draft)}
+            defaultWorkspaceId={activeWorkspaceId}
+            onClose={() => setFolderModal(null)}
+            onCreate={(draft) => handleFolderCreated(activeWorkspaceId, draft)}
           />
         )}
       </div>

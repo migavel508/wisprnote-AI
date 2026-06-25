@@ -8,13 +8,13 @@ import { TaskHistory, TaskMetadata, getTasksLightweight, getTaskById, updateTask
 import { generateMeetingTitle } from '../services/geminiService';
 import { MeetingGridSkeleton } from '../components/Skeleton';
 import {
-  getWorkspaceIndex,
-  addMeetingToWorkspace, removeMeetingFromWorkspace, addMeetingToFolder, removeMeetingFromFolder,
-  createFolder, type Workspace, type Folder, type WorkspaceIndex,
+  getSpaces, getSpaceFolders, createFolderInSpace, moveNoteToSpace,
+  type Workspace, type Folder,
 } from '../services/workspaceService';
 import { cacheGet, cacheSet } from '../services/appCache';
 import { FolderPicker } from './WorkspacePage';
 import CreateFolderModal, { type FolderDraft } from '../components/CreateFolderModal';
+import { onVaultEvent } from '../lib/vaultEvents';
 
 // ── Date grouping (Today / Yesterday / "Fri, Jun 5") — matches the workspace UI ──
 function groupHistoryByDate(items: TaskHistory[]) {
@@ -132,65 +132,48 @@ export default function HistoryPage({ history, onSelectTask, isLoading = false, 
   // Workspace/folder context for the per-row picker (move a note between spaces).
   const [workspaces, setWorkspaces] = useState<Workspace[]>([]);
   const [foldersByWs, setFoldersByWs] = useState<Record<string, Folder[]>>({});
-  const [meetingWs, setMeetingWs] = useState<Record<string, string>>({});       // meetingId → workspaceId
-  const [meetingFolder, setMeetingFolder] = useState<Record<string, string>>({}); // meetingId → folderId
+  // Optimistic per-note location override (meetingId → {spaceId, folderId}). It wins
+  // over the meeting's own space_id/folder_id from the list, so a move shows instantly
+  // (incl. moving to a space ROOT, where folderId is explicitly null). Kept in sync by
+  // vault events too, so a move on ANY page updates this row's badge here.
+  const [locOverride, setLocOverride] = useState<Record<string, { spaceId: string | null; folderId: string | null }>>({});
   const [folderModalWsId, setFolderModalWsId] = useState<string | null>(null);
 
-  // Build the picker maps from a single index payload.
-  const applyIndex = useCallback((idx: WorkspaceIndex) => {
-    setWorkspaces(idx.workspaces || []);
-    const fbw: Record<string, Folder[]> = {};
-    for (const f of idx.folders || []) {
-      const wsId = (f as any).workspace_id;
-      (fbw[wsId] ??= []).push(f);
-    }
-    setFoldersByWs(fbw);
-    const wsNext: Record<string, string> = {};
-    for (const r of idx.taskWorkspaces || []) wsNext[r.task_id] = r.workspace_id;
-    setMeetingWs(wsNext);
-    const folderNext: Record<string, string> = {};
-    for (const r of idx.taskFolders || []) folderNext[r.task_id] = r.folder_id;
-    setMeetingFolder(folderNext);
-  }, []);
-
-  // Cache-first: paint the chips instantly from the cached index, then refresh
-  // from the single /workspaces/index endpoint (one request instead of N+1).
+  // The per-row picker lists the active workspace's SPACES + their folders.
   const loadWorkspaceContext = useCallback(async () => {
     try {
-      const cached = await cacheGet<WorkspaceIndex>('ws-index');
-      if (cached) applyIndex(cached);
-    } catch { /* ignore */ }
-    try {
-      const idx = await getWorkspaceIndex();
-      applyIndex(idx);
-      await cacheSet('ws-index', idx);
-    } catch { /* keep cached / empty */ }
-  }, [applyIndex]);
+      const spaces = await getSpaces();
+      setWorkspaces(spaces as unknown as Workspace[]);
+      const rows = await Promise.all(
+        spaces.map(s => getSpaceFolders(s.id).then(f => ({ id: s.id, f })).catch(() => ({ id: s.id, f: [] as Folder[] }))),
+      );
+      const fbw: Record<string, Folder[]> = {};
+      for (const r of rows) fbw[r.id] = r.f;
+      setFoldersByWs(fbw);
+    } catch { /* keep empty */ }
+  }, []);
 
   useEffect(() => { void loadWorkspaceContext(); }, [loadWorkspaceContext, history.length]);
 
-  // Move a note to a workspace root or a folder (backend + optimistic local maps).
-  const changeMeetingFolder = useCallback(async (taskId: string, newWsId: string, newFolderId: string | null) => {
-    const oldWsId = meetingWs[taskId];
-    const oldFolderId = meetingFolder[taskId];
-    setMeetingWs(prev => ({ ...prev, [taskId]: newWsId }));
-    setMeetingFolder(prev => {
-      const next = { ...prev };
-      if (newFolderId) next[taskId] = newFolderId; else delete next[taskId];
-      return next;
-    });
-    try {
-      if (oldFolderId && oldFolderId !== newFolderId) await removeMeetingFromFolder(oldFolderId, taskId).catch(() => {});
-      if (oldWsId && oldWsId !== newWsId) await removeMeetingFromWorkspace(oldWsId, taskId).catch(() => {});
-      await addMeetingToWorkspace(newWsId, taskId).catch(() => {});
-      if (newFolderId) await addMeetingToFolder(newFolderId, taskId).catch(() => {});
-    } catch { /* best effort; local state already reflects intent */ }
-  }, [meetingWs, meetingFolder]);
+  // Keep this page live: a note moved anywhere updates its badge here; spaces/folders
+  // changing anywhere reloads the picker list. One change → reflected everywhere.
+  useEffect(() => {
+    const offNotes = onVaultEvent('notes:changed', ({ taskId, spaceId, folderId }) =>
+      setLocOverride(prev => ({ ...prev, [taskId]: { spaceId, folderId } })));
+    const offSpaces = onVaultEvent('spaces:changed', () => { void loadWorkspaceContext(); });
+    return () => { offNotes(); offSpaces(); };
+  }, [loadWorkspaceContext]);
+
+  // Move a note into a SPACE (and optionally a folder within it).
+  const changeMeetingFolder = useCallback(async (taskId: string, spaceId: string, newFolderId: string | null) => {
+    setLocOverride(prev => ({ ...prev, [taskId]: { spaceId, folderId: newFolderId } }));
+    await moveNoteToSpace(spaceId, taskId, newFolderId).catch(() => { /* local state already reflects intent */ });
+  }, []);
 
   const handleCreateFolder = useCallback(async (draft: FolderDraft) => {
-    if (!draft.workspaceId) return;
-    const created = await createFolder(draft.workspaceId, draft.title, {
-      iconType: draft.iconType, iconName: draft.iconName, color: draft.iconColor, emoji: draft.emoji, description: draft.description,
+    if (!draft.workspaceId) return; // draft.workspaceId carries the target SPACE id here
+    const created = await createFolderInSpace(draft.workspaceId, draft.title, {
+      iconType: draft.iconType, iconName: draft.iconName, color: draft.iconColor, emoji: draft.emoji,
     });
     setFoldersByWs(p => ({ ...p, [draft.workspaceId]: [...(p[draft.workspaceId] || []), created] }));
     setFolderModalWsId(null);
@@ -433,17 +416,23 @@ export default function HistoryPage({ history, onSelectTask, isLoading = false, 
                             )}
                           </div>
                           <div className="flex items-center gap-1.5 flex-shrink-0 mt-0.5" onClick={e => e.stopPropagation()}>
-                            {task.id && (
-                              <FolderPicker
-                                workspaces={workspaces}
-                                foldersByWs={foldersByWs}
-                                currentWsId={meetingWs[task.id] ?? null}
-                                currentFolderId={meetingFolder[task.id] ?? null}
-                                onSelectWorkspace={(wsId) => changeMeetingFolder(task.id!, wsId, null)}
-                                onSelectFolder={(wsId, folderId) => changeMeetingFolder(task.id!, wsId, folderId)}
-                                onCreateFolder={() => setFolderModalWsId(meetingWs[task.id!] ?? workspaces[0]?.id ?? null)}
-                              />
-                            )}
+                            {task.id && (() => {
+                              // The note's location: optimistic override (latest move)
+                              // else the meeting's own space_id/folder_id from the list.
+                              const loc = locOverride[task.id]
+                                ?? { spaceId: task.space_id ?? null, folderId: task.folder_id ?? null };
+                              return (
+                                <FolderPicker
+                                  workspaces={workspaces}
+                                  foldersByWs={foldersByWs}
+                                  currentWsId={loc.spaceId}
+                                  currentFolderId={loc.folderId}
+                                  onSelectWorkspace={(wsId) => changeMeetingFolder(task.id!, wsId, null)}
+                                  onSelectFolder={(wsId, folderId) => changeMeetingFolder(task.id!, wsId, folderId)}
+                                  onCreateFolder={() => setFolderModalWsId(loc.spaceId ?? workspaces[0]?.id ?? null)}
+                                />
+                              );
+                            })()}
                             <span className="text-[11.5px] text-app-fg-subtle px-1 tabular-nums group-hover:hidden">{formatTime(task.created_at)}</span>
                           </div>
                         </div>

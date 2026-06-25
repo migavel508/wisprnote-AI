@@ -1,5 +1,6 @@
 import { fetch as tauriFetch } from '@tauri-apps/plugin-http';
 import { getIdToken, getUserId } from './awsAuthService';
+import { getSelection } from './workspaceSelection';
 import { logger } from '../lib/logger';
 
 const log = logger.scope('AWSService');
@@ -26,6 +27,11 @@ async function apiRequest<T = any>(
     const token = await getIdToken();
     headers['Authorization'] = token;
   }
+
+  // W1: tell the server which workspace (vault) this request is scoped to. Absent on
+  // the very first load → the server falls back to the user's default workspace.
+  const activeWorkspaceId = getSelection().workspaceId;
+  if (activeWorkspaceId) headers['X-Workspace-Id'] = activeWorkspaceId;
 
   const url = `${API_BASE}${path}`;
   // Abort the request if it stalls — a hung fetch (cold start, flaky network)
@@ -90,6 +96,10 @@ export interface TaskHistory {
   personal_note?: string;
   visualization_image?: string;
   attendees?: string[];
+  /** Where the note lives: the space (and optional folder within it). Notes never
+      live directly under a workspace — workspace → space → folder → note. */
+  space_id?: string | null;
+  folder_id?: string | null;
   /** 'batch' for uploaded recordings (counts toward batch-hour limits) or
       'realtime' for live transcription. Defaults to realtime server-side. */
   source?: 'batch' | 'realtime';
@@ -105,6 +115,10 @@ export interface TaskMetadata {
   // Returned by the lightweight list so the People chip can render immediately,
   // before the full per-task detail fetch completes.
   attendees?: string[];
+  // Where the meeting lives (space + optional folder within it) so every list can
+  // show which space a meeting belongs to without a second fetch.
+  space_id?: string | null;
+  folder_id?: string | null;
 }
 
 export async function saveTask(task: TaskHistory): Promise<TaskHistory> {
@@ -428,7 +442,7 @@ export interface ChatMessage {
     status: 'pending' | 'running' | 'done' | 'error';
     detail?: string;
     type?: 'search-tool' | 'plan';
-    search_kind?: 'notes' | 'people';
+    search_kind?: 'notes' | 'people' | 'analyze' | 'read';
     search_query?: string;
     search_results?: Array<{
       meeting_id: string;
