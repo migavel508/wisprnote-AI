@@ -64,7 +64,7 @@ export default function BrainMapModal({ workspaceId, workspaceName, folderId = n
   };
   const doSync = async (cancelledRef?: { v: boolean }) => {
     setSyncing(true);
-    const r = await syncBrain(workspaceId);
+    const r = await syncBrain(workspaceId, spaceId);
     if (cancelledRef?.v) return;
     if (r?.syncedAt) setLastSync(r.syncedAt);
     await reloadView(cancelledRef);
@@ -133,7 +133,7 @@ export default function BrainMapModal({ workspaceId, workspaceName, folderId = n
     setSelLink(null);
     setDetail({ node: { id, source: fallbackSource || '', title: fallbackTitle || '' }, connections: [] });
     setDetailLoading(true);
-    getBrainNode(workspaceId, id)
+    getBrainNode(workspaceId, id, spaceId)
       .then((d) => { if (d) setDetail(d); })
       .finally(() => setDetailLoading(false));
   };

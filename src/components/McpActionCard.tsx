@@ -23,7 +23,7 @@ const labelCls = 'text-[10px] font-mono font-medium text-app-fg-label uppercase 
 
 const isScalar = (v: unknown) => v === null || ['string', 'number', 'boolean'].includes(typeof v);
 
-export default function McpActionCard({ proposal, workspaceId }: { proposal: McpWriteProposal; workspaceId: string }) {
+export default function McpActionCard({ proposal, workspaceId, onResolved }: { proposal: McpWriteProposal; workspaceId: string; onResolved?: (status: 'executed' | 'dismissed', result?: McpWriteResult) => void }) {
   const [args, setArgs] = useState<Record<string, unknown>>(() => ({ ...(proposal.args || {}) }));
   const [state, setState] = useState<'editing' | 'working' | 'done' | 'error' | 'dismissed'>('editing');
   const [result, setResult] = useState<McpWriteResult | null>(null);
@@ -37,7 +37,10 @@ export default function McpActionCard({ proposal, workspaceId }: { proposal: Mcp
       .catch((): McpWriteResult => ({ ok: false, message: 'Network error.' }));
     setResult(r);
     setState(r.ok ? 'done' : 'error');
+    if (r.ok) onResolved?.('executed', r);   // clear it from the suggestion queue
   };
+
+  const dismiss = () => { setState('dismissed'); onResolved?.('dismissed'); };
 
   if (state === 'dismissed') return <div className="mt-2 text-[11.5px] text-app-fg-subtle italic">Dismissed — nothing was written.</div>;
   if (state === 'done' && result) {
@@ -94,7 +97,7 @@ export default function McpActionCard({ proposal, workspaceId }: { proposal: Mcp
       )}
 
       <div className="flex items-center justify-end gap-2 px-3.5 py-2.5 border-t border-app-border bg-app-panel/40">
-        <button onClick={() => setState('dismissed')} disabled={state === 'working'} className="px-3 py-1.5 rounded-lg text-[12px] text-app-fg-muted hover:bg-app-nav-hover-bg disabled:opacity-50 flex items-center gap-1.5"><X size={13} /> Dismiss</button>
+        <button onClick={dismiss} disabled={state === 'working'} className="px-3 py-1.5 rounded-lg text-[12px] text-app-fg-muted hover:bg-app-nav-hover-bg disabled:opacity-50 flex items-center gap-1.5"><X size={13} /> Dismiss</button>
         <button onClick={approve} disabled={state === 'working'} className="px-3.5 py-1.5 rounded-lg text-[12px] font-semibold bg-app-accent text-app-accent-fg hover:bg-app-accent-hover disabled:opacity-60 flex items-center gap-1.5">
           {state === 'working' ? <Loader2 size={13} className="animate-spin" /> : <Check size={13} strokeWidth={2.5} />}
           {state === 'working' ? 'Applying…' : state === 'error' ? 'Retry' : 'Approve & apply'}

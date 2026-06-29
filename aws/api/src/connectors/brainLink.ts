@@ -139,9 +139,9 @@ export async function runBrainLink(opts?: BrainLinkOpts): Promise<BrainLinkResul
     result.workspaces++;
 
     // Index this workspace's items by (source, source_id) → id, for reference matching.
-    type Item = { id: string; source: string; source_id: string; type: string | null; title: string | null; body: string | null; enriched_summary: string | null; fingerprint: string | null; folder_id: string | null };
+    type Item = { id: string; source: string; source_id: string; type: string | null; title: string | null; body: string | null; enriched_summary: string | null; fingerprint: string | null; folder_id: string | null; space_id: string | null };
     const items: Item[] = await query<any>(
-      `SELECT id, source, source_id, type, title, body, enriched_summary, fingerprint, folder_id FROM knowledge_item WHERE user_id=$1 AND workspace_id=$2`,
+      `SELECT id, source, source_id, type, title, body, enriched_summary, fingerprint, folder_id, space_id FROM knowledge_item WHERE user_id=$1 AND workspace_id=$2`,
       [userId, workspaceId],
     ).catch(() => []);
     const byKey = new Map(items.map((i) => [`${i.source}:${i.source_id}`, String(i.id)]));
@@ -159,7 +159,8 @@ export async function runBrainLink(opts?: BrainLinkOpts): Promise<BrainLinkResul
         const jiraItemId = key ? byKey.get(`jira:${key}`) : null;
         const meetingItemId = p.source_meeting_id ? byKey.get(`meeting:${p.source_meeting_id}`) : null;
         if (meetingItemId && jiraItemId) {
-          if (await insertEdge({ userId, workspaceId, srcKind: 'item', srcId: meetingItemId, dstKind: 'item', dstId: jiraItemId, relation: 'spawned', origin: 'provenance', confidence: 1, evidence: `created ${key}` })) result.provenance++;
+          const sp = itemById.get(meetingItemId)?.space_id ?? itemById.get(jiraItemId)?.space_id ?? null;
+          if (await insertEdge({ userId, workspaceId, spaceId: sp, srcKind: 'item', srcId: meetingItemId, dstKind: 'item', dstId: jiraItemId, relation: 'spawned', origin: 'provenance', confidence: 1, evidence: `created ${key}` })) result.provenance++;
         }
       }
     } catch { /* best-effort */ }
@@ -172,7 +173,7 @@ export async function runBrainLink(opts?: BrainLinkOpts): Promise<BrainLinkResul
         for (const m of body.matchAll(JIRA_KEY)) {
           const target = byKey.get(`jira:${m[1]}`);
           if (target && target !== String(it.id)) {
-            if (await insertEdge({ userId, workspaceId, srcKind: 'item', srcId: String(it.id), dstKind: 'item', dstId: target, relation: 'references', origin: 'reference', confidence: 0.95, evidence: m[1] })) result.reference++;
+            if (await insertEdge({ userId, workspaceId, spaceId: it.space_id ?? itemById.get(target)?.space_id ?? null, srcKind: 'item', srcId: String(it.id), dstKind: 'item', dstId: target, relation: 'references', origin: 'reference', confidence: 0.95, evidence: m[1] })) result.reference++;
           }
         }
       }
@@ -183,7 +184,7 @@ export async function runBrainLink(opts?: BrainLinkOpts): Promise<BrainLinkResul
           for (const m of body.matchAll(/#(\d+)\b/g)) {
             const target = byKey.get(`github:${repo}#${m[1]}`);
             if (target && target !== String(it.id)) {
-              if (await insertEdge({ userId, workspaceId, srcKind: 'item', srcId: String(it.id), dstKind: 'item', dstId: target, relation: 'references', origin: 'reference', confidence: 0.9, evidence: `#${m[1]}` })) result.reference++;
+              if (await insertEdge({ userId, workspaceId, spaceId: it.space_id ?? itemById.get(target)?.space_id ?? null, srcKind: 'item', srcId: String(it.id), dstKind: 'item', dstId: target, relation: 'references', origin: 'reference', confidence: 0.9, evidence: `#${m[1]}` })) result.reference++;
             }
           }
         }
@@ -261,7 +262,10 @@ export async function runBrainLink(opts?: BrainLinkOpts): Promise<BrainLinkResul
           // relates to — the meeting that planned it, the Jira task it implemented, the commits it
           // produced. (Modelling it as an intent — not a candidate — means a freshly-synced session
           // links to ALREADY-linked meetings/tasks without re-running them.)
-          const candSources = isSession ? ['meeting', 'jira', 'github'] : isTask ? ['github'] : ['jira', 'github'];
+          // A MEETING links to related MEETINGS too (so a space of related meetings shows
+          // interconnections, not just isolated nodes) plus Jira/GitHub. A Jira task stays
+          // code-only (task→commit); a dev session links to all three.
+          const candSources = isSession ? ['meeting', 'jira', 'github'] : isTask ? ['github'] : ['meeting', 'jira', 'github'];
           const candK = (isTask || isSession) ? CAND_K : 10;   // meetings may legitimately touch several projects
           const mv = await embedTexts([[self.title, (self.body || '').slice(0, 1500)].filter(Boolean).join('\n')]).catch(() => null);
           const hits = mv?.[0] ? await queryNearestItems(userId, workspaceId, mv[0], candK * 4, candSources).catch(() => null) : null;
@@ -304,7 +308,7 @@ export async function runBrainLink(opts?: BrainLinkOpts): Promise<BrainLinkResul
           const links = await judgeAlignment({ kind: isSession ? 'DEV SESSION' : isTask ? 'JIRA TASK' : 'MEETING', title: self.title, body: self.body }, cands);
           for (const l of links) {
             // Verdict + rationale stored ON the edge → the line is coloured & explains itself.
-            if (await insertEdge({ userId, workspaceId, srcKind: 'item', srcId: String(self.id), dstKind: 'item', dstId: l.id, relation: l.relation, origin: 'llm', confidence: 0.9, evidence: l.verdict, verdict: l.verdict, rationale: l.rationale })) result.llm++;
+            if (await insertEdge({ userId, workspaceId, spaceId: itemById.get(String(self.id))?.space_id ?? itemById.get(l.id)?.space_id ?? null, srcKind: 'item', srcId: String(self.id), dstKind: 'item', dstId: l.id, relation: l.relation, origin: 'llm', confidence: 0.9, evidence: l.verdict, verdict: l.verdict, rationale: l.rationale })) result.llm++;
             // Keep the reasoning ledger too (history) for meeting intents.
             if (!isTask && !isSession) await insertReasoning({ userId, workspaceId, meetingId: String(self.id), implId: l.id, verdict: l.verdict, rationale: l.rationale, tags: [l.verdict, l.relation] }).catch(() => {});
             // Co-architect advisory: store the code read on the COMMIT itself (diff-grounded).
@@ -325,7 +329,7 @@ export async function runBrainLink(opts?: BrainLinkOpts): Promise<BrainLinkResul
             if (!hit || (hit.folder_id ?? null) !== selfFolder) continue;   // same project only
             const crossSource = hit.source !== self.source;
             if (!crossSource && h.similarity < 0.82) continue;
-            if (await insertEdge({ userId, workspaceId, srcKind: 'item', srcId: String(self.id), dstKind: 'item', dstId: h.id, relation: 'related', origin: 'semantic', confidence: h.similarity })) { result.semantic++; made++; }
+            if (await insertEdge({ userId, workspaceId, spaceId: itemById.get(String(self.id))?.space_id ?? hit.space_id ?? null, srcKind: 'item', srcId: String(self.id), dstKind: 'item', dstId: h.id, relation: 'related', origin: 'semantic', confidence: h.similarity })) { result.semantic++; made++; }
           }
         }
         await query(`INSERT INTO brain_link_state (user_id, workspace_id, item_id) VALUES ($1,$2,$3) ON CONFLICT (user_id, workspace_id, item_id) DO UPDATE SET linked_at=NOW()`, [userId, workspaceId, self.id]).catch(() => {});

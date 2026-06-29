@@ -1,5 +1,5 @@
 import { query, queryOne } from '../../db';
-import { ensureConnectorSchema } from '../schema';
+import { ensureConnectorSchema, ACCOUNT_SCOPE } from '../schema';
 import { getSecrets } from '../../secrets';
 import { MODELS } from '../../models/registry';
 import { upsertItem } from '../sync';
@@ -104,7 +104,14 @@ export async function ingestLocalSessions(userId: string, workspaceId: string, d
       actor: null,
     };
     const folderId = isUuid(d.folderId) ? String(d.folderId) : null;
-    try { await upsertItem(userId, workspaceId, it, folderId); doneBySource[d.source].push(String(d.sessionId)); upserted++; }
+    // A dev session is space-scoped via its folder (project); fall back to the sentinel and let
+    // the follow-linked-meeting backfill re-home it from the meeting/task it links to.
+    let spaceId = ACCOUNT_SCOPE;
+    if (folderId) {
+      const f = await queryOne<{ space_id: string | null }>(`SELECT space_id FROM folders WHERE id=$1`, [folderId]).catch(() => null);
+      if (f?.space_id) spaceId = f.space_id;
+    }
+    try { await upsertItem(userId, workspaceId, spaceId, it, folderId); doneBySource[d.source].push(String(d.sessionId)); upserted++; }
     catch { skipped++; }
   }
 

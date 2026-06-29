@@ -22,27 +22,39 @@ export interface TokenRecord {
 export async function storeToken(
   userId: string, source: string, token: unknown,
   account: string | null = null, scopes: string[] | null = null,
-  workspaceId: string = ACCOUNT_SCOPE,
+  workspaceId: string = ACCOUNT_SCOPE, spaceId: string = ACCOUNT_SCOPE,
 ): Promise<void> {
   await ensureConnectorSchema();
   await query(
-    `INSERT INTO connector_credentials (user_id, workspace_id, source, token, account, scopes)
-     VALUES ($1,$2,$3,$4,$5,$6)
-     ON CONFLICT (user_id, workspace_id, source) DO UPDATE SET
+    `INSERT INTO connector_credentials (user_id, workspace_id, space_id, source, token, account, scopes)
+     VALUES ($1,$2,$3,$4,$5,$6,$7)
+     ON CONFLICT (user_id, workspace_id, space_id, source) DO UPDATE SET
        token=EXCLUDED.token, account=EXCLUDED.account, scopes=EXCLUDED.scopes, updated_at=NOW()`,
-    [userId, workspaceId, source, JSON.stringify(token), account, scopes],
+    [userId, workspaceId, spaceId, source, JSON.stringify(token), account, scopes],
   );
 }
 
 export async function getToken(
-  userId: string, source: string, workspaceId: string = ACCOUNT_SCOPE,
+  userId: string, source: string, workspaceId: string = ACCOUNT_SCOPE, spaceId: string = ACCOUNT_SCOPE,
 ): Promise<TokenRecord | null> {
   await ensureConnectorSchema();
-  const r = await queryOne<{ token: unknown; account: string | null; scopes: string[] | null }>(
-    `SELECT token, account, scopes FROM connector_credentials
-      WHERE user_id=$1 AND workspace_id=$2 AND source=$3`,
-    [userId, workspaceId, source],
+  // STRICT per-space authorization: a connection is authorized for an EXACT (workspace, space).
+  // A real space NEVER borrows another space's token — that was a cross-space leak (a space with no
+  // connection silently used another's). The ONLY fallback is for ACCOUNT-LEVEL callers (spaceId ==
+  // ACCOUNT_SCOPE) that genuinely aren't space-scoped — they may resolve the workspace's connection.
+  let r = await queryOne<{ token: unknown; account: string | null; scopes: string[] | null; space_id: string }>(
+    `SELECT token, account, scopes, space_id FROM connector_credentials
+      WHERE user_id=$1 AND workspace_id=$2 AND space_id=$3 AND source=$4`,
+    [userId, workspaceId, spaceId, source],
   );
+  if (!r && spaceId === ACCOUNT_SCOPE) {
+    r = await queryOne<{ token: unknown; account: string | null; scopes: string[] | null; space_id: string }>(
+      `SELECT token, account, scopes, space_id FROM connector_credentials
+        WHERE user_id=$1 AND workspace_id=$2 AND source=$3 ORDER BY updated_at DESC LIMIT 1`,
+      [userId, workspaceId, source],
+    );
+    if (r) spaceId = r.space_id;   // refresh writes back to the credential we actually found
+  }
   if (!r) return null;
 
   // Auto-refresh expired OAuth tokens (transparent to every caller). Only fires when the
@@ -62,8 +74,8 @@ export async function getToken(
         oauth_meta: m,
         expires_at: fresh.expires_in ? Date.now() + (fresh.expires_in - 60) * 1000 : null,
       };
-      await storeToken(userId, source, token, r.account, r.scopes, workspaceId);
-      console.log('oauth_refreshed', JSON.stringify({ source, workspaceId }));
+      await storeToken(userId, source, token, r.account, r.scopes, workspaceId, spaceId);
+      console.log('oauth_refreshed', JSON.stringify({ source, workspaceId, spaceId }));
     } catch (e: any) {
       console.error('oauth_refresh_failed', JSON.stringify({ source, message: e?.message }));
       // fall through with the stale token; the caller fails gracefully + user can reconnect
@@ -73,11 +85,11 @@ export async function getToken(
 }
 
 export async function deleteToken(
-  userId: string, source: string, workspaceId: string = ACCOUNT_SCOPE,
+  userId: string, source: string, workspaceId: string = ACCOUNT_SCOPE, spaceId: string = ACCOUNT_SCOPE,
 ): Promise<void> {
   await ensureConnectorSchema();
   await query(
-    `DELETE FROM connector_credentials WHERE user_id=$1 AND workspace_id=$2 AND source=$3`,
-    [userId, workspaceId, source],
+    `DELETE FROM connector_credentials WHERE user_id=$1 AND workspace_id=$2 AND space_id=$3 AND source=$4`,
+    [userId, workspaceId, spaceId, source],
   );
 }

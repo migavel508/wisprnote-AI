@@ -24,8 +24,10 @@ registerConnector({
   id: 'jira',
   async sync(userId, scope, cursor) {
     const server = getMcpServer('jira');
-    // `scope` is the workspace_id — fetch the token connected in THIS workspace.
-    const cred = await getToken(userId, 'jira', scope);
+    // `scope` is the compound "<workspace>:<space>" — fetch the token connected in THIS
+    // (workspace, space). Tolerate a bare workspace (legacy) by defaulting the space.
+    const [workspaceId, spaceId = '00000000-0000-0000-0000-000000000000'] = scope.split(':');
+    const cred = await getToken(userId, 'jira', workspaceId, spaceId);
     const accessToken = (cred?.token as any)?.access_token;
     if (!server?.url || !accessToken) return { items: [], nextCursor: null };
 
@@ -74,18 +76,34 @@ registerConnector({
 
     const issues: any[] = Array.isArray(parsed?.issues) ? parsed.issues : [];
 
-    // WHO moved each task: author of the most-recent STATUS transition. The SUPPORTED path is a
-    // per-issue getJiraIssue(expand='changelog'). Bounded (incremental pages are small; on a
-    // big backfill the first N get the real author, the rest fall back to assignee).
-    const CHANGELOG_CAP = 12;
+    // Per-issue changelog (the SUPPORTED path: getJiraIssue expand='changelog'): we extract BOTH
+    //   (a) WHO moved it — author of the most-recent status transition (→ item.actor), and
+    //   (b) the FULL status-transition HISTORY (→ item.events), so the Activity feed shows every
+    //       To Do→In Progress→Done with who/when — not just deltas observed between two syncs.
+    // Bounded per page (incremental pages are small; over ticks every changed issue is covered).
+    type StatusEv = { kind: 'status_change'; fromState: string | null; toState: string; actor: string | null; occurredAt: string };
+    const CHANGELOG_CAP = 25;
     const actorByKey = new Map<string, string>();
+    const eventsByKey = new Map<string, StatusEv[]>();
     await Promise.all(issues.slice(0, CHANGELOG_CAP).map(async (iss: any) => {
       try {
         const r = await mcpCallTool(server, accessToken, 'getJiraIssue', { cloudId, issueIdOrKey: iss.key, expand: 'changelog', fields: ['status'], responseContentFormat: 'markdown' });
         const d = JSON.parse(r?.content?.[0]?.text ?? '{}');
         const hist: any[] = Array.isArray(d.changelog?.histories) ? d.changelog.histories : [];
-        for (let i = hist.length - 1; i >= 0; i--) {
-          if (Array.isArray(hist[i]?.items) && hist[i].items.some((c: any) => c.field === 'status')) { if (hist[i].author?.displayName) actorByKey.set(iss.key, hist[i].author.displayName); break; }
+        const evs: StatusEv[] = [];
+        for (const h of hist) {
+          if (!h?.created) continue;   // need a timestamp (it's part of the event's identity)
+          const statusItems = Array.isArray(h?.items) ? h.items.filter((c: any) => c.field === 'status') : [];
+          for (const c of statusItems) {
+            if (!c.toString) continue;
+            evs.push({ kind: 'status_change', fromState: c.fromString ?? null, toState: c.toString, actor: h.author?.displayName ?? null, occurredAt: h.created });
+          }
+        }
+        evs.sort((a, b) => (a.occurredAt || '').localeCompare(b.occurredAt || ''));   // oldest → newest
+        if (evs.length) {
+          eventsByKey.set(iss.key, evs);
+          const lastActor = evs[evs.length - 1].actor;
+          if (lastActor) actorByKey.set(iss.key, lastActor);
         }
       } catch { /* fall back to assignee */ }
     }));
@@ -110,6 +128,7 @@ registerConnector({
         body,
         status: f.status?.name || null,         // live status → drives status-change events
         actor: actorByKey.get(iss.key) || f.assignee?.displayName || null, // who moved it (changelog) → assignee fallback
+        events: eventsByKey.get(iss.key),        // FULL status history → Activity feed (incl. historical)
         people,
         links: siteUrl ? { url: `${siteUrl}/browse/${iss.key}` } : {},
         raw: iss,

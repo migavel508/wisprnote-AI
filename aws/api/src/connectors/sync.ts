@@ -17,55 +17,70 @@ import { folderResolverFor, WS_DEFAULT } from './routing';
 const SOURCE_CAP = 25;     // connected (workspace,source) pairs per tick
 const TIME_BUDGET_MS = 24_000;
 
-export async function upsertItem(userId: string, workspaceId: string, it: KnowledgeItemInput, folderId: string | null): Promise<void> {
+export async function upsertItem(userId: string, workspaceId: string, spaceId: string, it: KnowledgeItemInput, folderId: string | null): Promise<void> {
   // Read the prior row first so we can OBSERVE state changes (status transitions, brand-new
   // commits) and record them as events — the brain mirrors mutations, it doesn't just snapshot.
+  // Strictly (workspace + space)-scoped — connectors are connected per space.
   const prior = await queryOne<{ id: string; status: string | null }>(
-    `SELECT id, status FROM knowledge_item WHERE user_id=$1 AND workspace_id=$2 AND source=$3 AND source_id=$4 AND type=$5`,
-    [userId, workspaceId, it.source, it.source_id, it.type],
+    `SELECT id, status FROM knowledge_item WHERE user_id=$1 AND workspace_id=$2 AND space_id=$3 AND source=$4 AND source_id=$5 AND type=$6`,
+    [userId, workspaceId, spaceId, it.source, it.source_id, it.type],
   ).catch(() => null);
 
   // folder_id = the project this item belongs to (resolved from its source_id). COALESCE so a
   // re-sync that can't resolve a folder (mapping not loaded) doesn't WIPE an existing tag.
   const row = await queryOne<{ id: string }>(
-    `INSERT INTO knowledge_item (user_id, workspace_id, source, source_id, type, title, body, status, people, links, raw, occurred_at, folder_id, synced_at)
-     VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13, NOW())
-     ON CONFLICT (user_id, workspace_id, source, source_id, type) DO UPDATE SET
+    `INSERT INTO knowledge_item (user_id, workspace_id, space_id, source, source_id, type, title, body, status, people, links, raw, occurred_at, folder_id, synced_at)
+     VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14, NOW())
+     ON CONFLICT (user_id, workspace_id, space_id, source, source_id, type) DO UPDATE SET
        title=EXCLUDED.title, body=EXCLUDED.body, status=EXCLUDED.status, people=EXCLUDED.people,
        links=EXCLUDED.links, raw=EXCLUDED.raw, occurred_at=EXCLUDED.occurred_at,
        folder_id=COALESCE(EXCLUDED.folder_id, knowledge_item.folder_id), synced_at=NOW()
      RETURNING id`,
     [
-      userId, workspaceId, it.source, it.source_id, it.type, it.title ?? null, it.body ?? null, it.status ?? null,
+      userId, workspaceId, spaceId, it.source, it.source_id, it.type, it.title ?? null, it.body ?? null, it.status ?? null,
       JSON.stringify(it.people ?? null), JSON.stringify(it.links ?? null),
       JSON.stringify(it.raw ?? {}), it.occurred_at ?? null, folderId,
     ],
   );
   const itemId = row?.id ?? prior?.id ?? null;
 
+  // HISTORICAL transitions from the source's changelog (idempotent on the unique key) — this is
+  // what makes the Activity feed show a task's FULL status history, incl. transitions that
+  // happened before we ever synced it (the delta check below only sees changes BETWEEN syncs).
+  if (Array.isArray(it.events) && it.events.length) {
+    for (const ev of it.events) {
+      if (!ev?.toState) continue;
+      await insertEvent({ userId, workspaceId, spaceId, itemId, source: it.source, sourceId: it.source_id, kind: ev.kind || 'status_change', actor: ev.actor ?? it.actor ?? null, fromState: ev.fromState ?? null, toState: ev.toState, title: it.title ?? null, occurredAt: ev.occurredAt ?? null });
+    }
+  }
+
   // Emit observed events: a status transition, or a brand-new commit landing.
   // NOTE: require a non-null PRIOR status so the first sync (which back-fills NULL→current
   // for every existing issue) doesn't emit a flood of spurious "moved to X" events.
   if (it.status && prior && prior.status && prior.status !== it.status) {
-    await insertEvent({ userId, workspaceId, itemId, source: it.source, sourceId: it.source_id, kind: 'status_change', actor: it.actor ?? null, fromState: prior.status, toState: it.status, title: it.title ?? null, occurredAt: it.occurred_at ?? null });
+    await insertEvent({ userId, workspaceId, spaceId, itemId, source: it.source, sourceId: it.source_id, kind: 'status_change', actor: it.actor ?? null, fromState: prior.status, toState: it.status, title: it.title ?? null, occurredAt: it.occurred_at ?? null });
   } else if (!prior && it.type === 'commit') {
-    await insertEvent({ userId, workspaceId, itemId, source: it.source, sourceId: it.source_id, kind: 'commit', actor: it.actor ?? null, title: it.title ?? null, occurredAt: it.occurred_at ?? null });
+    await insertEvent({ userId, workspaceId, spaceId, itemId, source: it.source, sourceId: it.source_id, kind: 'commit', actor: it.actor ?? null, title: it.title ?? null, occurredAt: it.occurred_at ?? null });
   } else if (!prior && it.status) {
-    await insertEvent({ userId, workspaceId, itemId, source: it.source, sourceId: it.source_id, kind: 'created', actor: it.actor ?? null, toState: it.status, title: it.title ?? null, occurredAt: it.occurred_at ?? null });
+    await insertEvent({ userId, workspaceId, spaceId, itemId, source: it.source, sourceId: it.source_id, kind: 'created', actor: it.actor ?? null, toState: it.status, title: it.title ?? null, occurredAt: it.occurred_at ?? null });
   }
 }
 
 export interface ConnectorSyncResult { sources: number; processed: number; errors: number }
 
-export async function runConnectorSync(workspaceId?: string): Promise<ConnectorSyncResult> {
+export async function runConnectorSync(workspaceId?: string, spaceId?: string): Promise<ConnectorSyncResult> {
   await ensureConnectorSchema();
   const started = Date.now();
-  // On-demand path scopes to ONE workspace (sync-now); the cron syncs all (round-robin).
-  const creds = workspaceId
-    ? await query<{ user_id: string; workspace_id: string; source: string }>(
-        `SELECT user_id, workspace_id, source FROM connector_credentials WHERE workspace_id=$1`, [workspaceId])
-    : await query<{ user_id: string; workspace_id: string; source: string }>(
-        `SELECT user_id, workspace_id, source FROM connector_credentials ORDER BY updated_at ASC LIMIT $1`, [SOURCE_CAP]);
+  // Connectors are per (workspace, space). On-demand path scopes to ONE (workspace[, space])
+  // (sync-now); the cron syncs all (round-robin). Each credential carries its own space.
+  const creds = (workspaceId && spaceId)
+    ? await query<{ user_id: string; workspace_id: string; space_id: string; source: string }>(
+        `SELECT user_id, workspace_id, space_id, source FROM connector_credentials WHERE workspace_id=$1 AND space_id=$2`, [workspaceId, spaceId])
+    : workspaceId
+    ? await query<{ user_id: string; workspace_id: string; space_id: string; source: string }>(
+        `SELECT user_id, workspace_id, space_id, source FROM connector_credentials WHERE workspace_id=$1`, [workspaceId])
+    : await query<{ user_id: string; workspace_id: string; space_id: string; source: string }>(
+        `SELECT user_id, workspace_id, space_id, source FROM connector_credentials ORDER BY updated_at ASC LIMIT $1`, [SOURCE_CAP]);
   const result: ConnectorSyncResult = { sources: 0, processed: 0, errors: 0 };
 
   for (const c of creds) {
@@ -73,7 +88,8 @@ export async function runConnectorSync(workspaceId?: string): Promise<ConnectorS
     const conn = getConnector(c.source);
     if (!conn) continue; // credential for a not-yet-registered connector
     result.sources++;
-    const scope = c.workspace_id; // the connector's scope IS the workspace
+    // The connector's scope is the compound "<workspace>:<space>" — its own cursor + token.
+    const scope = `${c.workspace_id}:${c.space_id}`;
     try {
       const st = await queryOne<{ cursor: string | null }>(
         `SELECT cursor FROM sync_state WHERE user_id=$1 AND source=$2 AND scope=$3`,
@@ -83,7 +99,7 @@ export async function runConnectorSync(workspaceId?: string): Promise<ConnectorS
       // Resolve which PROJECT (folder) each item belongs to from its source_id, so cross-source
       // linking later stays inside one project (a meeting never links to the wrong repo/ticket).
       const resolveFolder = await folderResolverFor(c.user_id, c.workspace_id).catch(() => (() => null));
-      for (const it of page.items) { await upsertItem(c.user_id, c.workspace_id, it, resolveFolder(it.source, it.source_id)); result.processed++; }
+      for (const it of page.items) { await upsertItem(c.user_id, c.workspace_id, c.space_id, it, resolveFolder(it.source, it.source_id)); result.processed++; }
       await query(
         `INSERT INTO sync_state (user_id, source, scope, cursor, last_synced_at)
          VALUES ($1,$2,$3,$4, NOW())
@@ -92,7 +108,7 @@ export async function runConnectorSync(workspaceId?: string): Promise<ConnectorS
       );
     } catch (err: any) {
       result.errors++;
-      console.error('connector_sync_failed', JSON.stringify({ source: c.source, workspace: scope, message: err?.message }));
+      console.error('connector_sync_failed', JSON.stringify({ source: c.source, scope, message: err?.message }));
     }
   }
   console.log('connector_sync_tick', JSON.stringify(result));

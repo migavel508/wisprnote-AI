@@ -24,10 +24,11 @@ export interface BrainNodeDetail {
 }
 
 /** On-demand freshness: pull this workspace's latest backend state into the brain NOW. */
-export async function syncBrain(workspaceId: string): Promise<{ syncedAt: string } | null> {
+export async function syncBrain(workspaceId: string, spaceId?: string | null): Promise<{ syncedAt: string } | null> {
   try {
     const token = await getIdToken();
-    const r = await baseFetch(`${API_BASE}/brain/sync?workspace=${encodeURIComponent(workspaceId)}`, {
+    const sq = spaceId ? `&space=${encodeURIComponent(spaceId)}` : '';
+    const r = await baseFetch(`${API_BASE}/brain/sync?workspace=${encodeURIComponent(workspaceId)}${sq}`, {
       method: 'POST', headers: { 'Content-Type': 'application/json', Authorization: token },
     });
     if (!r.ok) return null;
@@ -63,10 +64,11 @@ export async function getBrainPulse(workspaceId: string, folderId?: string | nul
   } catch { return []; }
 }
 
-export async function getBrainNode(workspaceId: string, id: string): Promise<BrainNodeDetail | null> {
+export async function getBrainNode(workspaceId: string, id: string, spaceId?: string | null): Promise<BrainNodeDetail | null> {
   try {
     const token = await getIdToken();
-    const r = await baseFetch(`${API_BASE}/brain/node?workspace=${encodeURIComponent(workspaceId)}&id=${encodeURIComponent(id)}`, {
+    const sq = spaceId ? `&space=${encodeURIComponent(spaceId)}` : '';
+    const r = await baseFetch(`${API_BASE}/brain/node?workspace=${encodeURIComponent(workspaceId)}&id=${encodeURIComponent(id)}${sq}`, {
       headers: { 'Content-Type': 'application/json', Authorization: token },
     });
     if (!r.ok) return null;

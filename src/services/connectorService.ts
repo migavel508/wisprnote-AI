@@ -41,9 +41,12 @@ export interface ConnectorStatus {
  * a different account of the same tool per workspace (multi-company isolation). When
  * omitted, the server uses the account-level sentinel.
  */
-export async function listConnectors(workspaceId?: string): Promise<{ enabled: boolean; connectors: ConnectorStatus[] }> {
+export async function listConnectors(workspaceId?: string, spaceId?: string): Promise<{ enabled: boolean; connectors: ConnectorStatus[] }> {
   try {
-    const qs = workspaceId ? `?workspace=${encodeURIComponent(workspaceId)}` : '';
+    const qp = new URLSearchParams();
+    if (workspaceId) qp.set('workspace', workspaceId);
+    if (spaceId) qp.set('space', spaceId);
+    const qs = qp.toString() ? `?${qp.toString()}` : '';
     const r = await authed(`/connectors${qs}`, { method: 'GET' });
     if (!r.ok) return { enabled: false, connectors: [] };
     return await r.json();
@@ -52,11 +55,12 @@ export async function listConnectors(workspaceId?: string): Promise<{ enabled: b
   }
 }
 
-/** Get the provider authorize URL (server does discovery + DCR + PKCE). */
-export async function getConnectorOAuthUrl(id: string, workspaceId?: string): Promise<string> {
+/** Get the provider authorize URL (server does discovery + DCR + PKCE). The connection is scoped
+ *  to the active (workspace, space) — connectors are connected INSIDE a space. */
+export async function getConnectorOAuthUrl(id: string, workspaceId?: string, spaceId?: string): Promise<string> {
   const r = await authed(`/connectors/${id}/oauth-url`, {
     method: 'POST',
-    body: JSON.stringify(workspaceId ? { workspace: workspaceId } : {}),
+    body: JSON.stringify({ ...(workspaceId ? { workspace: workspaceId } : {}), ...(spaceId ? { space: spaceId } : {}) }),
   });
   if (!r.ok) throw new Error(`Could not start ${id} connection (${r.status})`);
   const data = await r.json();
@@ -71,8 +75,11 @@ export async function exchangeConnector(id: string, code: string, state: string)
   if (!r.ok) throw new Error(`Could not finish ${id} connection (${r.status})`);
 }
 
-export async function disconnectConnector(id: string, workspaceId?: string): Promise<void> {
-  const qs = workspaceId ? `?workspace=${encodeURIComponent(workspaceId)}` : '';
+export async function disconnectConnector(id: string, workspaceId?: string, spaceId?: string): Promise<void> {
+  const qp = new URLSearchParams();
+  if (workspaceId) qp.set('workspace', workspaceId);
+  if (spaceId) qp.set('space', spaceId);
+  const qs = qp.toString() ? `?${qp.toString()}` : '';
   await authed(`/connectors/${id}${qs}`, { method: 'DELETE' });
 }
 
@@ -122,8 +129,11 @@ export async function configureConnector(
 }
 
 /** Connect a PAT-based connector (e.g. GitHub) by storing a validated token server-side. */
-export async function setConnectorToken(id: string, token: string, workspaceId?: string): Promise<{ connected: boolean; error?: string }> {
-  const qs = workspaceId ? `?workspace=${encodeURIComponent(workspaceId)}` : '';
+export async function setConnectorToken(id: string, token: string, workspaceId?: string, spaceId?: string): Promise<{ connected: boolean; error?: string }> {
+  const qp = new URLSearchParams();
+  if (workspaceId) qp.set('workspace', workspaceId);
+  if (spaceId) qp.set('space', spaceId);
+  const qs = qp.toString() ? `?${qp.toString()}` : '';
   const r = await authed(`/connectors/${id}/pat${qs}`, { method: 'POST', body: JSON.stringify({ token }) });
   if (!r.ok) return { connected: false, error: `Could not connect ${id} (${r.status}).` };
   return await r.json();

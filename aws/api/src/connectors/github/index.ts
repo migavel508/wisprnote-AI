@@ -31,7 +31,10 @@ registerConnector({
   id: 'github',
   async sync(userId, scope, cursor) {
     const server = getMcpServer('github');
-    const cred = await getToken(userId, 'github', scope);   // scope = workspace_id
+    // `scope` is the compound "<workspace>:<space>" — the token is per (workspace, space);
+    // repo mappings are per workspace. Tolerate a bare workspace (legacy).
+    const [workspaceId, spaceId = '00000000-0000-0000-0000-000000000000'] = scope.split(':');
+    const cred = await getToken(userId, 'github', workspaceId, spaceId);
     const token = (cred?.token as any)?.access_token;
     if (!server?.url || !token) return { items: [], nextCursor: null };
 
@@ -39,7 +42,7 @@ registerConnector({
     let maxUpdated = cursor || '';
     // Pull repos mapped across ALL the workspace's folders (each item is folder-tagged at
     // upsert by its repo), so every project's code is ingested — not just the default folder's.
-    const repos = await getAllMappedRepos(userId, scope).catch(() => []);
+    const repos = await getAllMappedRepos(userId, workspaceId).catch(() => []);
 
     const pushIssue = (it: any, isPrTool: boolean) => {
       const loc = locFromUrl(it.html_url);

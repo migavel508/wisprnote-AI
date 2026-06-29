@@ -33,14 +33,17 @@ export function ensureBrainEventSchema(): Promise<void> {
           UNIQUE (user_id, workspace_id, source_id, kind, to_state, occurred_at)
         )
       `);
+      // Space-scoped activity: which SPACE this event belongs to (its item's space).
+      await query(`ALTER TABLE brain_event ADD COLUMN IF NOT EXISTS space_id UUID`);
       await query(`CREATE INDEX IF NOT EXISTS brain_event_ws_idx ON brain_event (user_id, workspace_id, occurred_at DESC)`);
+      await query(`CREATE INDEX IF NOT EXISTS brain_event_space_idx ON brain_event (user_id, workspace_id, space_id, occurred_at DESC)`);
     })().catch((e) => { ready = null; throw e; });
   }
   return ready;
 }
 
 export interface BrainEventInput {
-  userId: string; workspaceId: string; itemId?: string | null; source: string; sourceId?: string | null;
+  userId: string; workspaceId: string; spaceId?: string | null; itemId?: string | null; source: string; sourceId?: string | null;
   kind: BrainEventKind; actor?: string | null; fromState?: string | null; toState?: string | null;
   title?: string | null; occurredAt?: string | null;
 }
@@ -49,10 +52,11 @@ export interface BrainEventInput {
 export async function insertEvent(e: BrainEventInput): Promise<void> {
   await ensureBrainEventSchema();
   await query(
-    `INSERT INTO brain_event (user_id, workspace_id, item_id, source, source_id, kind, actor, from_state, to_state, title, occurred_at)
-     VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11)
-     ON CONFLICT (user_id, workspace_id, source_id, kind, to_state, occurred_at) DO NOTHING`,
-    [e.userId, e.workspaceId, e.itemId ?? null, e.source, e.sourceId ?? null, e.kind, e.actor ?? null, e.fromState ?? null, e.toState ?? null, e.title ?? null, e.occurredAt ?? null],
+    `INSERT INTO brain_event (user_id, workspace_id, space_id, item_id, source, source_id, kind, actor, from_state, to_state, title, occurred_at)
+     VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12)
+     ON CONFLICT (user_id, workspace_id, source_id, kind, to_state, occurred_at) DO UPDATE SET
+       space_id = COALESCE(EXCLUDED.space_id, brain_event.space_id)`,
+    [e.userId, e.workspaceId, e.spaceId ?? null, e.itemId ?? null, e.source, e.sourceId ?? null, e.kind, e.actor ?? null, e.fromState ?? null, e.toState ?? null, e.title ?? null, e.occurredAt ?? null],
   ).catch((err) => { console.error('brain_event_insert_failed', JSON.stringify({ message: err?.message })); });
 }
 
@@ -61,19 +65,32 @@ export interface BrainEventRow {
   from_state: string | null; to_state: string | null; title: string | null; occurred_at: string | null;
 }
 
-/** Recent events for the Pulse feed (most recent first). Optional folder (project) OR
- *  space scope — events are scoped via their item's folder_id/space_id (brain_event has
- *  no folder/space column of its own). Folder takes precedence when both are given. */
+/** Recent events for the Pulse feed (most recent first). STRICTLY scoped to (workspace +
+ *  space): an event carries its own space_id (set from its item's space on write/backfill),
+ *  so a space's Activity shows ONLY that space's connector + meeting activity. `folderId`
+ *  further narrows to one project via the item's folder. */
 export async function getEvents(userId: string, workspaceId: string, limit = 40, folderId?: string | null, spaceId?: string | null): Promise<BrainEventRow[]> {
   await ensureBrainEventSchema();
+  // SCOPE BY THE STABLE space_id. A space's events are pinned to its (globally-unique) space_id,
+  // but the workspace_id has historically DRIFTED (connector re-connected under a new master id) —
+  // so filtering by workspace_id silently dropped events. When a real space is given, scope by
+  // space_id alone (user-filtered, so still tenant-safe); at the workspace root (no space, or
+  // space==workspace) scope by workspace_id. DEDUP collapses the same transition that was ingested
+  // under multiple spaces/workspace_ids so each change shows ONCE.
+  const bySpace = !!spaceId && spaceId !== workspaceId;
+  const scopeClause = bySpace ? 'e.space_id=$2' : 'e.workspace_id=$2';
+  const scopeVal = bySpace ? spaceId : workspaceId;
   return query<BrainEventRow>(
-    `SELECT e.kind, e.source, e.source_id, e.actor, e.from_state, e.to_state, e.title, e.occurred_at
-       FROM brain_event e
-       LEFT JOIN knowledge_item ki ON ki.id = e.item_id
-      WHERE e.user_id=$1 AND e.workspace_id=$2
-        AND ($3::uuid IS NULL OR ki.folder_id=$3)
-        AND ($4::uuid IS NULL OR ki.space_id=$4)
-      ORDER BY e.occurred_at DESC NULLS LAST, e.created_at DESC LIMIT ${limit}`,
-    [userId, workspaceId, folderId ?? null, spaceId ?? null],
+    `SELECT d.kind, d.source, d.source_id, d.actor, d.from_state, d.to_state, d.title, d.occurred_at FROM (
+       SELECT DISTINCT ON (e.source, e.source_id, e.kind, e.to_state, e.occurred_at)
+              e.kind, e.source, e.source_id, e.actor, e.from_state, e.to_state, e.title, e.occurred_at, e.created_at
+         FROM brain_event e
+         LEFT JOIN knowledge_item ki ON ki.id = e.item_id
+        WHERE e.user_id=$1 AND ${scopeClause}
+          AND ($3::uuid IS NULL OR ki.folder_id=$3)
+        ORDER BY e.source, e.source_id, e.kind, e.to_state, e.occurred_at, e.created_at DESC
+     ) d
+     ORDER BY d.occurred_at DESC NULLS LAST, d.created_at DESC LIMIT ${limit}`,
+    [userId, scopeVal, folderId ?? null],
   ).catch(() => []);
 }

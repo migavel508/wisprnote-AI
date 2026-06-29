@@ -586,16 +586,25 @@ export default function MainSidebar({
         <div className="flex-1 min-h-0 overflow-y-auto px-2 mt-3">
           <div className="group/sp flex items-center justify-between pl-2.5 pr-1 mb-1">
             <span className="text-[12px] font-medium text-app-fg-subtle tracking-[-0.01em]">Spaces</span>
-            <button
-              onClick={() => setShowCreateSpace(true)}
-              title="Add space"
-              className="w-5 h-5 flex items-center justify-center rounded-md text-app-fg-subtle opacity-0 group-hover/sp:opacity-100 hover:bg-app-nav-hover-bg hover:text-app-fg transition-all"
-            >
-              <Plus size={14} strokeWidth={1.8} />
-            </button>
+            <div className="flex items-center gap-0.5">
+              <button
+                onClick={() => setShowCreateSpace(true)}
+                title="Add space"
+                className="w-5 h-5 flex items-center justify-center rounded-md text-app-fg-subtle opacity-0 group-hover/sp:opacity-100 hover:bg-app-nav-hover-bg hover:text-app-fg transition-all"
+              >
+                <Plus size={14} strokeWidth={1.8} />
+              </button>
+              <button
+                onClick={() => onViewChange('spaces')}
+                title="Manage spaces"
+                className="w-5 h-5 flex items-center justify-center rounded-md text-app-fg-subtle hover:bg-app-nav-hover-bg hover:text-app-fg transition-all"
+              >
+                <ArrowRight size={14} strokeWidth={1.8} />
+              </button>
+            </div>
           </div>
           <div className="flex flex-col gap-0.5">
-            {spaces.map(space => {
+            {spaces.slice(0, 2).map(space => {
               const children = foldersInSpace(space.id);
               const isExpanded = !!expanded[space.id];
               const isSpaceSel = selection.folderId === space.id;
@@ -643,6 +652,18 @@ export default function MainSidebar({
                 </div>
               );
             })}
+            {/* Only the first 2 spaces live in the sidebar; the rest open on the Spaces page. */}
+            {spaces.length > 2 && (
+              <button
+                onClick={() => onViewChange('spaces')}
+                title="View all spaces"
+                className="w-full flex items-center gap-2 pl-1.5 pr-1 py-[6px] text-[13px] rounded-lg text-app-nav-fg hover:bg-app-nav-hover-bg hover:text-app-nav-fg-hover transition-all"
+              >
+                <span className="w-5 flex-shrink-0" />
+                <MoreHorizontal size={16} strokeWidth={1.8} className="flex-shrink-0 text-app-fg-subtle" />
+                <span className="tracking-[-0.01em]">More</span>
+              </button>
+            )}
             {spaces.length === 0 && (
               <button
                 onClick={() => setShowCreateSpace(true)}

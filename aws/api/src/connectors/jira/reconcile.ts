@@ -31,10 +31,10 @@ export async function runReconcileSweep(): Promise<ReconcileResult> {
   await ensureProposalSchema();
   const result: ReconcileResult = { workspaces: 0, proposed: 0 };
 
-  // Every workspace with a connected Jira credential (proposing is DB-only; execution later
-  // re-checks the live connection through the broker).
-  const creds = await query<{ user_id: string; workspace_id: string }>(
-    `SELECT DISTINCT user_id, workspace_id FROM connector_credentials WHERE source='jira' LIMIT ${WORKSPACE_CAP}`,
+  // Every (workspace, SPACE) with a connected Jira credential. STRICT per-space: a space only gets
+  // reconciliation for connectors it authorized — detectors below filter by ji.space_id=$3.
+  const creds = await query<{ user_id: string; workspace_id: string; space_id: string }>(
+    `SELECT DISTINCT user_id, workspace_id, space_id FROM connector_credentials WHERE source='jira' LIMIT ${WORKSPACE_CAP}`,
   ).catch(() => []);
 
   for (const c of creds) {
@@ -44,18 +44,18 @@ export async function runReconcileSweep(): Promise<ReconcileResult> {
     // A Jira ticket that is NOT done, but has aligned/partial code (a GitHub commit/PR)
     // linked to it → the work shipped, the ticket didn't move. Propose moving it forward.
     const gaps = await query<any>(
-      `SELECT ji.source_id AS issue_key, ji.title AS issue_title, ji.status AS status,
+      `SELECT ji.source_id AS issue_key, ji.title AS issue_title, ji.status AS status, ji.space_id AS space_id,
               impl.title AS impl_title, e.verdict AS verdict
          FROM knowledge_item ji
          JOIN brain_edge e ON e.user_id=ji.user_id AND e.workspace_id=ji.workspace_id
            AND (e.src_id = ji.id::text OR e.dst_id = ji.id::text)
          JOIN knowledge_item impl ON impl.id::text = (CASE WHEN e.src_id=ji.id::text THEN e.dst_id ELSE e.src_id END)
-        WHERE ji.user_id=$1 AND ji.workspace_id=$2 AND ji.source='jira'
+        WHERE ji.user_id=$1 AND ji.workspace_id=$2 AND ji.space_id=$3 AND ji.source='jira'
           AND ji.status IS NOT NULL AND ji.status !~* '${DONEISH}'
           AND impl.source='github' AND e.verdict IN ('aligned','partial')
         ORDER BY (e.verdict='aligned') DESC, ji.synced_at DESC
         LIMIT 60`,
-      [c.user_id, c.workspace_id],
+      [c.user_id, c.workspace_id, c.space_id],
     ).catch(() => []);
 
     let madeA = 0;
@@ -71,7 +71,7 @@ export async function runReconcileSweep(): Promise<ReconcileResult> {
       if (!target) continue;
       const proposal: JiraActionProposal = { operation: 'transition', issueKey: g.issue_key, status: target };
       const ok = await insertProposal({
-        userId: c.user_id, workspaceId: c.workspace_id, origin: 'reconcile',
+        userId: c.user_id, workspaceId: c.workspace_id, spaceId: c.space_id, origin: 'reconcile',
         dedupKey: `reconcile:transition:${g.issue_key}:${target}`,
         sourceTitle: g.issue_title,
         rationale: `Code implementing this ticket has landed (${g.verdict}): “${String(g.impl_title || '').slice(0, 90)}”, but the ticket is still “${status}”. Move it to ${target}?`,
@@ -84,16 +84,16 @@ export async function runReconcileSweep(): Promise<ReconcileResult> {
     // Work (commit / dev session) linked to a ticket was judged `divergent` from its
     // intent → propose a heads-up comment on the ticket so a human can course-correct.
     const divs = await query<any>(
-      `SELECT ji.source_id AS issue_key, ji.title AS issue_title,
+      `SELECT ji.source_id AS issue_key, ji.title AS issue_title, ji.space_id AS space_id,
               impl.source_id AS impl_id, impl.title AS impl_title, e.rationale AS rationale
          FROM brain_edge e
          JOIN knowledge_item ji ON ji.id::text IN (e.src_id, e.dst_id) AND ji.source='jira'
            AND ji.user_id=e.user_id AND ji.workspace_id=e.workspace_id
          JOIN knowledge_item impl ON impl.id::text = (CASE WHEN e.src_id=ji.id::text THEN e.dst_id ELSE e.src_id END)
-        WHERE e.user_id=$1 AND e.workspace_id=$2 AND e.verdict='divergent'
+        WHERE e.user_id=$1 AND e.workspace_id=$2 AND e.space_id=$3 AND e.verdict='divergent'
           AND impl.source IN ('github','claude-code','codex')
         ORDER BY e.created_at DESC LIMIT 60`,
-      [c.user_id, c.workspace_id],
+      [c.user_id, c.workspace_id, c.space_id],
     ).catch(() => []);
 
     let madeB = 0;
@@ -105,7 +105,7 @@ export async function runReconcileSweep(): Promise<ReconcileResult> {
       const note = `⚠️ Wisprnote flagged a possible divergence: the linked work “${String(d.impl_title || '').slice(0, 100)}” appears to differ from this ticket's intent.${d.rationale ? ` ${String(d.rationale).slice(0, 320)}` : ''}`;
       const proposal: JiraActionProposal = { operation: 'comment', issueKey: d.issue_key, comment: note };
       const ok = await insertProposal({
-        userId: c.user_id, workspaceId: c.workspace_id, origin: 'reconcile',
+        userId: c.user_id, workspaceId: c.workspace_id, spaceId: c.space_id, origin: 'reconcile',
         dedupKey: `reconcile:flag:${dk}`,
         sourceTitle: d.issue_title,
         rationale: 'The linked work was judged to diverge from this ticket — post a heads-up comment?',
@@ -119,18 +119,18 @@ export async function runReconcileSweep(): Promise<ReconcileResult> {
     // propose a nudge comment that references the meeting. (Jira can flag "old ticket"; only
     // the brain can say "the thing you DECIDED in <meeting> is stalling.")
     const stale = await query<any>(
-      `SELECT ji.source_id AS issue_key, ji.title AS issue_title, ji.status AS status,
+      `SELECT ji.source_id AS issue_key, ji.title AS issue_title, ji.status AS status, ji.space_id AS space_id,
               (NOW()::date - ji.occurred_at::date) AS days_stale, mt.title AS meeting_title
          FROM knowledge_item ji
          JOIN brain_edge e ON e.user_id=ji.user_id AND e.workspace_id=ji.workspace_id
            AND (e.src_id=ji.id::text OR e.dst_id=ji.id::text)
          JOIN knowledge_item mt ON mt.id::text=(CASE WHEN e.src_id=ji.id::text THEN e.dst_id ELSE e.src_id END)
            AND mt.source='meeting'
-        WHERE ji.user_id=$1 AND ji.workspace_id=$2 AND ji.source='jira'
+        WHERE ji.user_id=$1 AND ji.workspace_id=$2 AND ji.space_id=$3 AND ji.source='jira'
           AND ji.status IS NOT NULL AND ji.status !~* '${DONEISH}'
           AND ji.occurred_at IS NOT NULL AND ji.occurred_at < NOW() - INTERVAL '${STALE_DAYS} days'
         ORDER BY ji.occurred_at ASC LIMIT 60`,
-      [c.user_id, c.workspace_id],
+      [c.user_id, c.workspace_id, c.space_id],
     ).catch(() => []);
 
     let madeC = 0;
@@ -141,7 +141,7 @@ export async function runReconcileSweep(): Promise<ReconcileResult> {
       const note = `🔔 Nudge from Wisprnote: this ticket traces to the decision in “${String(s.meeting_title || 'a meeting').slice(0, 80)}” and hasn't moved in ${s.days_stale} days (still “${s.status}”). Still on track, or is it blocked?`;
       const proposal: JiraActionProposal = { operation: 'comment', issueKey: s.issue_key, comment: note };
       const ok = await insertProposal({
-        userId: c.user_id, workspaceId: c.workspace_id, origin: 'reconcile',
+        userId: c.user_id, workspaceId: c.workspace_id, spaceId: c.space_id, origin: 'reconcile',
         dedupKey: `reconcile:nudge:${s.issue_key}`,
         sourceTitle: s.issue_title,
         rationale: `Decided work has stalled ${s.days_stale} days with no ticket movement — post a nudge?`,
