@@ -1,7 +1,7 @@
 import { useEffect, useMemo, useRef, useState } from 'react';
 import ForceGraph2D from 'react-force-graph-2d';
-import { X, Loader2, BrainCircuit, ExternalLink, Users, Calendar, GitCommitHorizontal, ArrowRight, ArrowLeft, RefreshCw, Activity, GitCommit, ArrowRightLeft, AlertTriangle } from 'lucide-react';
-import { getBrainGraph, getBrainNode, syncBrain, getBrainPulse, getBrainAlerts, type BrainNode, type BrainLink, type BrainNodeDetail, type BrainEvent, type BrainAlert } from '../services/brainService';
+import { X, Loader2, BrainCircuit, ExternalLink, Users, Calendar, GitCommitHorizontal, ArrowRight, ArrowLeft, RefreshCw, Activity, GitCommit, ArrowRightLeft, AlertTriangle, Plus, Minus, Maximize2 } from 'lucide-react';
+import { getBrainGraph, getBrainNode, syncBrain, getBrainPulse, getBrainAlerts, getBrainProgress, type BrainNode, type BrainLink, type BrainNodeDetail, type BrainEvent, type BrainAlert, type BrainProgress } from '../services/brainService';
 import { useTheme } from '../theme/ThemeProvider';
 
 /**
@@ -28,6 +28,47 @@ const VERDICT_HUE: Record<string, { light: string; dark: string }> = {
   divergent: { light: '#c44d47', dark: '#e0635c' },// red
   unrelated: { light: '#c44d47', dark: '#e0635c' },
 };
+
+/** Anchor nodes (meetings + Jira) are the spine of the brain — drawn larger, labelled sooner. */
+const isAnchorNode = (n: any): boolean => n?.source === 'meeting' || n?.source === 'jira';
+
+/**
+ * Collision force (O(n²)/tick) — pushes overlapping nodes apart so the graph settles into a
+ * readable, spread web instead of a glowing hairball. Mirrors the knowledge-graph layout feel.
+ */
+function makeCollideForce(radiusOf: (n: any) => number, strength = 0.7) {
+  let nodes: any[] = [];
+  const force = () => {
+    for (let i = 0; i < nodes.length; i++) {
+      const a = nodes[i]; const ra = radiusOf(a);
+      for (let j = i + 1; j < nodes.length; j++) {
+        const b = nodes[j]; const min = ra + radiusOf(b);
+        let dx = (b.x ?? 0) - (a.x ?? 0); let dy = (b.y ?? 0) - (a.y ?? 0);
+        const d = Math.hypot(dx, dy) || 0.01;
+        if (d < min) {
+          const push = ((min - d) / d) * strength * 0.5;
+          dx *= push; dy *= push;
+          a.vx = (a.vx ?? 0) - dx; a.vy = (a.vy ?? 0) - dy;
+          b.vx = (b.vx ?? 0) + dx; b.vy = (b.vy ?? 0) + dy;
+        }
+      }
+    }
+  };
+  (force as any).initialize = (n: any[]) => { nodes = n; };
+  return force;
+}
+
+/** Rounded-rect path (label pills) — ctx.roundRect isn't available everywhere. */
+function roundRect(ctx: CanvasRenderingContext2D, x: number, y: number, w: number, h: number, r: number) {
+  const rr = Math.min(r, w / 2, h / 2);
+  ctx.beginPath();
+  ctx.moveTo(x + rr, y);
+  ctx.arcTo(x + w, y, x + w, y + h, rr);
+  ctx.arcTo(x + w, y + h, x, y + h, rr);
+  ctx.arcTo(x, y + h, x, y, rr);
+  ctx.arcTo(x, y, x + w, y, rr);
+  ctx.closePath();
+}
 
 export default function BrainMapModal({ workspaceId, workspaceName, folderId = null, folderName, spaceId = null, onClose }: { workspaceId: string; workspaceName: string; folderId?: string | null; folderName?: string; spaceId?: string | null; onClose: () => void }) {
   const [data, setData] = useState<{ nodes: BrainNode[]; links: BrainLink[] }>({ nodes: [], links: [] });
@@ -81,6 +122,28 @@ export default function BrainMapModal({ workspaceId, workspaceName, folderId = n
     return () => { ref.v = true; };
   }, [workspaceId, folderId, spaceId]);
 
+  // PROGRESS DRAIN — while the brain is still building (meetings/connector nodes not yet linked),
+  // poll progress, nudge a cheap LINK pass, and refresh the view so the user watches it evolve to
+  // 100%. The background cron drains it even when this is closed; this just makes it visible + fast.
+  const [progress, setProgress] = useState<BrainProgress | null>(null);
+  useEffect(() => {
+    const ref = { v: false };
+    let timer: ReturnType<typeof setTimeout>;
+    const tick = async () => {
+      const p = await getBrainProgress(workspaceId, spaceId);
+      if (ref.v) return;
+      setProgress(p);
+      if (p?.processing) {
+        await syncBrain(workspaceId, spaceId, true).catch(() => {});   // link-only nudge → advances the cursor
+        if (!ref.v) { await reloadView(ref); timer = setTimeout(tick, 4500); }
+      } else {
+        timer = setTimeout(tick, 20000);   // idle re-check (picks up newly-arrived meetings/connector data)
+      }
+    };
+    tick();
+    return () => { ref.v = true; clearTimeout(timer); };
+  }, [workspaceId, folderId, spaceId]);
+
   // Responsive canvas: fill the available area (the graph needs ROOM to breathe).
   useEffect(() => {
     const measure = () => {
@@ -111,15 +174,15 @@ export default function BrainMapModal({ workspaceId, workspaceName, folderId = n
   useEffect(() => {
     const fg = fgRef.current;
     if (!fg || !graph.nodes.length) return;
-    const n = graph.nodes.length;
-    // Obsidian-style spread: strong even repulsion + long, LOOSE links so clusters
-    // open up into a readable web instead of collapsing into a hairball.
+    // Knowledge-graph layout: strong even repulsion + a collision force so clusters open into
+    // a calm, legible web (never a hairball). Reasoning links sit longer so verdicts read clearly.
     const charge = fg.d3Force?.('charge');
-    if (charge?.strength) { charge.strength(-260 - Math.min(n * 9, 1000)); charge.distanceMax?.(1600); }
+    if (charge?.strength) { charge.strength(-720); charge.distanceMax?.(900); }
     const link = fg.d3Force?.('link');
-    if (link?.distance) { link.distance((l: any) => (l.verdict ? 95 : 165)); link.strength?.((l: any) => (l.verdict ? 0.2 : 0.045)); }
+    if (link?.distance) { link.distance((l: any) => (l.verdict ? 200 : 90)); link.strength?.(0.16); }
     const center = fg.d3Force?.('center');
-    if (center?.strength) center.strength(0.05);
+    if (center?.strength) center.strength(0.04);
+    fg.d3Force?.('collide', makeCollideForce((nd: any) => (isAnchorNode(nd) ? 30 : 16), 0.7));
     fg.d3ReheatSimulation?.();
   }, [graph]);
 
@@ -190,23 +253,23 @@ export default function BrainMapModal({ workspaceId, workspaceName, folderId = n
           <button onClick={onClose} className="w-7 h-7 flex items-center justify-center rounded-md text-app-fg-subtle hover:bg-app-nav-hover-bg hover:text-app-fg transition-colors"><X size={15} /></button>
         </div>
 
-        {/* Legend */}
-        <div className="flex items-center gap-4 px-6 py-2.5 border-b border-app-divider text-[11px] text-app-fg-subtle flex-shrink-0 flex-wrap">
-          {sources.map((s) => (
-            <span key={s} className="inline-flex items-center gap-1.5">
-              <span className="w-2 h-2 rounded-full" style={{ background: srcColor(s), boxShadow: `0 0 6px ${srcColor(s)}80` }} /> {s}
-            </span>
-          ))}
-          {hasVerdicts && (
-            <span className="inline-flex items-center gap-3 pl-3 ml-1 border-l border-app-divider">
-              <span className="text-app-fg-subtle/80">reasoning:</span>
-              <span className="inline-flex items-center gap-1.5"><span className="w-5 h-[2.5px] rounded-full" style={{ background: verdictColor('aligned')!, boxShadow: `0 0 5px ${verdictColor('aligned')}` }} /> aligned</span>
-              <span className="inline-flex items-center gap-1.5"><span className="w-5 h-[2.5px] rounded-full" style={{ background: verdictColor('partial')!, boxShadow: `0 0 5px ${verdictColor('partial')}` }} /> partial</span>
-              <span className="inline-flex items-center gap-1.5"><span className="w-5 h-[2.5px] rounded-full" style={{ background: verdictColor('divergent')!, boxShadow: `0 0 5px ${verdictColor('divergent')}` }} /> divergent</span>
-            </span>
-          )}
-          <span className="ml-auto text-app-fg-subtle/70">Hover to spotlight a lineage · click a line for its reasoning · click a node for details</span>
-        </div>
+        {/* BRAIN BUILD PROGRESS — shows while meetings/connector nodes are still being linked/reasoned,
+            so the user sees the brain evolving to 100% and knows nothing is left unprocessed. */}
+        {progress && progress.processing && (
+          <div className="px-6 py-2 border-b border-app-divider flex-shrink-0">
+            <div className="flex items-center justify-between mb-1">
+              <span className="text-[11px] text-app-fg-subtle flex items-center gap-1.5">
+                <Loader2 size={11} className="animate-spin" />
+                Building brain… {progress.graph.processed}/{progress.graph.total} nodes linked
+                {progress.suggestions.pending > 0 ? ` · ${progress.suggestions.pending} meeting${progress.suggestions.pending === 1 ? '' : 's'} to reason` : ''}
+              </span>
+              <span className="text-[11px] font-medium text-app-accent">{progress.pct}%</span>
+            </div>
+            <div className="h-1 w-full rounded-full bg-app-divider overflow-hidden">
+              <div className="h-full bg-app-accent transition-all duration-700 ease-out" style={{ width: `${Math.max(4, progress.pct)}%` }} />
+            </div>
+          </div>
+        )}
 
         <div ref={canvasRef} className="flex-1 relative overflow-hidden" style={{ background: bg }}>
           {loading ? (
@@ -225,36 +288,35 @@ export default function BrainMapModal({ workspaceId, workspaceName, folderId = n
               height={dims.h}
               backgroundColor={bg}
               nodeRelSize={6}
-              nodeVal={3}
-              // Settle slower so nodes drift apart before locking, then auto-fit the whole graph.
-              d3VelocityDecay={0.32}
-              cooldownTicks={200}
-              warmupTicks={60}
-              onEngineStop={() => fgRef.current?.zoomToFit?.(450, 60)}
-              minZoom={0.15}
-              maxZoom={9}
-              linkCurvature={(l: any) => (l.verdict ? 0.08 : 0)}
+              nodeVal={(n: any) => (isAnchorNode(n) ? 6 : 2)}
+              // Settle slowly into a spread, tree-like web; auto-fit when it stops.
+              d3VelocityDecay={0.34}
+              d3AlphaDecay={0.018}
+              cooldownTicks={300}
+              warmupTicks={80}
+              onEngineStop={() => fgRef.current?.zoomToFit?.(500, 70)}
+              minZoom={0.12}
+              maxZoom={12}
+              linkCurvature={(l: any) => (l.verdict ? 0.06 : 0)}
               linkDirectionalParticles={(l: any) => (l.verdict && focusSet && (focusSet.has(idOf(l.source)) && focusSet.has(idOf(l.target))) ? 3 : 0)}
-              linkDirectionalParticleWidth={2}
+              linkDirectionalParticleWidth={1.8}
               linkDirectionalParticleSpeed={0.006}
               linkDirectionalParticleColor={(l: any) => verdictColor(l.verdict) || '#999'}
               onLinkClick={onLinkClick}
               onNodeClick={onNodeClick}
               onNodeHover={(n: any) => setHoverId(n?.id ?? null)}
               onBackgroundClick={() => { setDetail(null); setSelLink(null); }}
-              // LINES: reasoning = glowing "synapse" coloured by verdict; structural = quiet
-              // dashed thread. Focus-dim fades anything not on the spotlighted lineage.
+              // LINKS — calm at rest: reasoning edges are thin coloured lines (glow ONLY when their
+              // lineage is spotlighted); structural threads are a quiet dashed grey. Off-lineage fades.
               linkCanvasObjectMode={() => 'replace'}
               linkCanvasObject={(link: any, ctx: CanvasRenderingContext2D, scale: number) => {
                 const a = link.source, b = link.target;
                 if (!a || !b || !Number.isFinite(a.x) || !Number.isFinite(a.y) || !Number.isFinite(b.x) || !Number.isFinite(b.y)) return;
-                // Three honest states: REST (no hover) is calm + readable; a spotlighted
-                // lineage is bold + glowing; everything off the lineage fades back.
                 const spotlighting = !!focusSet;
                 const onLineage = spotlighting && focusSet.has(idOf(a)) && focusSet.has(idOf(b));
                 const vCol = verdictColor(link.verdict);
+                const curv = link.verdict ? 0.06 : 0;
                 const cx = (a.x + b.x) / 2, cy = (a.y + b.y) / 2;
-                const curv = link.verdict ? 0.08 : 0;   // near-straight, Obsidian-style
                 const nx = -(b.y - a.y), ny = (b.x - a.x);
                 const mx = cx + nx * curv, my = cy + ny * curv;
                 const draw = (w: number) => {
@@ -264,78 +326,118 @@ export default function BrainMapModal({ workspaceId, workspaceName, folderId = n
                 };
                 ctx.save();
                 ctx.lineCap = 'round';
-                // SOLID everywhere — no dashes (divergent stays distinct by its red colour).
                 if (vCol) {
                   ctx.strokeStyle = vCol;
                   if (onLineage) {
-                    ctx.shadowColor = vCol; ctx.shadowBlur = 9 / scale;
-                    ctx.globalAlpha = 0.95; draw(2.1);
-                    ctx.shadowBlur = 0; ctx.globalAlpha = 1; draw(0.9);     // tight core
-                  } else if (spotlighting) {
-                    ctx.globalAlpha = 0.08; draw(1);                        // off-lineage — recede
+                    ctx.shadowColor = vCol; ctx.shadowBlur = 8 / scale;
+                    ctx.globalAlpha = 0.95; draw(1.8);
+                    ctx.shadowBlur = 0; ctx.globalAlpha = 1; draw(0.8);
                   } else {
-                    ctx.globalAlpha = 0.6; draw(1.2);                       // REST — calm, no glow
+                    ctx.globalAlpha = spotlighting ? 0.06 : 0.5; draw(1);
                   }
                 } else {
-                  // structural threads — a solid, clearly legible web (secondary to
-                  // reasoning by being thinner + neutral grey, not by being dotted).
+                  ctx.setLineDash([2 / scale, 5 / scale]);
                   ctx.strokeStyle = isDark ? 'rgba(150,156,172,1)' : 'rgba(124,116,104,1)';
-                  ctx.globalAlpha = onLineage ? 0.65 : spotlighting ? 0.07 : 0.5;
+                  ctx.globalAlpha = onLineage ? 0.6 : spotlighting ? 0.05 : 0.3;
                   draw(0.7);
+                  ctx.setLineDash([]);
                 }
                 ctx.restore();
               }}
               nodeCanvasObjectMode={() => 'replace'}
               nodeCanvasObject={(node: any, ctx: CanvasRenderingContext2D, scale: number) => {
                 if (!Number.isFinite(node.x) || !Number.isFinite(node.y)) return;
-                const isAnchor = node.source === 'meeting' || node.source === 'jira';
+                const anchor = isAnchorNode(node);
                 const col = nodeColor(node);
                 const lit = !focusSet || focusSet.has(node.id);
                 const isSel = node.id === selectedId;
                 const isHover = node.id === hoverId;
-                const r = (isAnchor ? 5 : 3.4) * (isSel || isHover ? 1.25 : 1);
-                ctx.save();
-                ctx.globalAlpha = lit ? 1 : 0.18;
-                // soft radial glow — subtle at rest (keeps dense clusters clean),
-                // brighter only for the hovered/selected node.
                 const hot = isSel || isHover;
-                const glowR = r * (hot ? 2.8 : 1.9);
-                const g = ctx.createRadialGradient(node.x, node.y, 0, node.x, node.y, glowR);
-                g.addColorStop(0, `${col}${hot ? 'cc' : '88'}`);
-                g.addColorStop(0.5, `${col}${hot ? '33' : '1f'}`);
-                g.addColorStop(1, `${col}00`);
-                ctx.fillStyle = g;
-                ctx.beginPath(); ctx.arc(node.x, node.y, glowR, 0, 2 * Math.PI); ctx.fill();
-                // solid core with a thin ring against the canvas so dense areas stay legible
+                const r = (anchor ? 6 : 3.8) * (hot ? 1.25 : 1);
+                ctx.save();
+                ctx.globalAlpha = lit ? 1 : 0.16;
+                // Flat + calm at rest (no glow). Glow appears ONLY for the spotlighted lineage
+                // or the hovered/selected node — so a dense graph stays clean.
+                if (hot || (focusSet && lit)) {
+                  const glowR = r * (hot ? 2.6 : 1.8);
+                  const g = ctx.createRadialGradient(node.x, node.y, 0, node.x, node.y, glowR);
+                  g.addColorStop(0, `${col}${hot ? 'aa' : '55'}`);
+                  g.addColorStop(1, `${col}00`);
+                  ctx.fillStyle = g;
+                  ctx.beginPath(); ctx.arc(node.x, node.y, glowR, 0, 2 * Math.PI); ctx.fill();
+                }
+                // solid core + thin canvas-coloured ring so dense areas stay legible
                 ctx.beginPath(); ctx.arc(node.x, node.y, r, 0, 2 * Math.PI);
                 ctx.fillStyle = col; ctx.fill();
                 ctx.lineWidth = 1 / scale; ctx.strokeStyle = bg; ctx.stroke();
-                // status ring — live backend state (done = green, in-progress = blue, todo = grey)
+                // anchors (meetings/Jira) get a hollow centre → they read as the "spine"
+                if (anchor) { ctx.beginPath(); ctx.arc(node.x, node.y, r * 0.34, 0, 2 * Math.PI); ctx.fillStyle = bg; ctx.fill(); }
+                // status ring — live backend state (done=green, in-progress=blue, todo=grey)
                 const sRing = statusRing(node.status);
-                if (sRing) { ctx.beginPath(); ctx.arc(node.x, node.y, r + 1.6 / scale + 0.8, 0, 2 * Math.PI); ctx.lineWidth = 1.4 / scale; ctx.strokeStyle = sRing; ctx.globalAlpha = lit ? 0.95 : 0.2; ctx.stroke(); ctx.globalAlpha = lit ? 1 : 0.18; }
-                if (isSel) { ctx.beginPath(); ctx.arc(node.x, node.y, r + 3.5 / scale + 1.5, 0, 2 * Math.PI); ctx.lineWidth = 1.5 / scale; ctx.strokeStyle = col; ctx.globalAlpha = lit ? 0.9 : 0.3; ctx.stroke(); }
-                // labels: anchors when zoomed, or anything in the spotlight
-                const showLabel = (isAnchor && scale > 1.3) || (lit && focusSet && (isSel || isHover || isAnchor));
+                if (sRing) { ctx.beginPath(); ctx.arc(node.x, node.y, r + 1.6 / scale + 0.8, 0, 2 * Math.PI); ctx.lineWidth = 1.4 / scale; ctx.strokeStyle = sRing; ctx.globalAlpha = lit ? 0.9 : 0.18; ctx.stroke(); ctx.globalAlpha = lit ? 1 : 0.16; }
+                // accent ring on hover/select (olive brand accent — matches the knowledge graph)
+                if (hot) { ctx.beginPath(); ctx.arc(node.x, node.y, r + 3 / scale + 1, 0, 2 * Math.PI); ctx.lineWidth = (isSel ? 1.8 : 1.4) / scale; ctx.strokeStyle = isDark ? '#a3c429' : '#819c1f'; ctx.globalAlpha = isSel ? 0.95 : 0.6; ctx.stroke(); }
+                // LABELS — pill, only on hover/select, or anchors when zoomed in (no clutter at rest)
+                const showLabel = lit && (hot || (anchor && scale > 1.2) || (!!focusSet && anchor));
                 if (showLabel) {
-                  const label = String(node.title || '').slice(0, 28);
-                  const fs = Math.max(3.5, 9 / scale);
-                  ctx.font = `${(isSel || isHover) ? '600 ' : ''}${fs}px Inter, sans-serif`;
+                  const label = String(node.title || '').slice(0, 30);
+                  const fs = Math.max(3.5, (anchor ? 9 : 8) / scale);
+                  ctx.font = `${hot ? '600 ' : '500 '}${fs}px Inter, sans-serif`;
                   ctx.textAlign = 'center'; ctx.textBaseline = 'top';
-                  ctx.globalAlpha = lit ? 0.9 : 0.25;
-                  ctx.fillStyle = isDark ? 'rgba(235,235,235,0.92)' : 'rgba(40,38,34,0.9)';
-                  ctx.fillText(label, node.x, node.y + r + 2 / scale);
+                  const tw = ctx.measureText(label).width;
+                  const padX = 5 / scale, ty = node.y + r + 3 / scale, pillH = fs + 4 / scale;
+                  ctx.globalAlpha = 0.82;
+                  ctx.fillStyle = isDark ? 'rgba(20,20,20,0.92)' : 'rgba(255,255,255,0.94)';
+                  roundRect(ctx, node.x - tw / 2 - padX, ty - 1 / scale, tw + padX * 2, pillH, 4 / scale);
+                  ctx.fill();
+                  ctx.globalAlpha = 1;
+                  ctx.fillStyle = hot ? (isDark ? '#a3c429' : '#698016') : (isDark ? 'rgba(235,235,235,0.95)' : 'rgba(28,26,23,0.92)');
+                  ctx.fillText(label, node.x, ty + 1 / scale);
                 }
                 ctx.restore();
               }}
               nodePointerAreaPaint={(node: any, color: string, ctx: CanvasRenderingContext2D) => {
                 ctx.beginPath();
-                ctx.arc(node.x, node.y, 8, 0, 2 * Math.PI);
+                ctx.arc(node.x, node.y, isAnchorNode(node) ? 10 : 8, 0, 2 * Math.PI);
                 ctx.fillStyle = color;
                 ctx.fill();
               }}
               nodeLabel={(n: any) => `[${n.source}] ${n.title}`}
             />
           )}
+
+          {/* Compact legend overlay (top-left) — replaces the old full-width legend bar. */}
+            {!loading && data.nodes.length > 0 && (
+              <div className="hidden sm:flex absolute top-3 left-3 flex-col gap-1.5 px-2.5 py-2 rounded-xl bg-app-canvas/85 backdrop-blur-md border border-app-divider shadow-sm pointer-events-none">
+                <div className="flex items-center gap-x-3 gap-y-1 flex-wrap max-w-[260px]">
+                  {sources.map((s) => (
+                    <span key={s} className="inline-flex items-center gap-1.5 text-[10.5px] text-app-fg-subtle">
+                      <span className="w-2 h-2 rounded-full" style={{ background: srcColor(s) }} /> {s}
+                    </span>
+                  ))}
+                </div>
+                {hasVerdicts && (
+                  <div className="flex items-center gap-3 pt-1.5 mt-0.5 border-t border-app-divider/70 text-[10.5px] text-app-fg-subtle">
+                    <span className="inline-flex items-center gap-1.5"><span className="w-4 h-[2px] rounded-full" style={{ background: verdictColor('aligned')! }} /> aligned</span>
+                    <span className="inline-flex items-center gap-1.5"><span className="w-4 h-[2px] rounded-full" style={{ background: verdictColor('partial')! }} /> partial</span>
+                    <span className="inline-flex items-center gap-1.5"><span className="w-4 h-[2px] rounded-full" style={{ background: verdictColor('divergent')! }} /> divergent</span>
+                  </div>
+                )}
+                <span className="text-[9.5px] text-app-fg-subtle/70 pt-0.5">Hover a node to spotlight its lineage · zoom in for labels</span>
+              </div>
+            )}
+
+            {/* Zoom controls (bottom-right) — knowledge-graph style. */}
+            {!loading && data.nodes.length > 0 && (
+              <div className="absolute bottom-3 right-3 flex flex-col gap-1.5">
+                <button onClick={() => { const z = fgRef.current?.zoom?.() ?? 1; fgRef.current?.zoom?.(z * 1.35, 250); }} title="Zoom in"
+                  className="w-9 h-9 flex items-center justify-center rounded-lg bg-app-canvas/90 backdrop-blur-md border border-app-divider text-app-fg-subtle hover:text-app-fg hover:bg-app-chip shadow-sm"><Plus size={15} /></button>
+                <button onClick={() => { const z = fgRef.current?.zoom?.() ?? 1; fgRef.current?.zoom?.(z / 1.35, 250); }} title="Zoom out"
+                  className="w-9 h-9 flex items-center justify-center rounded-lg bg-app-canvas/90 backdrop-blur-md border border-app-divider text-app-fg-subtle hover:text-app-fg hover:bg-app-chip shadow-sm"><Minus size={15} /></button>
+                <button onClick={() => fgRef.current?.zoomToFit?.(500, 70)} title="Fit to view"
+                  className="w-9 h-9 flex items-center justify-center rounded-lg bg-app-canvas/90 backdrop-blur-md border border-app-divider text-app-fg-subtle hover:text-app-fg hover:bg-app-chip shadow-sm"><Maximize2 size={14} /></button>
+              </div>
+            )}
           {/* Control cluster — live freshness + activity */}
           {!loading && (
             <div className="absolute top-3 right-3 flex items-center gap-1.5">
@@ -355,10 +457,6 @@ export default function BrainMapModal({ workspaceId, workspaceName, folderId = n
               <button onClick={() => { setPulseOpen((o) => !o); setAlertsOpen(false); }} title="Activity — who did what, when"
                 className={`flex items-center gap-1 text-[11px] px-2 py-1 rounded-md border shadow-sm ${pulseOpen ? 'bg-app-accent/15 border-app-accent/40 text-app-accent' : 'bg-app-canvas/90 border-app-divider text-app-fg-subtle hover:text-app-fg'}`}>
                 <Activity size={11} /> Activity{pulse.length ? ` · ${pulse.length}` : ''}
-              </button>
-              <button onClick={() => fgRef.current?.zoomToFit?.(450, 60)}
-                className="text-[11px] px-2 py-1 rounded-md bg-app-canvas/90 border border-app-divider text-app-fg-subtle hover:text-app-fg shadow-sm">
-                Fit
               </button>
             </div>
           )}

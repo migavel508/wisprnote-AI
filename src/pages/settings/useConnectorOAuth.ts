@@ -38,9 +38,17 @@ export function useConnectorOAuth(onDone: (id: string, ok: boolean) => void): vo
     let unlisten: (() => void) | undefined;
     const consume = async (url: string) => {
       if (!url.startsWith('wisprnote://connector-callback')) return;
+      const u = new URL(url);
+      // Server-side completion: the token was already exchanged + stored by the API's /oauth/callback,
+      // which hands back here only to refocus the app. Just clear the spinner + refresh.
+      if (u.searchParams.get('connected') === '1') {
+        const id = u.searchParams.get('source') || takePendingConnector();
+        if (id) onDone(id, true);
+        return;
+      }
+      // Legacy in-app exchange (kept as a fallback if a redirect ever delivers code+state here).
       const id = takePendingConnector();
       try {
-        const u = new URL(url);
         const code = u.searchParams.get('code'); const state = u.searchParams.get('state');
         if (!code || !state || !id) return;
         await exchangeConnector(id, code, state);

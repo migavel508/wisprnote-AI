@@ -22,6 +22,8 @@ const WORKSPACE_CAP = 25;
 const SEM_BATCH = 24;          // items semantically linked per workspace per tick
 const SEM_K = 6;
 const SEM_MIN_SIM = 0.74;
+const GH_XSRC_SIM = 0.45;      // recall floor for a commit→meeting/ticket link (code↔prose is weak)
+const GH_XSRC_CAP = 2;         // a commit links to at most its 1-2 most-related meeting/ticket
 const TIME_BUDGET_MS = 32_000;   // stay well under the 60s Lambda cap even with LLM calls
 
 const JIRA_KEY = /\b([A-Z][A-Z0-9]+-\d+)\b/g;
@@ -306,9 +308,16 @@ export async function runBrainLink(opts?: BrainLinkOpts): Promise<BrainLinkResul
             cands.push({ id: cid, source: it.source, text });
           }
           const links = await judgeAlignment({ kind: isSession ? 'DEV SESSION' : isTask ? 'JIRA TASK' : 'MEETING', title: self.title, body: self.body }, cands);
+          // Cap SAME-SOURCE links (e.g. meeting↔meeting) to the strongest few so related meetings stay
+          // interconnected WITHOUT forming a dense redundant blob. Cross-source lineage is never capped.
+          const SAME_SOURCE_CAP = 3;
+          let sameSourceMade = 0;
           for (const l of links) {
+            const sameSrc = itemById.get(l.id)?.source === self.source;
+            if (sameSrc && sameSourceMade >= SAME_SOURCE_CAP) continue;
             // Verdict + rationale stored ON the edge → the line is coloured & explains itself.
-            if (await insertEdge({ userId, workspaceId, spaceId: itemById.get(String(self.id))?.space_id ?? itemById.get(l.id)?.space_id ?? null, srcKind: 'item', srcId: String(self.id), dstKind: 'item', dstId: l.id, relation: l.relation, origin: 'llm', confidence: 0.9, evidence: l.verdict, verdict: l.verdict, rationale: l.rationale })) result.llm++;
+            const inserted = await insertEdge({ userId, workspaceId, spaceId: itemById.get(String(self.id))?.space_id ?? itemById.get(l.id)?.space_id ?? null, srcKind: 'item', srcId: String(self.id), dstKind: 'item', dstId: l.id, relation: l.relation, origin: 'llm', confidence: 0.9, evidence: l.verdict, verdict: l.verdict, rationale: l.rationale });
+            if (inserted) { result.llm++; if (sameSrc) sameSourceMade++; }
             // Keep the reasoning ledger too (history) for meeting intents.
             if (!isTask && !isSession) await insertReasoning({ userId, workspaceId, meetingId: String(self.id), implId: l.id, verdict: l.verdict, rationale: l.rationale, tags: [l.verdict, l.relation] }).catch(() => {});
             // Co-architect advisory: store the code read on the COMMIT itself (diff-grounded).
@@ -317,18 +326,20 @@ export async function runBrainLink(opts?: BrainLinkOpts): Promise<BrainLinkResul
             }
           }
         } else {
-          // Semantic links also stay within the same project (folder).
+          // A GitHub commit links CROSS-SOURCE ONLY — to the Jira ticket / meeting it relates to,
+          // NEVER to other commits (commit↔commit just builds a redundant blob). Commit diffs match
+          // meeting/ticket PROSE weakly, so use a recall floor and cap each commit to its 1-2
+          // most-related items — enough to attach it to the work, never enough to re-form a blob.
           const selfFolder = itemById.get(String(self.id))?.folder_id ?? null;
           const vec = vecById.get(String(self.id));
-          const hits = vec ? await queryNearestItems(userId, workspaceId, vec, SEM_K * 3).catch(() => null) : null;
+          const hits = vec ? await queryNearestItems(userId, workspaceId, vec, SEM_K * 4, ['meeting', 'jira']).catch(() => null) : null;
           let made = 0;
           for (const h of hits || []) {
-            if (made >= SEM_K) break;
-            if (h.id === String(self.id) || h.similarity < SEM_MIN_SIM) continue;
+            if (made >= GH_XSRC_CAP) break;
+            if (h.id === String(self.id) || h.similarity < GH_XSRC_SIM) continue;
             const hit = itemById.get(h.id);
             if (!hit || (hit.folder_id ?? null) !== selfFolder) continue;   // same project only
-            const crossSource = hit.source !== self.source;
-            if (!crossSource && h.similarity < 0.82) continue;
+            if (hit.source === self.source) continue;                       // cross-source only
             if (await insertEdge({ userId, workspaceId, spaceId: itemById.get(String(self.id))?.space_id ?? hit.space_id ?? null, srcKind: 'item', srcId: String(self.id), dstKind: 'item', dstId: h.id, relation: 'related', origin: 'semantic', confidence: h.similarity })) { result.semantic++; made++; }
           }
         }
