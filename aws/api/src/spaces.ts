@@ -1,4 +1,5 @@
 import { query, queryOne } from './db';
+import { ACCOUNT_SCOPE } from './connectors/schema';
 
 /**
  * SPACES LAYER — the membership-scoped grouping inside a workspace.
@@ -159,4 +160,157 @@ export async function validateOwnedSpaceId(userId: string, workspaceId: string, 
     [candidate, userId, workspaceId],
   );
   return s ? candidate : null;
+}
+
+/**
+ * Reclaim ORPHANED connector data into the canonical (default) workspace. The workspace→space
+ * migration moved MEETINGS to the default workspace and DELETED the original workspaces, but never
+ * moved connector data — so `knowledge_item` (jira/github), `brain_edge`, `brain_event`,
+ * `action_proposal`, and `connector_credentials` were left under a now-deleted workspace_id (or the
+ * ACCOUNT_SCOPE sentinel). The strict (workspace+space) reads then exclude them entirely, and
+ * brainLink (which groups by workspace_id) can never link them to the meetings. This moves every row
+ * whose workspace_id is NOT a current workspace of the user → the default workspace, so they sit
+ * alongside the meetings; brainLink then forms the links and `backfillSpaceScoping` files them into
+ * the right space. Idempotent + guarded against unique/PK clashes (a canonical copy already there
+ * wins; the orphan is left in place). MUST run before backfillSpaceScoping.
+ */
+export async function reclaimOrphanConnectorData(userId: string, defaultWorkspaceId: string): Promise<void> {
+  if (!defaultWorkspaceId) return;
+  const orphan = `t.workspace_id NOT IN (SELECT id FROM workspaces WHERE user_id=$1)`;
+  await query(
+    `UPDATE knowledge_item t SET workspace_id=$2
+      WHERE t.user_id=$1 AND ${orphan}
+        AND NOT EXISTS (SELECT 1 FROM knowledge_item k2 WHERE k2.user_id=$1 AND k2.workspace_id=$2
+          AND k2.space_id=t.space_id AND k2.source=t.source AND k2.source_id=t.source_id AND k2.type=t.type)`,
+    [userId, defaultWorkspaceId],
+  ).catch(() => {});
+  await query(
+    `UPDATE brain_edge t SET workspace_id=$2
+      WHERE t.user_id=$1 AND ${orphan}
+        AND NOT EXISTS (SELECT 1 FROM brain_edge e2 WHERE e2.user_id=$1 AND e2.workspace_id=$2
+          AND e2.src_kind=t.src_kind AND e2.src_id=t.src_id AND e2.dst_kind=t.dst_kind AND e2.dst_id=t.dst_id AND e2.relation=t.relation)`,
+    [userId, defaultWorkspaceId],
+  ).catch(() => {});
+  await query(
+    `UPDATE brain_event t SET workspace_id=$2
+      WHERE t.user_id=$1 AND ${orphan}
+        AND NOT EXISTS (SELECT 1 FROM brain_event e2 WHERE e2.user_id=$1 AND e2.workspace_id=$2
+          AND e2.source_id IS NOT DISTINCT FROM t.source_id AND e2.kind=t.kind
+          AND e2.to_state IS NOT DISTINCT FROM t.to_state AND e2.occurred_at IS NOT DISTINCT FROM t.occurred_at)`,
+    [userId, defaultWorkspaceId],
+  ).catch(() => {});
+  await query(
+    `UPDATE action_proposal t SET workspace_id=$2
+      WHERE t.user_id=$1 AND ${orphan}
+        AND NOT EXISTS (SELECT 1 FROM action_proposal a2 WHERE a2.user_id=$1 AND a2.workspace_id=$2
+          AND a2.space_id=t.space_id AND a2.dedup_key=t.dedup_key)`,
+    [userId, defaultWorkspaceId],
+  ).catch(() => {});
+  await query(
+    `UPDATE connector_credentials t SET workspace_id=$2
+      WHERE t.user_id=$1 AND ${orphan}
+        AND NOT EXISTS (SELECT 1 FROM connector_credentials c2 WHERE c2.user_id=$1 AND c2.workspace_id=$2
+          AND c2.space_id=t.space_id AND c2.source=t.source)`,
+    [userId, defaultWorkspaceId],
+  ).catch(() => {});
+}
+
+/**
+ * CORRECTIVE, idempotent "follow the linked meeting" backfill: assign a SPACE to legacy/mis-placed
+ * connector data so the strictly (workspace+space)-scoped brain, suggestions and activity show it.
+ * It RE-DERIVES from canonical sources (meetings from task_history; connector items/edges/events/
+ * proposals from the meeting they link to) and OVERWRITES wrong values — not just NULL/sentinel —
+ * so it repairs data the earlier fill-only pass stranded at the default space. A connector item is
+ * only re-homed if it's at the sentinel OR the workspace's default space (never clobbers an item
+ * already filed in a real per-space connection). Safe to re-run; runs at bootstrap AND on brain sync.
+ */
+export async function backfillSpaceScoping(userId: string): Promise<void> {
+  const SENT = `'${ACCOUNT_SCOPE}'::uuid`;
+  const defaultSpaceExpr = `(SELECT s.id FROM spaces s WHERE s.user_id=ki.user_id AND s.workspace_id=ki.workspace_id AND s.is_default=true LIMIT 1)`;
+  // 0) Meetings → their CANONICAL space (task_history.space_id). Corrective + first, so every
+  //    downstream "follow the meeting" step sees the right space.
+  await query(
+    `UPDATE knowledge_item ki SET space_id = th.space_id
+       FROM task_history th
+      WHERE ki.user_id=$1 AND ki.source='meeting' AND ki.type='meeting'
+        AND ki.source_id = th.id::text AND th.space_id IS NOT NULL
+        AND ki.space_id IS DISTINCT FROM th.space_id
+        AND NOT EXISTS (SELECT 1 FROM knowledge_item k2 WHERE k2.user_id=ki.user_id
+          AND k2.workspace_id=ki.workspace_id AND k2.space_id=th.space_id
+          AND k2.source='meeting' AND k2.type='meeting' AND k2.source_id=ki.source_id AND k2.id<>ki.id)`,
+    [userId],
+  ).catch(() => {});
+  // 1) REMOVED (P0, strict space isolation): we no longer re-home a connector item into the space of
+  //    a meeting it links to. That "follow the linked meeting" move pulled Jira/GitHub items into
+  //    spaces that never authorized the integration (the cross-space leak). A connector item's space
+  //    is owned SOLELY by the credential that synced it (sync.ts sets it from connector_credentials).
+  // 2) REMOVED (P0, strict space isolation): we no longer auto-file still-sentinel connector items
+  //    into the workspace's DEFAULT space. That silently put Jira/GitHub data into a space the user
+  //    never connected the integration in (a re-leak vector). A connector item is filed into a real
+  //    space ONLY by its authorizing credential (sync.ts); legacy sentinel items stay invisible until
+  //    re-synced under a real connection, never auto-homed.
+  // 3) Edges → the space of their MEETING endpoint (corrective), else src, else dst item.
+  await query(
+    `UPDATE brain_edge e SET space_id = m.space_id
+       FROM knowledge_item m
+      WHERE e.user_id=$1 AND m.user_id=$1 AND m.source='meeting'
+        AND m.id::text IN (e.src_id, e.dst_id) AND m.space_id <> ${SENT}
+        AND e.space_id IS DISTINCT FROM m.space_id`,
+    [userId],
+  ).catch(() => {});
+  await query(
+    `UPDATE brain_edge e SET space_id = si.space_id
+       FROM knowledge_item si
+      WHERE e.user_id=$1 AND e.space_id IS NULL AND si.id::text=e.src_id AND si.space_id <> ${SENT}`,
+    [userId],
+  ).catch(() => {});
+  await query(
+    `UPDATE brain_edge e SET space_id = di.space_id
+       FROM knowledge_item di
+      WHERE e.user_id=$1 AND e.space_id IS NULL AND di.id::text=e.dst_id AND di.space_id <> ${SENT}`,
+    [userId],
+  ).catch(() => {});
+  // 4) Events → space of their item (corrective).
+  await query(
+    `UPDATE brain_event ev SET space_id = ki.space_id
+       FROM knowledge_item ki
+      WHERE ev.user_id=$1 AND ki.id=ev.item_id AND ki.space_id <> ${SENT}
+        AND ev.space_id IS DISTINCT FROM ki.space_id`,
+    [userId],
+  ).catch(() => {});
+  // 5) Suggestions → source meeting's space (corrective), then default for any still at sentinel.
+  await query(
+    `UPDATE action_proposal ap SET space_id = th.space_id
+       FROM task_history th
+      WHERE ap.user_id=$1 AND ap.source_meeting_id = th.id::text AND th.space_id IS NOT NULL
+        AND ap.space_id IS DISTINCT FROM th.space_id
+        AND NOT EXISTS (SELECT 1 FROM action_proposal a2 WHERE a2.user_id=ap.user_id
+          AND a2.workspace_id=ap.workspace_id AND a2.space_id=th.space_id AND a2.dedup_key=ap.dedup_key AND a2.id<>ap.id)`,
+    [userId],
+  ).catch(() => {});
+  await query(
+    `UPDATE action_proposal ap SET space_id = (SELECT s.id FROM spaces s WHERE s.user_id=ap.user_id AND s.workspace_id=ap.workspace_id AND s.is_default=true LIMIT 1)
+      WHERE ap.user_id=$1 AND ap.space_id=${SENT}
+        AND NOT EXISTS (SELECT 1 FROM action_proposal a2 WHERE a2.user_id=ap.user_id
+          AND a2.workspace_id=ap.workspace_id
+          AND a2.space_id=(SELECT s.id FROM spaces s WHERE s.user_id=ap.user_id AND s.workspace_id=ap.workspace_id AND s.is_default=true LIMIT 1)
+          AND a2.dedup_key=ap.dedup_key AND a2.id<>ap.id)`,
+    [userId],
+  ).catch(() => {});
+  // 6) Move a legacy sentinel-space connection to the space its items predominantly belong to,
+  //    so ongoing sync lands in the right space (the user may also re-connect inside a space).
+  await query(
+    `UPDATE connector_credentials cc SET space_id = sub.space_id
+       FROM (
+         SELECT workspace_id, source, space_id,
+                ROW_NUMBER() OVER (PARTITION BY workspace_id, source ORDER BY COUNT(*) DESC) rn
+           FROM knowledge_item WHERE user_id=$1 AND space_id <> ${SENT}
+          GROUP BY workspace_id, source, space_id
+       ) sub
+      WHERE cc.user_id=$1 AND cc.space_id=${SENT}
+        AND cc.workspace_id=sub.workspace_id AND cc.source=sub.source AND sub.rn=1
+        AND NOT EXISTS (SELECT 1 FROM connector_credentials c2 WHERE c2.user_id=cc.user_id
+          AND c2.workspace_id=cc.workspace_id AND c2.space_id=sub.space_id AND c2.source=cc.source)`,
+    [userId],
+  ).catch(() => {});
 }

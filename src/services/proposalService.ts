@@ -1,6 +1,6 @@
 import { fetch as tauriFetch } from '@tauri-apps/plugin-http';
 import { getIdToken } from './awsAuthService';
-import type { JiraActionProposal } from './jiraActionService';
+import type { JiraActionProposal, McpWriteProposal } from './jiraActionService';
 
 /**
  * Client for the autonomous agent's HITL proposal queue. The agent proposes Jira
@@ -17,12 +17,18 @@ const baseFetch: typeof globalThis.fetch = isTauri
 export interface ProposalRow {
   id: string;
   workspace_id: string;
+  space_id?: string;
+  /** Target connector: 'jira' (default) | 'github' | 'slack' | … | a custom-connector id. */
+  kind: string;
   origin: string;
   source_meeting_id: string | null;
   source_title: string | null;
   rationale: string | null;
-  proposal: JiraActionProposal;
+  /** A JiraActionProposal when kind==='jira', else a generic McpWriteProposal {connector,tool,args}. */
+  proposal: JiraActionProposal | McpWriteProposal;
   created_at: string;
+  confidence?: number | null;   // critic confidence 0–1 (P4)
+  score?: number | null;        // ranking score (P4)
 }
 
 async function authed(path: string, init: RequestInit = {}): Promise<Response> {
@@ -33,15 +39,24 @@ async function authed(path: string, init: RequestInit = {}): Promise<Response> {
   });
 }
 
-export async function listProposals(workspaceId: string): Promise<ProposalRow[]> {
+export interface SuggestionCoverage { reasoned: number; total: number }
+
+/** Pending proposals + how many of the workspace's meetings the engine has reasoned over. */
+export async function listSuggestions(workspaceId: string, spaceId?: string | null): Promise<{ proposals: ProposalRow[]; coverage: SuggestionCoverage }> {
+  const empty = { proposals: [] as ProposalRow[], coverage: { reasoned: 0, total: 0 } };
   try {
-    const r = await authed(`/proposals?workspace=${encodeURIComponent(workspaceId)}`, { method: 'GET' });
-    if (!r.ok) return [];
+    const sq = spaceId ? `&space=${encodeURIComponent(spaceId)}` : '';
+    const r = await authed(`/proposals?workspace=${encodeURIComponent(workspaceId)}${sq}`, { method: 'GET' });
+    if (!r.ok) return empty;
     const d = await r.json();
-    return Array.isArray(d.proposals) ? d.proposals : [];
+    return { proposals: Array.isArray(d.proposals) ? d.proposals : [], coverage: d.coverage || { reasoned: 0, total: 0 } };
   } catch {
-    return [];
+    return empty;
   }
+}
+
+export async function listProposals(workspaceId: string, spaceId?: string | null): Promise<ProposalRow[]> {
+  return (await listSuggestions(workspaceId, spaceId)).proposals;
 }
 
 export async function resolveProposal(id: string, status: 'executed' | 'dismissed', result?: unknown): Promise<void> {

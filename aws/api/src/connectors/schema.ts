@@ -122,6 +122,10 @@ async function migrateExisting(): Promise<void> {
   // map so a space's brain is built from ITS meetings + the connector records they link to.
   await query(`ALTER TABLE knowledge_item        ADD COLUMN IF NOT EXISTS space_id UUID`);
   await query(`CREATE INDEX IF NOT EXISTS knowledge_item_space_idx ON knowledge_item (user_id, workspace_id, space_id)`);
+  // Per-SPACE connections: a credential / in-flight OAuth belongs to a (workspace, space)
+  // pair, so the same tool can be connected in several spaces, fully isolated.
+  await query(`ALTER TABLE connector_credentials ADD COLUMN IF NOT EXISTS space_id UUID`);
+  await query(`ALTER TABLE oauth_state           ADD COLUMN IF NOT EXISTS space_id UUID`);
 
   // 2) Backfill NULLs: attach legacy connections/items to the user's default
   //    (earliest) workspace so they keep working in-place; sentinel if none.
@@ -134,15 +138,22 @@ async function migrateExisting(): Promise<void> {
        WHERE t.workspace_id IS NULL`);
   }
   await query(`UPDATE oauth_state SET workspace_id='${ACCOUNT_SCOPE}'::uuid WHERE workspace_id IS NULL`);
+  // space_id sentinel backfill (real spaces are set by meetingIngest for meetings and the
+  // follow-linked-meeting backfill for connectors); keeps the column NON-NULL for the keys.
+  for (const tbl of ['connector_credentials', 'knowledge_item', 'oauth_state']) {
+    await query(`UPDATE ${tbl} SET space_id='${ACCOUNT_SCOPE}'::uuid WHERE space_id IS NULL`);
+  }
 
-  // 3) Lock down: default + NOT NULL.
+  // 3) Lock down: default + NOT NULL (workspace_id AND space_id).
   for (const tbl of ['connector_credentials', 'knowledge_item', 'oauth_state']) {
     await query(`ALTER TABLE ${tbl} ALTER COLUMN workspace_id SET DEFAULT '${ACCOUNT_SCOPE}'`);
     await query(`ALTER TABLE ${tbl} ALTER COLUMN workspace_id SET NOT NULL`);
+    await query(`ALTER TABLE ${tbl} ALTER COLUMN space_id SET DEFAULT '${ACCOUNT_SCOPE}'`);
+    await query(`ALTER TABLE ${tbl} ALTER COLUMN space_id SET NOT NULL`);
   }
 
-  // 4) Re-key connector_credentials PK → (user_id, workspace_id, source). Look the
-  //    old 2-col PK up by definition (name-agnostic), drop it, add the 3-col PK.
+  // 4) Re-key connector_credentials PK → (user_id, workspace_id, space_id, source). Drop ANY
+  //    PK that isn't the 4-col one (handles the older 2-col and 3-col shapes), add it once.
   await query(`
     DO $$
     DECLARE c text;
@@ -150,22 +161,22 @@ async function migrateExisting(): Promise<void> {
       FOR c IN
         SELECT conname FROM pg_constraint
          WHERE conrelid = 'connector_credentials'::regclass AND contype = 'p'
-           AND array_length(conkey, 1) = 2
+           AND array_length(conkey, 1) <> 4
       LOOP
         EXECUTE 'ALTER TABLE connector_credentials DROP CONSTRAINT ' || quote_ident(c);
       END LOOP;
       IF NOT EXISTS (
         SELECT 1 FROM pg_constraint
          WHERE conrelid = 'connector_credentials'::regclass AND contype = 'p'
-           AND array_length(conkey, 1) = 3
+           AND array_length(conkey, 1) = 4
       ) THEN
-        ALTER TABLE connector_credentials ADD PRIMARY KEY (user_id, workspace_id, source);
+        ALTER TABLE connector_credentials ADD PRIMARY KEY (user_id, workspace_id, space_id, source);
       END IF;
     END $$;
   `);
 
-  // 5) Re-key knowledge_item UNIQUE → (user_id, workspace_id, source, source_id, type).
-  //    Drop ANY pre-workspace 4-col UNIQUE (by definition), add the 5-col one once.
+  // 5) Re-key knowledge_item UNIQUE → (user_id, workspace_id, space_id, source, source_id, type).
+  //    Drop ANY unique that isn't the 6-col one (handles the older 4-col + 5-col shapes), add once.
   await query(`
     DO $$
     DECLARE c text;
@@ -173,17 +184,17 @@ async function migrateExisting(): Promise<void> {
       FOR c IN
         SELECT conname FROM pg_constraint
          WHERE conrelid = 'knowledge_item'::regclass AND contype = 'u'
-           AND array_length(conkey, 1) = 4
+           AND array_length(conkey, 1) <> 6
       LOOP
         EXECUTE 'ALTER TABLE knowledge_item DROP CONSTRAINT ' || quote_ident(c);
       END LOOP;
       IF NOT EXISTS (
         SELECT 1 FROM pg_constraint
          WHERE conrelid = 'knowledge_item'::regclass AND contype = 'u'
-           AND array_length(conkey, 1) = 5
+           AND array_length(conkey, 1) = 6
       ) THEN
         ALTER TABLE knowledge_item
-          ADD CONSTRAINT knowledge_item_ws_uk UNIQUE (user_id, workspace_id, source, source_id, type);
+          ADD CONSTRAINT knowledge_item_ws_space_uk UNIQUE (user_id, workspace_id, space_id, source, source_id, type);
       END IF;
     END $$;
   `);

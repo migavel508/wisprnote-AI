@@ -125,11 +125,14 @@ interface ConnectionsTabProps {
   /** When set, connections are scoped to this workspace and the picker is hidden
    *  (used by the workspace-level "Integrations" entry). */
   fixedWorkspaceId?: string;
+  /** When set, connections are scoped to this SPACE — connectors are connected INSIDE a space
+   *  (the space's Integrations tab). The connection + everything it ingests belong to this space. */
+  fixedSpaceId?: string;
   /** Drop the page chrome (title/padding) so it fits inside a modal. */
   embedded?: boolean;
 }
 
-export default function ConnectionsTab({ fixedWorkspaceId, embedded }: ConnectionsTabProps = {}) {
+export default function ConnectionsTab({ fixedWorkspaceId, fixedSpaceId, embedded }: ConnectionsTabProps = {}) {
   const [statusById, setStatusById] = useState<Record<string, ConnectorStatus>>({});
   const [busyId, setBusyId] = useState<string | null>(null);
   // Connections are workspace-scoped: pick which workspace to connect tools for.
@@ -137,6 +140,7 @@ export default function ConnectionsTab({ fixedWorkspaceId, embedded }: Connectio
   const [pickedWorkspaceId, setPickedWorkspaceId] = useState<string | null>(null);
   // A fixed workspace (from the workspace page) overrides the in-tab picker.
   const workspaceId = fixedWorkspaceId ?? pickedWorkspaceId;
+  const spaceId = fixedSpaceId;   // when embedded in a space, all connector ops are space-scoped
   const showPicker = !fixedWorkspaceId;
 
   useEffect(() => {
@@ -148,9 +152,9 @@ export default function ConnectionsTab({ fixedWorkspaceId, embedded }: Connectio
 
   const refresh = useCallback(async () => {
     if (!isConnectorsEnabled()) return;
-    const { connectors } = await listConnectors(workspaceId ?? undefined);
+    const { connectors } = await listConnectors(workspaceId ?? undefined, spaceId ?? undefined);
     setStatusById(Object.fromEntries(connectors.map((c) => [c.id, c])));
-  }, [workspaceId]);
+  }, [workspaceId, spaceId]);
 
   useEffect(() => { void refresh(); }, [refresh]);
 
@@ -288,7 +292,7 @@ export default function ConnectionsTab({ fixedWorkspaceId, embedded }: Connectio
     setBusyId(id);
     try {
       setPendingConnector(id);
-      const url = await getConnectorOAuthUrl(id, workspaceId ?? undefined);
+      const url = await getConnectorOAuthUrl(id, workspaceId ?? undefined, spaceId ?? undefined);
       if (isTauri) {
         const { open } = await import('@tauri-apps/plugin-shell');
         await open(url);
@@ -300,25 +304,25 @@ export default function ConnectionsTab({ fixedWorkspaceId, embedded }: Connectio
       setBusyId(null);
       console.error('connector_oauth_url_failed', e);
     }
-  }, [workspaceId]);
+  }, [workspaceId, spaceId]);
 
   const submitPat = useCallback(async () => {
     if (!patFor || !patToken.trim()) return;
     setPatBusy(true); setPatError(null);
-    const res = await setConnectorToken(patFor.id, patToken.trim(), workspaceId ?? undefined).catch(() => ({ connected: false, error: 'Network error.' }));
+    const res = await setConnectorToken(patFor.id, patToken.trim(), workspaceId ?? undefined, spaceId ?? undefined).catch(() => ({ connected: false, error: 'Network error.' }));
     setPatBusy(false);
     if (res.connected) { setPatFor(null); setPatToken(''); void refresh(); }
     else setPatError(res.error || 'Token was rejected.');
-  }, [patFor, patToken, workspaceId, refresh]);
+  }, [patFor, patToken, workspaceId, spaceId, refresh]);
 
   const onDisconnect = useCallback(async (id: string) => {
     setBusyId(id);
     try {
       // Custom connectors are removed entirely (delete the definition + its token); built-ins just disconnect.
       if (id.startsWith('custom-')) { if (workspaceId) await deleteCustomConnector(workspaceId, id); loadCustom(); await refresh(); }
-      else { await disconnectConnector(id, workspaceId ?? undefined); await refresh(); }
+      else { await disconnectConnector(id, workspaceId ?? undefined, spaceId ?? undefined); await refresh(); }
     } finally { setBusyId(null); }
-  }, [refresh, workspaceId, loadCustom]);
+  }, [refresh, workspaceId, spaceId, loadCustom]);
 
   const submitAddCustom = useCallback(async () => {
     if (!workspaceId || !addName.trim() || !addUrl.trim() || adding) return;

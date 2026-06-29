@@ -1,5 +1,5 @@
 import { query } from '../db';
-import { ensureConnectorSchema } from './schema';
+import { ensureConnectorSchema, ACCOUNT_SCOPE } from './schema';
 
 /**
  * Meeting → knowledge_item ingest (Living-Brain fix). Meetings used to live only in
@@ -30,17 +30,32 @@ function meetingBody(r: any): string {
 export async function ingestMeetings(cap = CAP): Promise<{ ingested: number }> {
   await ensureConnectorSchema();
 
-  // (0) Keep EXISTING meeting items' location current: a note moved between spaces/
-  // folders updates task_history.space_id/folder_id, so mirror that onto its brain
-  // item. The DISTINCT guard means only changed rows are touched. This is what makes a
-  // space's brain reflect "the meetings associated to it" after any move.
+  // (0) Keep EXISTING meeting items' location CANONICAL: a note moved between
+  // workspaces/spaces/folders updates task_history.{workspace_id,space_id,folder_id};
+  // mirror all three onto its brain item. workspace_id matters because consolidation can
+  // change it long after ingest — a stale workspace_id makes the meeting invisible to the
+  // workspace/space brain graph AND fragments brain-linking (ANN is workspace-scoped, so
+  // meetings stuck under different stale workspaces never link to each other). The DISTINCT
+  // guard touches only changed rows; the NOT EXISTS guard skips the rare case where a row
+  // already exists under the target workspace (avoids a unique-key violation).
   await query(
     `UPDATE knowledge_item ki
-        SET space_id = th.space_id, folder_id = th.folder_id, synced_at = NOW()
+        SET workspace_id = th.workspace_id,
+            space_id = COALESCE(th.space_id, '${ACCOUNT_SCOPE}'::uuid),
+            folder_id = th.folder_id, synced_at = NOW()
        FROM task_history th
       WHERE ki.source='meeting' AND ki.type='meeting'
         AND ki.source_id = th.id::text AND ki.user_id = th.user_id
-        AND (ki.space_id IS DISTINCT FROM th.space_id OR ki.folder_id IS DISTINCT FROM th.folder_id)`,
+        AND th.workspace_id IS NOT NULL
+        AND (ki.workspace_id IS DISTINCT FROM th.workspace_id
+             OR ki.space_id IS DISTINCT FROM COALESCE(th.space_id, '${ACCOUNT_SCOPE}'::uuid)
+             OR ki.folder_id IS DISTINCT FROM th.folder_id)
+        AND NOT EXISTS (
+          SELECT 1 FROM knowledge_item k2
+           WHERE k2.user_id = ki.user_id AND k2.workspace_id = th.workspace_id
+             AND k2.space_id = COALESCE(th.space_id, '${ACCOUNT_SCOPE}'::uuid)
+             AND k2.source='meeting' AND k2.type='meeting' AND k2.source_id = ki.source_id
+             AND k2.id <> ki.id)`,
   ).catch(() => {});
 
   // (1) Ingest meetings not yet in the brain — using the CANONICAL task_history columns
@@ -66,10 +81,10 @@ export async function ingestMeetings(cap = CAP): Promise<{ ingested: number }> {
     await query(
       `INSERT INTO knowledge_item (user_id, workspace_id, source, source_id, type, title, body, people, links, raw, occurred_at, folder_id, space_id)
        VALUES ($1,$2,'meeting',$3,'meeting',$4,$5,$6,'{}'::jsonb,'{}'::jsonb,$7,$8,$9)
-       ON CONFLICT (user_id, workspace_id, source, source_id, type) DO UPDATE SET
+       ON CONFLICT (user_id, workspace_id, space_id, source, source_id, type) DO UPDATE SET
          title=EXCLUDED.title, body=EXCLUDED.body, people=EXCLUDED.people, occurred_at=EXCLUDED.occurred_at,
-         folder_id=EXCLUDED.folder_id, space_id=EXCLUDED.space_id, synced_at=NOW()`,
-      [r.user_id, r.workspace_id, String(r.task_id), r.filename || 'Untitled meeting', meetingBody(r), JSON.stringify(people), r.created_at || null, r.folder_id ?? null, r.space_id ?? null],
+         folder_id=EXCLUDED.folder_id, synced_at=NOW()`,
+      [r.user_id, r.workspace_id, String(r.task_id), r.filename || 'Untitled meeting', meetingBody(r), JSON.stringify(people), r.created_at || null, r.folder_id ?? null, r.space_id ?? ACCOUNT_SCOPE],
     ).catch(() => {});
     n++;
   }

@@ -33,10 +33,61 @@ import { ensurePeopleSchema, upsertPerson } from './people';
 import { activeWorkspaceId, ensureWorkspacePartition, ensureWorkspacePartitionSchema, validateOwnedWorkspaceId } from './workspaceScope';
 import { ensureSpacesSchema, migrateFoldersToSpacesOnce, reconcileSpaces, resolveDefaultSpaceId, validateOwnedSpaceId } from './spaces';
 
-// Desktop deep-link the OAuth provider redirects back to (validated client-side,
-// like the Google sign-in callback). If a provider's DCR rejects custom schemes,
-// switch this to a hosted https forwarder.
+// Connector OAuth redirect — the app's own custom scheme; the desktop deep-link handler catches it
+// (`wisprnote://connector-callback?code=…&state=…`) and POSTs to /exchange. The https /oauth/callback
+// route below is kept as a server-side fallback (dormant unless used as the redirect).
 const CONNECTOR_REDIRECT_URI = 'wisprnote://connector-callback';
+
+// Builds the https callback URL on THIS gateway (the server-side-completion fallback).
+function oauthCallbackUrl(event: APIGatewayProxyEvent): string {
+  const host = event.requestContext?.domainName || (event.headers?.Host || event.headers?.host) || '';
+  const stage = (event.requestContext as any)?.stage;
+  const base = host ? `https://${host}${stage && stage !== '$default' ? `/${stage}` : ''}` : '';
+  return `${base}/oauth/callback`;
+}
+
+// Browser hits this after the user approves on the provider's consent screen. No JWT — it's a
+// top-level browser redirect — so we correlate by the unguessable, single-use `state` nonce, which
+// carries the user + connector + (workspace, space) we stored at oauth-url time.
+async function completeConnectorOAuthCallback(event: APIGatewayProxyEvent): Promise<APIGatewayProxyResult> {
+  const qs = event.queryStringParameters || {};
+  const page = (title: string, msg: string, ok: boolean) => ({
+    statusCode: 200,
+    headers: { 'Content-Type': 'text/html; charset=utf-8' },
+    body: `<!doctype html><html><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>${title}</title>
+<style>body{font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',sans-serif;background:#1a1c18;color:#e8e6e1;display:flex;min-height:100vh;align-items:center;justify-content:center;margin:0}
+.card{max-width:420px;text-align:center;padding:40px 32px}.icon{font-size:48px;margin-bottom:16px}h1{font-size:20px;margin:0 0 8px}p{color:#9a9b96;line-height:1.5;margin:0}.ok{color:#a3c293}</style></head>
+<body><div class="card"><div class="icon">${ok ? '✅' : '⚠️'}</div><h1 class="${ok ? 'ok' : ''}">${title}</h1><p>${msg}</p></div>
+<script>setTimeout(function(){try{window.close()}catch(e){}}, ${ok ? 2500 : 6000})</script></body></html>`,
+  } as APIGatewayProxyResult);
+  if (qs.error) return page('Connection cancelled', String(qs.error_description || qs.error || 'You cancelled the authorization.'), false);
+  const code = String(qs.code || ''); const state = String(qs.state || '');
+  if (!code || !state) return page('Invalid callback', 'Missing authorization code or state.', false);
+  const row = await queryOne<{ inflight: OAuthInflight; user_id: string; source: string; workspace_id: string; space_id: string }>(
+    `SELECT inflight, user_id, source, workspace_id, space_id FROM oauth_state WHERE state=$1`, [state],
+  ).catch(() => null);
+  if (!row) return page('Link expired', 'This authorization link is no longer valid. Please start the connection again from Wisprnote.', false);
+  try {
+    const token = await completeMcpOAuth(row.inflight, code);
+    const stored = {
+      ...token.raw,
+      oauth_meta: { token_endpoint: row.inflight.tokenEndpoint, client_id: row.inflight.clientId, client_secret: row.inflight.clientSecret ?? null },
+      expires_at: token.expires_in ? Date.now() + (token.expires_in - 60) * 1000 : null,
+    };
+    await storeToken(
+      row.user_id, row.source, stored, null,
+      row.inflight.scope ? row.inflight.scope.split(' ') : null,
+      row.workspace_id || ACCOUNT_SCOPE, row.space_id || ACCOUNT_SCOPE,
+    );
+    await query(`DELETE FROM oauth_state WHERE state=$1`, [state]).catch(() => {});
+    try { const { discoverConnectorTools } = await import('./mcp/toolPlane'); await discoverConnectorTools(row.user_id, row.workspace_id || ACCOUNT_SCOPE, row.source); } catch { /* catalog also fills on the sync cron */ }
+    console.log('connector_oauth_completed', JSON.stringify({ source: row.source, workspace: row.workspace_id, space: row.space_id }));
+    return page('Connected', `${row.source} is now connected. You can close this tab and return to Wisprnote.`, true);
+  } catch (e: any) {
+    console.error('connector_oauth_callback_failed', JSON.stringify({ message: e?.message }));
+    return page('Connection failed', String(e?.message || 'Token exchange failed.').slice(0, 200), false);
+  }
+}
 
 const S3_BUCKET = process.env.S3_BUCKET || '';
 const S3_REGION = process.env.AWS_REGION || 'us-east-1';
@@ -305,6 +356,175 @@ export const handler = async (event: APIGatewayProxyEvent): Promise<APIGatewayPr
     }
   }
 
+  // CONNECTOR DEBUG — READ-ONLY. Reports credential token health + pending OAuth states + sync
+  // watermarks, so we can tell an expired/refreshable token from a genuinely-needed reconnect.
+  if ((event as any).__job === 'connector-debug') {
+    const safe = async (sql: string, params: any[] = []) => { try { return await query<any>(sql, params); } catch (e: any) { return [{ error: e?.message }]; } };
+    const creds = await safe(
+      `SELECT source, space_id::text AS space_id, account,
+              (token->>'expires_at') AS expires_at_ms,
+              ((token->>'expires_at') IS NOT NULL AND (token->>'expires_at')::bigint < (extract(epoch from now())*1000)) AS access_expired,
+              (token ? 'refresh_token') AS has_refresh,
+              ((token->'oauth_meta') ? 'client_id') AS has_oauth_meta,
+              updated_at
+         FROM connector_credentials ORDER BY source, updated_at DESC`);
+    const pending = await safe(
+      `SELECT source, workspace_id::text, space_id::text, created_at,
+              round(extract(epoch from (now()-created_at))/60)::int AS age_minutes
+         FROM oauth_state ORDER BY created_at DESC LIMIT 20`);
+    const syncState = await safe(
+      `SELECT source, scope, last_synced_at,
+              round(extract(epoch from (now()-last_synced_at))/60)::int AS minutes_ago
+         FROM sync_state ORDER BY last_synced_at DESC NULLS LAST LIMIT 20`);
+    return { statusCode: 200, body: JSON.stringify({
+      note: 'READ-ONLY. nowMs=' + Date.now(),
+      credentials: creds, pendingOAuthStates: pending, syncWatermarks: syncState,
+    }, null, 2) } as APIGatewayProxyResult;
+  }
+
+  // SPACE-LEAK REPORT (P1 dry-run) — READ-ONLY. Reports exactly what the P1 cleanup migration
+  // WOULD remove/fix, without changing a single row. Run before any destructive cleanup so the
+  // user can see the blast radius. No writes anywhere in this branch.
+  if ((event as any).__job === 'space-leak-report') {
+    const SENT = ACCOUNT_SCOPE;
+    const safe = async (sql: string, params: any[] = []) => { try { return await query<any>(sql, params); } catch (e: any) { return [{ error: e?.message }]; } };
+    // 1) The core leak: connector items filed in a space that NEVER authorized that source
+    //    (no matching connector_credentials). These are the illegitimate copies P1 deletes.
+    const leakedBySource = await safe(
+      `SELECT ki.source, COUNT(*)::int AS leaked_rows, COUNT(DISTINCT ki.space_id)::int AS spaces,
+              COUNT(DISTINCT ki.user_id)::int AS users
+         FROM knowledge_item ki
+        WHERE ki.source <> 'meeting' AND ki.space_id IS NOT NULL AND ki.space_id <> $1
+          AND NOT EXISTS (SELECT 1 FROM connector_credentials c
+            WHERE c.user_id=ki.user_id AND c.workspace_id=ki.workspace_id
+              AND c.space_id=ki.space_id AND c.source=ki.source)
+        GROUP BY ki.source ORDER BY leaked_rows DESC`, [SENT]);
+    // 2) Same connector item (source, source_id) duplicated across >1 space — the symptom.
+    const dupAcrossSpaces = await safe(
+      `SELECT source, COUNT(*)::int AS items_in_multiple_spaces, SUM(n)::int AS total_rows FROM (
+         SELECT user_id, source, source_id, COUNT(DISTINCT space_id) AS n
+           FROM knowledge_item WHERE source <> 'meeting' AND space_id IS NOT NULL
+          GROUP BY 1,2,3 HAVING COUNT(DISTINCT space_id) > 1
+       ) t GROUP BY source ORDER BY total_rows DESC`);
+    // 3) A few concrete leaked examples (issue key → the spaces it sits in vs. where it's connected).
+    const samples = await safe(
+      `SELECT ki.source, ki.source_id,
+              array_agg(DISTINCT ki.space_id::text) AS in_spaces,
+              (SELECT array_agg(DISTINCT c.space_id::text) FROM connector_credentials c
+                 WHERE c.user_id=ki.user_id AND c.workspace_id=ki.workspace_id AND c.source=ki.source) AS connected_spaces
+         FROM knowledge_item ki
+        WHERE ki.source <> 'meeting' AND ki.space_id IS NOT NULL AND ki.space_id <> $1
+          AND NOT EXISTS (SELECT 1 FROM connector_credentials c
+            WHERE c.user_id=ki.user_id AND c.workspace_id=ki.workspace_id
+              AND c.space_id=ki.space_id AND c.source=ki.source)
+        GROUP BY ki.user_id, ki.workspace_id, ki.source, ki.source_id LIMIT 25`, [SENT]);
+    // 4) Cross-space brain_edges (both endpoints in different REAL spaces) — B's legacy artifacts.
+    const crossSpaceEdges = await safe(
+      `SELECT COUNT(*)::int AS n FROM brain_edge e
+         JOIN knowledge_item a ON a.id::text=e.src_id
+         JOIN knowledge_item b ON b.id::text=e.dst_id
+        WHERE a.space_id IS NOT NULL AND b.space_id IS NOT NULL
+          AND a.space_id <> $1 AND b.space_id <> $1 AND a.space_id <> b.space_id`, [SENT]);
+    // 5) Workspace_id drift — connector data under a workspace_id that no longer exists.
+    const wsDrift = await safe(
+      `SELECT 'knowledge_item' AS tbl, COUNT(*)::int AS n FROM knowledge_item ki
+        WHERE ki.workspace_id NOT IN (SELECT id FROM workspaces WHERE user_id=ki.user_id)
+       UNION ALL
+       SELECT 'connector_credentials', COUNT(*)::int FROM connector_credentials c
+        WHERE c.workspace_id NOT IN (SELECT id FROM workspaces WHERE user_id=c.user_id) AND c.workspace_id <> $1`, [SENT]);
+    // 6) action_proposals in a space with no credential for that proposal's connector (jira).
+    const leakedProposals = await safe(
+      `SELECT COUNT(*)::int AS n FROM action_proposal ap
+        WHERE ap.space_id IS NOT NULL AND ap.space_id <> $1
+          AND NOT EXISTS (SELECT 1 FROM connector_credentials c
+            WHERE c.user_id=ap.user_id AND c.workspace_id=ap.workspace_id
+              AND c.space_id=ap.space_id AND c.source='jira')`, [SENT]);
+    // 7) Space NAME map + per-space connector picture: for each space, which sources are CONNECTED
+    //    (have a credential) vs. which sources have ITEMS sitting in it. Lets us map Pilot/Personal.
+    const spaceMap = await safe(
+      `SELECT s.id::text AS space_id, s.name, s.is_default,
+              (SELECT array_agg(DISTINCT c.source) FROM connector_credentials c
+                 WHERE c.user_id=s.user_id AND c.space_id=s.id) AS connected_sources,
+              (SELECT json_agg(json_build_object('source', x.source, 'items', x.n) ORDER BY x.n DESC)
+                 FROM (SELECT ki.source, COUNT(*)::int AS n FROM knowledge_item ki
+                         WHERE ki.user_id=s.user_id AND ki.space_id=s.id AND ki.source <> 'meeting'
+                         GROUP BY ki.source) x) AS item_sources
+         FROM spaces s ORDER BY s.is_default DESC, s.name`);
+    return { statusCode: 200, body: JSON.stringify({
+      note: 'READ-ONLY dry-run. Nothing was modified. These are the rows P1 cleanup would address.',
+      spaceMap,
+      leakedConnectorItemsBySource: leakedBySource,
+      duplicatedAcrossSpaces: dupAcrossSpaces,
+      leakedSamples: samples,
+      crossSpaceEdges: crossSpaceEdges?.[0]?.n ?? crossSpaceEdges,
+      workspaceIdDrift: wsDrift,
+      leakedProposals: leakedProposals?.[0]?.n ?? leakedProposals,
+    }, null, 2) } as APIGatewayProxyResult;
+  }
+
+  // SPACE-LEAK CLEANUP (P1) — removes the rows the leak left behind. DEFAULTS TO DRY-RUN
+  // (count only); deletes ONLY when invoked with { commit: true }. Local connectors
+  // (claude-code, codex) are EXCLUDED — they legitimately have no connector_credentials, so the
+  // "no credential = leaked" rule must not touch them. The canonical copies in connected spaces
+  // are never touched (they have a matching credential).
+  if ((event as any).__job === 'space-leak-cleanup') {
+    const commit = (event as any).commit === true;
+    const SENT = `'${ACCOUNT_SCOPE}'::uuid`;
+    const LOCAL = `('meeting','claude-code','codex')`;   // never touched (local; no credentials by design)
+    // Optional allowlist: connector data may live ONLY in these spaces — everything else (for
+    // credential-based connectors) is leaked, EVEN IF it has a credential (an unintended connection).
+    // When omitted, falls back to the credential-presence rule (keep iff a matching credential exists).
+    const UUID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
+    const rawKeep = Array.isArray((event as any).keepSpaceIds) ? (event as any).keepSpaceIds : null;
+    const keep: string[] | null = rawKeep && rawKeep.length && rawKeep.every((x: any) => typeof x === 'string' && UUID_RE.test(x)) ? rawKeep : null;
+    const keepList = keep ? keep.map((x) => `'${x}'::uuid`).join(',') : null;
+    const credAbsent = (src: string) =>
+      `NOT EXISTS (SELECT 1 FROM connector_credentials c WHERE c.user_id=t.user_id
+         AND c.workspace_id=t.workspace_id AND c.space_id=t.space_id AND c.source=${src})`;
+    // "not allowed in this space": allowlist mode → space not in keep; else → no matching credential.
+    const disallowed = (src: string) => keepList ? `t.space_id NOT IN (${keepList})` : credAbsent(src);
+    const results: any = {
+      mode: commit ? 'COMMIT — rows DELETED' : 'DRY-RUN — rows that WOULD be deleted (nothing changed)',
+      rule: keepList ? `ALLOWLIST — connector data kept ONLY in: ${keep!.join(', ')}` : 'CREDENTIAL-PRESENCE — kept where a matching credential exists',
+      excludedLocalConnectors: ['claude-code', 'codex', 'meeting'],
+    };
+    const step = async (label: string, table: string, where: string) => {
+      const sql = commit
+        ? `WITH del AS (DELETE FROM ${table} t WHERE ${where} RETURNING 1) SELECT COUNT(*)::int AS n FROM del`
+        : `SELECT COUNT(*)::int AS n FROM ${table} t WHERE ${where}`;
+      try { const r = await query<any>(sql); results[label] = r?.[0]?.n ?? 0; }
+      catch (e: any) { results[label] = `error: ${e?.message}`; }
+    };
+    // 1) Cross-space edges — both endpoints in DIFFERENT real spaces (always removed).
+    await step('crossSpaceEdgesDeleted', 'brain_edge',
+      `EXISTS (SELECT 1 FROM knowledge_item a, knowledge_item b
+         WHERE a.id::text=t.src_id AND b.id::text=t.dst_id
+           AND a.space_id IS NOT NULL AND b.space_id IS NOT NULL
+           AND a.space_id <> ${SENT} AND b.space_id <> ${SENT} AND a.space_id <> b.space_id)`);
+    // 2) Leaked brain_events (skip local sources).
+    await step('leakedEventsDeleted', 'brain_event',
+      `t.space_id IS NOT NULL AND t.space_id <> ${SENT} AND t.source NOT IN ('claude-code','codex') AND ${disallowed('t.source')}`);
+    // 3) Leaked agent proposals (jira).
+    await step('leakedProposalsDeleted', 'action_proposal',
+      `t.space_id IS NOT NULL AND t.space_id <> ${SENT} AND ${disallowed(`'jira'`)}`);
+    // 4) Leaked connector items — credential-based sources only.
+    await step('leakedItemsDeleted', 'knowledge_item',
+      `t.source NOT IN ${LOCAL} AND t.space_id IS NOT NULL AND t.space_id <> ${SENT} AND ${disallowed('t.source')}`);
+    // 5) Revoke unintended connections (allowlist mode only): credentials outside the kept spaces.
+    //    Without this, the next sync would re-pull the data we just deleted.
+    if (keepList) {
+      await step('credentialsRevoked', 'connector_credentials',
+        `t.space_id IS NOT NULL AND t.space_id <> ${SENT} AND t.space_id NOT IN (${keepList})`);
+    }
+    // 6) Edges now dangling (endpoint item removed) — commit mode only.
+    if (commit) {
+      await step('danglingEdgesDeleted', 'brain_edge',
+        `(t.src_kind='item' AND NOT EXISTS (SELECT 1 FROM knowledge_item k WHERE k.id::text=t.src_id))
+         OR (t.dst_kind='item' AND NOT EXISTS (SELECT 1 FROM knowledge_item k WHERE k.id::text=t.dst_id))`);
+    }
+    return { statusCode: 200, body: JSON.stringify(results, null, 2) } as APIGatewayProxyResult;
+  }
+
   // Commit FINGERPRINT sweep (EventBridge) — Tier 1 of the cost-bounded brain pipeline.
   // Cheap & deterministic: get_commit (a GitHub API call, $0 in LLM tokens) → filenames +
   // stats fingerprint, so semantic candidate-matching has strong signal WITHOUT a diff→LLM
@@ -351,7 +571,12 @@ export const handler = async (event: APIGatewayProxyEvent): Promise<APIGatewayPr
       let reconcile = { workspaces: 0, proposed: 0 };
       try { const { runReconcileSweep } = await import('./connectors/jira/reconcile'); reconcile = await runReconcileSweep(); }
       catch (e: any) { console.error('reconcile_sweep_failed', e?.message); }
-      return { statusCode: 200, body: JSON.stringify({ ...r, reconcile }) } as APIGatewayProxyResult;
+      // Phase 3 — intelligent gap reasoner: reads ALL the space's decisions + existing Jira tasks
+      // and proposes only the missing work (LLM, not rules). Propose-only into the SAME HITL queue.
+      let reasoner = { spaces: 0, proposed: 0 };
+      try { const { runSuggestionReasoner } = await import('./connectors/suggestionReasoner'); reasoner = await runSuggestionReasoner(); }
+      catch (e: any) { console.error('suggestion_reasoner_failed', e?.message); }
+      return { statusCode: 200, body: JSON.stringify({ ...r, reconcile, reasoner }) } as APIGatewayProxyResult;
     } catch (err: any) {
       console.error('jira_agent_sweep_failed', JSON.stringify({ message: err?.message }));
       return { statusCode: 500, body: 'jira-agent-sweep-error' } as APIGatewayProxyResult;
@@ -375,6 +600,12 @@ export const handler = async (event: APIGatewayProxyEvent): Promise<APIGatewayPr
     // Public route: Paddle billing webhook (verified by signature, not JWT).
     if (resource === 'billing' && segments[1] === 'webhook' && method === 'POST') {
       return await handlePaddleWebhook(event);
+    }
+
+    // Public route: connector OAuth callback (browser redirect after consent — no JWT; correlated
+    // by the single-use `state` nonce). Completes the token exchange server-side.
+    if (resource === 'oauth' && segments[1] === 'callback' && method === 'GET') {
+      return await completeConnectorOAuthCallback(event);
     }
 
     // Verify JWT and extract claims
@@ -655,14 +886,16 @@ async function handleConnectors(method: string, segments: string[], userId: stri
   if (process.env.CONNECTORS_ENABLED !== '1') return ok({ enabled: false, connectors: [] });
   await ensureConnectorSchema();
   const id = segments[1];
-  // Connections are workspace-scoped. The client passes the active workspace via
-  // ?workspace= (GET/DELETE) or body.workspace (oauth-url); ACCOUNT_SCOPE if absent.
+  // Connections are (workspace + space)-scoped — connected INSIDE a space. The client passes
+  // the active workspace + space via ?workspace=&space= (GET/DELETE) or body (oauth-url/pat);
+  // ACCOUNT_SCOPE if absent.
   const qsWorkspace = event.queryStringParameters?.workspace || ACCOUNT_SCOPE;
+  const qsSpace = event.queryStringParameters?.space || ACCOUNT_SCOPE;
 
   if (method === 'GET' && !id) {
     const creds = await query<{ source: string; account: string | null }>(
-      `SELECT source, account FROM connector_credentials WHERE user_id=$1 AND workspace_id=$2`,
-      [userId, qsWorkspace],
+      `SELECT source, account FROM connector_credentials WHERE user_id=$1 AND workspace_id=$2 AND space_id=$3`,
+      [userId, qsWorkspace, qsSpace],
     );
     const byId = new Map(creds.map((c) => [c.source, c]));
     const { isConnectorAvailable } = await import('./mcp/customConnectors');
@@ -675,11 +908,11 @@ async function handleConnectors(method: string, segments: string[], userId: stri
       // The client shows a "coming soon" connector as connectable once this flips true.
       available: await isConnectorAvailable(s.id, userId, qsWorkspace).catch(() => false),
     })));
-    return ok({ enabled: true, workspace: qsWorkspace, connectors });
+    return ok({ enabled: true, workspace: qsWorkspace, space: qsSpace, connectors });
   }
 
   if (method === 'DELETE' && id) {
-    await deleteToken(userId, id, qsWorkspace);
+    await deleteToken(userId, id, qsWorkspace, qsSpace);
     return noContent();
   }
 
@@ -808,7 +1041,7 @@ async function handleConnectors(method: string, segments: string[], userId: stri
     } catch (e: any) {
       return ok({ connected: false, error: `Token was rejected by ${id}. Check the token and its scopes.`, detail: String(e?.message || '').slice(0, 160) });
     }
-    await storeToken(userId, id, { access_token: token }, null, server.scopes ?? null, qsWorkspace);
+    await storeToken(userId, id, { access_token: token }, null, server.scopes ?? null, qsWorkspace, qsSpace);
     // Registration: discover + classify this connector's tools so the trust plane has its catalog.
     try { const { discoverConnectorTools } = await import('./mcp/toolPlane'); await discoverConnectorTools(userId, qsWorkspace, id); } catch { /* catalog also fills on the sync cron */ }
     return ok({ connected: true });
@@ -834,7 +1067,9 @@ async function handleConnectors(method: string, segments: string[], userId: stri
 
   // POST /connectors/{id}/oauth-url { workspace } → discover → (pre-registered client OR DCR) → PKCE URL.
   if (method === 'POST' && id && segments[2] === 'oauth-url') {
-    const workspaceId = String(parseBody(event).workspace || ACCOUNT_SCOPE);
+    const oauthBody = parseBody(event);
+    const workspaceId = String(oauthBody.workspace || ACCOUNT_SCOPE);
+    const spaceId = String(oauthBody.space || ACCOUNT_SCOPE);
     const { getServerConfig, getCustomConnectorOAuthClient, getRegistryOAuthClient } = await import('./mcp/customConnectors');
     const server = await getServerConfig(userId, workspaceId, id);
     if (!server || !server.url) return badRequest('connector has no MCP endpoint');
@@ -845,10 +1080,11 @@ async function handleConnectors(method: string, segments: string[], userId: stri
       : await getRegistryOAuthClient(id, userId, workspaceId).catch(() => null);
     const { authorizeUrl, inflight } = await beginMcpOAuth(server, CONNECTOR_REDIRECT_URI, providedClient || undefined);
     await query(
-      `INSERT INTO oauth_state (state, user_id, source, workspace_id, inflight) VALUES ($1,$2,$3,$4,$5)
-       ON CONFLICT (state) DO UPDATE SET inflight=EXCLUDED.inflight, workspace_id=EXCLUDED.workspace_id, created_at=NOW()`,
-      [inflight.state, userId, id, workspaceId, JSON.stringify(inflight)],
+      `INSERT INTO oauth_state (state, user_id, source, workspace_id, space_id, inflight) VALUES ($1,$2,$3,$4,$5,$6)
+       ON CONFLICT (state) DO UPDATE SET inflight=EXCLUDED.inflight, workspace_id=EXCLUDED.workspace_id, space_id=EXCLUDED.space_id, created_at=NOW()`,
+      [inflight.state, userId, id, workspaceId, spaceId, JSON.stringify(inflight)],
     );
+    console.log('connector_oauth_url', JSON.stringify({ source: id, workspace: workspaceId, space: spaceId, redirect: CONNECTOR_REDIRECT_URI }));
     return ok({ url: authorizeUrl });
   }
 
@@ -858,9 +1094,10 @@ async function handleConnectors(method: string, segments: string[], userId: stri
     const body = parseBody(event);
     const code = String(body.code || '');
     const state = String(body.state || '');
+    console.log('connector_exchange_called', JSON.stringify({ source: id, hasCode: !!code, hasState: !!state }));
     if (!code || !state) return badRequest('missing code/state');
-    const row = await queryOne<{ inflight: OAuthInflight; workspace_id: string }>(
-      `SELECT inflight, workspace_id FROM oauth_state WHERE state=$1 AND user_id=$2 AND source=$3`,
+    const row = await queryOne<{ inflight: OAuthInflight; workspace_id: string; space_id: string }>(
+      `SELECT inflight, workspace_id, space_id FROM oauth_state WHERE state=$1 AND user_id=$2 AND source=$3`,
       [state, userId, id],
     );
     if (!row) return badRequest('unknown or expired oauth state');
@@ -875,7 +1112,7 @@ async function handleConnectors(method: string, segments: string[], userId: stri
     await storeToken(
       userId, id, stored, null,
       row.inflight.scope ? row.inflight.scope.split(' ') : null,
-      row.workspace_id || ACCOUNT_SCOPE,
+      row.workspace_id || ACCOUNT_SCOPE, row.space_id || ACCOUNT_SCOPE,
     );
     await query(`DELETE FROM oauth_state WHERE state=$1`, [state]);
     // Registration: discover + classify this connector's tools so the trust plane has its catalog.
@@ -911,7 +1148,7 @@ async function handleBrain(method: string, segments: string[], userId: string, e
   if (method === 'GET' && segments[1] === 'edges') {
     const ws = event.queryStringParameters?.workspace;
     if (!ws) return badRequest('workspace required');
-    return ok({ enabled: true, edges: await getBrainEdges(userId, ws) });
+    return ok({ enabled: true, edges: await getBrainEdges(userId, ws, 500, event.queryStringParameters?.space || null) });
   }
 
   // POST /brain/sync?workspace= → ON-DEMAND freshness (the sync-now / open-the-app path).
@@ -921,14 +1158,24 @@ async function handleBrain(method: string, segments: string[], userId: string, e
   if (method === 'POST' && segments[1] === 'sync') {
     const ws = event.queryStringParameters?.workspace;
     if (!ws) return badRequest('workspace required');
+    const syncSpace = event.queryStringParameters?.space || undefined;
     const out: any = { synced: 0, ingested: 0, embedded: 0, fingerprinted: 0 };
     try {
+      // FIRST recover any connector data orphaned under a deleted/account workspace → bring it into
+      // THIS workspace so it sits with the meetings (and so brainLink can link them). Without this,
+      // a space's historical Jira/edges/suggestions are structurally invisible to the strict reads.
+      try { const { reclaimOrphanConnectorData } = await import('./spaces'); await reclaimOrphanConnectorData(userId, ws); } catch { /* best-effort */ }
       const { runConnectorSync } = await import('./connectors/sync');
-      out.synced = (await runConnectorSync(ws)).processed;
+      out.synced = (await runConnectorSync(ws, syncSpace)).processed;
       try { const { ingestMeetings } = await import('./connectors/meetingIngest'); out.ingested = (await ingestMeetings()).ingested; } catch { /* best-effort */ }
       try { const { fingerprintCommits } = await import('./connectors/github/enrich'); out.fingerprinted = (await fingerprintCommits(8)).fingerprinted; } catch { /* best-effort */ }
       try { const { embedKnowledgeItems } = await import('./connectors/embed'); out.embedded = (await embedKnowledgeItems(48)).embedded; } catch { /* best-effort */ }
-      try { const { runBrainLink } = await import('./connectors/brainLink'); await runBrainLink({ workspaceId: ws, llmBudget: 0, timeBudgetMs: 8000 }); } catch { /* verdicts catch up on the cron */ }
+      // Form a few verdicted links right now (incl. meeting↔meeting) so opening a space's brain
+      // starts showing interconnections immediately; the rest catch up on the 30-min cron.
+      try { const { runBrainLink } = await import('./connectors/brainLink'); await runBrainLink({ workspaceId: ws, llmBudget: 5, timeBudgetMs: 9000 }); } catch { /* verdicts catch up on the cron */ }
+      // LAST: file the (now-linked) connector data into the right space (follow-linked-meeting),
+      // so this single sync both forms the links AND scopes them to the space.
+      try { const { backfillSpaceScoping } = await import('./spaces'); await backfillSpaceScoping(userId); } catch { /* best-effort */ }
     } catch (err: any) {
       console.error('brain_sync_now_failed', JSON.stringify({ message: err?.message }));
     }
@@ -1003,6 +1250,8 @@ async function handleBrain(method: string, segments: string[], userId: string, e
     const ws = event.queryStringParameters?.workspace;
     if (!ws) return badRequest('workspace required');
     const { getEvents } = await import('./connectors/brainEvents');
+    // Strict (workspace + space): each event carries its own space_id, so a space's Activity
+    // shows only that space's connector + meeting activity. `folder` narrows to one project.
     const events = await getEvents(userId, ws, 40, event.queryStringParameters?.folder || null, event.queryStringParameters?.space || null);
     return ok({ enabled: true, events: events.map((e) => ({ kind: e.kind, source: e.source, sourceId: e.source_id, actor: e.actor, from: e.from_state, to: e.to_state, title: e.title, at: e.occurred_at })) });
   }
@@ -1011,12 +1260,17 @@ async function handleBrain(method: string, segments: string[], userId: string, e
   // rationale) so the brain map can show rich detail like the knowledge graph — not just a link.
   if (method === 'GET' && segments[1] === 'node') {
     const ws = event.queryStringParameters?.workspace;
+    const nodeSpace = event.queryStringParameters?.space || null;
     const rawId = (event.queryStringParameters?.id || '').replace(/^item:/, '');
     if (!ws || !rawId || !/^\d+$/.test(rawId)) return badRequest('workspace + numeric id required');
+    // STRICTLY (workspace + space)-scoped: the node, its timeline and its connections all belong
+    // to the same space the brain map is showing.
     const node = await queryOne<any>(
-      `SELECT id, source, type, title, body, enriched_summary, fingerprint, people, links, source_id, occurred_at, status, advisory_assessment, advisory_note
-         FROM knowledge_item WHERE user_id=$1 AND workspace_id=$2 AND id=$3`,
-      [userId, ws, rawId],
+      `SELECT ki.id, ki.source, ki.type, ki.title, ki.body, ki.enriched_summary, ki.fingerprint, ki.people, ki.links, ki.source_id, ki.occurred_at,
+              (SELECT k2.status FROM knowledge_item k2 WHERE k2.user_id=ki.user_id AND k2.source=ki.source AND k2.source_id=ki.source_id AND k2.status IS NOT NULL ORDER BY k2.synced_at DESC NULLS LAST LIMIT 1) AS status,
+              ki.advisory_assessment, ki.advisory_note
+         FROM knowledge_item ki WHERE ki.user_id=$1 AND ki.workspace_id=$2 AND ($4::uuid IS NULL OR ki.space_id=$4) AND ki.id=$3`,
+      [userId, ws, rawId, nodeSpace],
     ).catch(() => null);
     if (!node) return notFound();
     // On-demand enrichment: if you OPEN a commit that has no diff-summary yet, generate it now
@@ -1029,18 +1283,25 @@ async function handleBrain(method: string, segments: string[], userId: string, e
         if (s) node.enriched_summary = s;
       } catch { /* fall back to fingerprint */ }
     }
-    // Timeline of observed changes for this item (who moved it when).
+    // Timeline of observed changes — by the issue's (source, source_id) across ALL its duplicate
+    // rows (not just this row's item_id), deduped, so it shows the FULL history incl. the latest
+    // transition even when the clicked copy is in a stale space.
     const events = await query<any>(
-      `SELECT kind, actor, from_state, to_state, occurred_at FROM brain_event
-         WHERE user_id=$1 AND workspace_id=$2 AND item_id=$3 ORDER BY occurred_at DESC NULLS LAST LIMIT 12`,
-      [userId, ws, rawId],
+      `SELECT d.kind, d.actor, d.from_state, d.to_state, d.occurred_at FROM (
+         SELECT DISTINCT ON (e.kind, e.to_state, e.occurred_at) e.kind, e.actor, e.from_state, e.to_state, e.occurred_at, e.created_at
+           FROM brain_event e
+          WHERE e.user_id=$1 AND e.source=$2 AND e.source_id=$3
+          ORDER BY e.kind, e.to_state, e.occurred_at, e.created_at DESC
+       ) d ORDER BY d.occurred_at DESC NULLS LAST LIMIT 12`,
+      [userId, node.source, node.source_id],
     ).catch(() => []);
-    const edges = await neighboursOf(userId, ws, 'item', rawId, 40).catch(() => []);
+    const edges = await neighboursOf(userId, ws, 'item', rawId, 40, nodeSpace).catch(() => []);
     // Resolve the OTHER end of each edge to a real item (title/source/url), keep the reasoning.
     const otherIds = Array.from(new Set(edges.map((e) => (e.src_id === rawId ? e.dst_id : e.src_id)).filter((x) => /^\d+$/.test(x))));
     const others = otherIds.length ? await query<any>(
-      `SELECT id, source, type, title, source_id, links FROM knowledge_item WHERE user_id=$1 AND workspace_id=$2 AND id = ANY($3::bigint[])`,
-      [userId, ws, otherIds],
+      `SELECT id, source, type, title, source_id, links FROM knowledge_item
+         WHERE user_id=$1 AND workspace_id=$2 AND ($4::uuid IS NULL OR space_id=$4) AND id = ANY($3::bigint[])`,
+      [userId, ws, otherIds, nodeSpace],
     ).catch(() => []) : [];
     const byId = new Map(others.map((o: any) => [String(o.id), o]));
     const connections = edges.map((e) => {
@@ -1077,41 +1338,38 @@ async function handleBrain(method: string, segments: string[], userId: string, e
     if (!ws) return badRequest('workspace required');
     const folder = event.queryStringParameters?.folder || null;
     const space = event.queryStringParameters?.space || null;
-    const edges = await getBrainEdges(userId, ws, 1500);
-    // Meetings are now knowledge_item rows (source='meeting'), so this single query covers
-    // every brain node — meetings, Jira, GitHub. Scoping NODES by folder is enough: the client
-    // drops any edge whose endpoints aren't both present, so only intra-project edges render.
-    // Workspace (aggregate) → every item. Folder (project) → the CONNECTED SUBGRAPH: items tagged
-    // to this project PLUS any item directly linked to one of them. So a meeting filed elsewhere
-    // that discusses this project, an as-yet-untagged commit, or a dev session all show CONNECTED —
-    // accurate lineage beats a strict tag filter (which would orphan cross-project nodes + drop edges).
-    // Folder (project) and SPACE views both render the CONNECTED SUBGRAPH: the items
-    // tagged to that folder/space (the core) PLUS anything directly linked to one of them
-    // (so a space's brain = ITS meetings + the Jira/GitHub/dev records they connect to).
-    // Folder takes precedence; then space; else the whole-workspace aggregate.
-    const scopeCol = folder ? 'folder_id' : 'space_id';   // fixed allow-list, never user input
-    const scopeId = folder || space || null;
-    const items = scopeId
+    // STRICTLY (workspace + space)-scoped — NO neighbour expansion (that leaked other spaces'
+    // items in). A SPACE view = every item tagged to the space; a FOLDER view narrows to that
+    // folder WITHIN its space; absent both = the whole-workspace aggregate. Connector items now
+    // carry their space, so a plain space_id filter shows the full picture with zero cross-space leak.
+    let viewSpace = space;
+    if (folder && !space) {
+      const f = await queryOne<{ space_id: string | null }>(`SELECT space_id FROM folders WHERE id=$1`, [folder]).catch(() => null);
+      viewSpace = f?.space_id ?? null;
+    }
+    // `status` = the FRESHEST status across ALL copies of this issue (the same Jira issue can have
+    // duplicate rows across spaces / a drifted workspace_id; only the connected copy is sync-fresh).
+    // The correlated subquery makes a node show the LIVE status even when the viewed space holds a
+    // stale copy — without touching rows or edge ids. (user-scoped → tenant-safe.)
+    const FRESH_STATUS = `(SELECT k2.status FROM knowledge_item k2 WHERE k2.user_id=ki.user_id AND k2.source=ki.source AND k2.source_id=ki.source_id AND k2.status IS NOT NULL ORDER BY k2.synced_at DESC NULLS LAST LIMIT 1)`;
+    const items = (folder || space)
       ? await query<any>(
-          `WITH core AS (
-             SELECT id FROM knowledge_item WHERE user_id=$1 AND workspace_id=$2 AND ${scopeCol}=$3
-           ), nbr AS (
-             SELECT DISTINCT (CASE WHEN e.src_id = c.id::text THEN e.dst_id ELSE e.src_id END) AS oid
-               FROM brain_edge e JOIN core c ON (e.src_id = c.id::text OR e.dst_id = c.id::text)
-              WHERE e.user_id=$1 AND e.workspace_id=$2
-           )
-           SELECT id, source, type, title, source_id, links, status FROM knowledge_item
-            WHERE user_id=$1 AND workspace_id=$2
-              AND (id IN (SELECT id FROM core) OR id::text IN (SELECT oid FROM nbr))
+          `SELECT ki.id, ki.source, ki.type, ki.title, ki.source_id, ki.links, ${FRESH_STATUS} AS status FROM knowledge_item ki
+            WHERE ki.user_id=$1 AND ki.workspace_id=$2
+              AND ($3::uuid IS NULL OR ki.space_id=$3)
+              AND ($4::uuid IS NULL OR ki.folder_id=$4)
             LIMIT 2000`,
-          [userId, ws, scopeId],
+          [userId, ws, viewSpace, folder],
         ).catch(() => [])
       : await query<any>(
-          `SELECT id, source, type, title, source_id, links, status FROM knowledge_item
-            WHERE user_id=$1 AND workspace_id=$2 LIMIT 2000`,
+          `SELECT ki.id, ki.source, ki.type, ki.title, ki.source_id, ki.links, ${FRESH_STATUS} AS status FROM knowledge_item ki
+            WHERE ki.user_id=$1 AND ki.workspace_id=$2 LIMIT 2000`,
           [userId, ws],
         ).catch(() => []);
     const nodes: any[] = items.map((i: any) => ({ id: `item:${i.id}`, kind: 'item', source: i.source, type: i.type, title: i.title || i.source_id, url: i.links?.url ?? null, status: i.status ?? null }));
+    // Edges: strictly scoped to the view's SPACE; the client also drops any edge whose endpoints
+    // aren't both visible nodes, so only intra-scope lineage renders.
+    const edges = await getBrainEdges(userId, ws, 1500, viewSpace);
     // Reasoning lives ON the edge (verdict + rationale colour & explain the line — no more
     // floating reasoning nodes). Backfill verdicts from the brain_reasoning ledger so already-
     // judged links (computed before the edge columns existed) colour immediately.
@@ -1140,8 +1398,12 @@ async function handleProposals(method: string, segments: string[], userId: strin
   if (method === 'GET' && !id) {
     const ws = event.queryStringParameters?.workspace;
     if (!ws) return badRequest('workspace required');
-    const proposals = await listPendingProposals(userId, ws);
-    return ok({ enabled: true, proposals });
+    // Strictly (workspace + space)-scoped: a space shows only ITS suggestions.
+    const proposals = await listPendingProposals(userId, ws, event.queryStringParameters?.space || null);
+    // Coverage: how many of THIS SPACE's meetings the engine has reasoned over (no silent caps).
+    const { getSuggestionCoverage } = await import('./connectors/suggestionCoverage');
+    const coverage = await getSuggestionCoverage(userId, ws, event.queryStringParameters?.space || null).catch(() => ({ reasoned: 0, total: 0 }));
+    return ok({ enabled: true, proposals, coverage });
   }
 
   if (method === 'POST' && id && segments[2] === 'resolve') {
@@ -1620,6 +1882,13 @@ async function handleBootstrap(userId: string, event: APIGatewayProxyEvent): Pro
   // Self-healing: every workspace has a default space and no note sits directly under
   // a workspace (idempotent — catches users whose one-time migration already ran).
   await reconcileSpaces(userId, defaultWsId);
+  // Recover connector data the migration orphaned under deleted/account workspaces → the default
+  // workspace (so it sits with the meetings), then file it into the right space. Strictly scoped.
+  try {
+    const { reclaimOrphanConnectorData, backfillSpaceScoping } = await import('./spaces');
+    await reclaimOrphanConnectorData(userId, defaultWsId);
+    await backfillSpaceScoping(userId);
+  } catch { /* best-effort */ }
   // W1: the first page of history is scoped to the ACTIVE workspace (vault). The
   // workspaces list below is still the FULL set so the switcher can show all vaults.
   const bootWorkspaceId = await activeWorkspaceId(event, userId, getUserEmail());

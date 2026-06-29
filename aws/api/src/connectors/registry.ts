@@ -18,6 +18,10 @@ export interface KnowledgeItemInput {
   occurred_at?: string | null;
   status?: string | null;  // live backend state (Jira status name / GitHub PR state); drives events
   actor?: string | null;   // who currently owns/authored it (assignee / commit author) — for events
+  /** Observed HISTORICAL state transitions (from the source's changelog), oldest→newest. Recorded
+      as brain_events on upsert (idempotent) so the Activity feed shows full history, not just the
+      delta between two syncs. */
+  events?: Array<{ kind: 'status_change'; fromState?: string | null; toState: string; actor?: string | null; occurredAt: string }>;
 }
 
 /** One bounded page of a sync; the engine loops/advances the cursor across ticks. */

@@ -25,9 +25,10 @@ import CreateFolderModal, { type FolderDraft } from '../components/CreateFolderM
 import ConnectionsTab from './settings/ConnectionsTab';
 import { isConnectorsEnabled } from '../services/connectorService';
 import JiraActionCard from '../components/JiraActionCard';
+import McpActionCard from '../components/McpActionCard';
 import BrainMapModal from '../components/BrainMapModal';
-import { listProposals, resolveProposal, type ProposalRow } from '../services/proposalService';
-import { getJiraMeta, type JiraMeta } from '../services/jiraActionService';
+import { listSuggestions, resolveProposal, type ProposalRow, type SuggestionCoverage } from '../services/proposalService';
+import { getJiraMeta, type JiraMeta, type JiraActionProposal, type McpWriteProposal } from '../services/jiraActionService';
 import { Sparkles, BrainCircuit } from 'lucide-react';
 
 // ── helpers ───────────────────────────────────────────────────────────────────
@@ -363,6 +364,7 @@ export default function WorkspacePage({ allTasks, onSelectTask }: WorkspacePageP
   const [showProposals, setShowProposals] = useState(false);
   const [showBrainMap, setShowBrainMap] = useState(false);
   const [proposals, setProposals] = useState<ProposalRow[]>([]);
+  const [coverage, setCoverage] = useState<SuggestionCoverage | null>(null);
   const [jiraMeta, setJiraMeta] = useState<JiraMeta | undefined>(undefined);
   const [addMeetingOpen, setAddMeetingOpen] = useState(false);
   const [addSearch, setAddSearch] = useState('');
@@ -416,12 +418,16 @@ export default function WorkspacePage({ allTasks, onSelectTask }: WorkspacePageP
   // Load the agent's pending proposals (+ Jira meta) — workspace-level, shown on
   // non-private spaces.
   useEffect(() => {
-    if (!masterWorkspaceId || isPrivate || !isConnectorsEnabled()) { setProposals([]); return; }
+    if (!masterWorkspaceId || isPrivate || !isConnectorsEnabled()) { setProposals([]); setCoverage(null); return; }
     let cancelled = false;
-    void listProposals(masterWorkspaceId).then((p) => { if (!cancelled) setProposals(p); }).catch(() => {});
+    // Suggestions are strictly (workspace + space)-scoped — show only THIS space's.
+    void listSuggestions(masterWorkspaceId, activeWs?.id ?? null).then(({ proposals: p, coverage: cov }) => {
+      if (cancelled) return;
+      setProposals(p); setCoverage(cov);
+    }).catch(() => {});
     void getJiraMeta(masterWorkspaceId).then((m) => { if (!cancelled) setJiraMeta(m); }).catch(() => {});
     return () => { cancelled = true; };
-  }, [masterWorkspaceId, isPrivate]);
+  }, [masterWorkspaceId, isPrivate, activeWs?.id]);
 
   const onProposalResolved = (id: string, status: 'executed' | 'dismissed', result?: unknown) => {
     setProposals((prev) => prev.filter((x) => x.id !== id));
@@ -1093,20 +1099,39 @@ export default function WorkspacePage({ allTasks, onSelectTask }: WorkspacePageP
                 Drawn from this workspace’s meetings. Nothing is written to Jira until you approve —
                 review, edit, and approve or dismiss each one.
               </p>
+              {coverage && coverage.total > 0 && (
+                <div className="flex items-center gap-2 mb-3 text-[11.5px] text-app-fg-subtle">
+                  <span>Reasoned over {coverage.reasoned} of {coverage.total} meetings</span>
+                  <span className="flex-1 h-1 rounded-full bg-app-chip overflow-hidden">
+                    <span className="block h-full bg-app-accent" style={{ width: `${Math.min(100, Math.round((coverage.reasoned / coverage.total) * 100))}%` }} />
+                  </span>
+                </div>
+              )}
               {proposals.length === 0 ? (
                 <p className="text-[13px] text-app-fg-subtle py-8 text-center">No suggestions right now.</p>
               ) : (
                 <div className="space-y-3">
                   {proposals.map((pr) => (
-                    <JiraActionCard
-                      key={pr.id}
-                      proposal={pr.proposal}
-                      meta={jiraMeta}
-                      workspaceId={masterWorkspaceId ?? activeWs.id}
-                      rationale={pr.rationale}
-                      sourceTitle={pr.source_title}
-                      onResolved={(status, result) => onProposalResolved(pr.id, status, result)}
-                    />
+                    // Jira proposals get the rich editable Jira card; any other connector gets the
+                    // generic MCP write card (executes via the gated executeMcpWrite). Connector-agnostic.
+                    (pr.kind && pr.kind !== 'jira') ? (
+                      <McpActionCard
+                        key={pr.id}
+                        proposal={pr.proposal as McpWriteProposal}
+                        workspaceId={masterWorkspaceId ?? activeWs.id}
+                        onResolved={(status, result) => onProposalResolved(pr.id, status, result)}
+                      />
+                    ) : (
+                      <JiraActionCard
+                        key={pr.id}
+                        proposal={pr.proposal as JiraActionProposal}
+                        meta={jiraMeta}
+                        workspaceId={masterWorkspaceId ?? activeWs.id}
+                        rationale={pr.rationale}
+                        sourceTitle={pr.source_title}
+                        onResolved={(status, result) => onProposalResolved(pr.id, status, result)}
+                      />
+                    )
                   ))}
                 </div>
               )}
@@ -1133,7 +1158,7 @@ export default function WorkspacePage({ allTasks, onSelectTask }: WorkspacePageP
             </div>
             <div className="flex-1 overflow-y-auto px-6 py-5">
               {isConnectorsEnabled() ? (
-                <ConnectionsTab fixedWorkspaceId={masterWorkspaceId ?? activeWs.id} embedded />
+                <ConnectionsTab fixedWorkspaceId={masterWorkspaceId ?? activeWs.id} fixedSpaceId={activeWs.id} embedded />
               ) : (
                 <p className="text-[13px] text-app-fg-subtle leading-relaxed">
                   Connectors aren’t enabled in this build yet. Once enabled, you’ll connect tools
