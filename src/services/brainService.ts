@@ -24,12 +24,34 @@ export interface BrainNodeDetail {
 }
 
 /** On-demand freshness: pull this workspace's latest backend state into the brain NOW. */
-export async function syncBrain(workspaceId: string, spaceId?: string | null): Promise<{ syncedAt: string } | null> {
+export async function syncBrain(workspaceId: string, spaceId?: string | null, linkOnly = false): Promise<{ syncedAt: string } | null> {
   try {
     const token = await getIdToken();
     const sq = spaceId ? `&space=${encodeURIComponent(spaceId)}` : '';
-    const r = await baseFetch(`${API_BASE}/brain/sync?workspace=${encodeURIComponent(workspaceId)}${sq}`, {
+    const lq = linkOnly ? '&link=1' : '';
+    const r = await baseFetch(`${API_BASE}/brain/sync?workspace=${encodeURIComponent(workspaceId)}${sq}${lq}`, {
       method: 'POST', headers: { 'Content-Type': 'application/json', Authorization: token },
+    });
+    if (!r.ok) return null;
+    return await r.json();
+  } catch { return null; }
+}
+
+export interface BrainProgress {
+  graph: { total: number; processed: number; pending: number };
+  suggestions: { total: number; processed: number; pending: number };
+  pct: number;
+  processing: boolean;
+}
+
+/** Brain BUILD progress (how many meetings/connector nodes are linked + reasoned). Drives the
+ *  progress bar so the user sees the brain evolving and knows nothing is left unprocessed. */
+export async function getBrainProgress(workspaceId: string, spaceId?: string | null): Promise<BrainProgress | null> {
+  try {
+    const token = await getIdToken();
+    const sq = spaceId ? `&space=${encodeURIComponent(spaceId)}` : '';
+    const r = await baseFetch(`${API_BASE}/brain/progress?workspace=${encodeURIComponent(workspaceId)}${sq}`, {
+      headers: { Authorization: token },
     });
     if (!r.ok) return null;
     return await r.json();

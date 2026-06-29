@@ -53,10 +53,10 @@
       "minimumSystemVersion": "13.3",
       "dmg": {
         "background": "icons/dmg-background.png",
-        "windowSize": { "width": 660, "height": 400 },
-        "windowPosition": { "x": 400, "y": 300 },
-        "appPosition": { "x": 182, "y": 190 },
-        "applicationFolderPosition": { "x": 469, "y": 190 }
+        "windowSize": { "width": 660, "height": 500 },
+        "windowPosition": { "x": 400, "y": 250 },
+        "appPosition": { "x": 140, "y": 345 },
+        "applicationFolderPosition": { "x": 525, "y": 345 }
       }
     }
   },

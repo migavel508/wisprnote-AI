@@ -51,14 +51,16 @@ function oauthCallbackUrl(event: APIGatewayProxyEvent): string {
 // carries the user + connector + (workspace, space) we stored at oauth-url time.
 async function completeConnectorOAuthCallback(event: APIGatewayProxyEvent): Promise<APIGatewayProxyResult> {
   const qs = event.queryStringParameters || {};
-  const page = (title: string, msg: string, ok: boolean) => ({
+  const page = (title: string, msg: string, ok: boolean, returnUrl?: string) => ({
     statusCode: 200,
     headers: { 'Content-Type': 'text/html; charset=utf-8' },
     body: `<!doctype html><html><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>${title}</title>
 <style>body{font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',sans-serif;background:#1a1c18;color:#e8e6e1;display:flex;min-height:100vh;align-items:center;justify-content:center;margin:0}
-.card{max-width:420px;text-align:center;padding:40px 32px}.icon{font-size:48px;margin-bottom:16px}h1{font-size:20px;margin:0 0 8px}p{color:#9a9b96;line-height:1.5;margin:0}.ok{color:#a3c293}</style></head>
-<body><div class="card"><div class="icon">${ok ? '✅' : '⚠️'}</div><h1 class="${ok ? 'ok' : ''}">${title}</h1><p>${msg}</p></div>
-<script>setTimeout(function(){try{window.close()}catch(e){}}, ${ok ? 2500 : 6000})</script></body></html>`,
+.card{max-width:420px;text-align:center;padding:40px 32px}.icon{font-size:48px;margin-bottom:16px}h1{font-size:20px;margin:0 0 8px}p{color:#9a9b96;line-height:1.5;margin:0 0 20px}.ok{color:#a3c293}
+a.btn{display:inline-block;background:#a3c293;color:#1a1c18;text-decoration:none;font-weight:600;padding:10px 22px;border-radius:8px}</style></head>
+<body><div class="card"><div class="icon">${ok ? '✅' : '⚠️'}</div><h1 class="${ok ? 'ok' : ''}">${title}</h1><p>${msg}</p>
+${returnUrl ? `<a class="btn" href="${returnUrl}">Return to Wisprnote</a>` : ''}</div>
+<script>${returnUrl ? `setTimeout(function(){try{window.location.href=${JSON.stringify(returnUrl)}}catch(e){}}, 600);` : ''}setTimeout(function(){try{window.close()}catch(e){}}, ${ok ? 4000 : 6000})</script></body></html>`,
   } as APIGatewayProxyResult);
   if (qs.error) return page('Connection cancelled', String(qs.error_description || qs.error || 'You cancelled the authorization.'), false);
   const code = String(qs.code || ''); const state = String(qs.state || '');
@@ -82,7 +84,8 @@ async function completeConnectorOAuthCallback(event: APIGatewayProxyEvent): Prom
     await query(`DELETE FROM oauth_state WHERE state=$1`, [state]).catch(() => {});
     try { const { discoverConnectorTools } = await import('./mcp/toolPlane'); await discoverConnectorTools(row.user_id, row.workspace_id || ACCOUNT_SCOPE, row.source); } catch { /* catalog also fills on the sync cron */ }
     console.log('connector_oauth_completed', JSON.stringify({ source: row.source, workspace: row.workspace_id, space: row.space_id }));
-    return page('Connected', `${row.source} is now connected. You can close this tab and return to Wisprnote.`, true);
+    const back = `wisprnote://connector-callback?connected=1&source=${encodeURIComponent(row.source)}`;
+    return page('Connected', `${row.source} is now connected. Returning you to Wisprnote…`, true, back);
   } catch (e: any) {
     console.error('connector_oauth_callback_failed', JSON.stringify({ message: e?.message }));
     return page('Connection failed', String(e?.message || 'Token exchange failed.').slice(0, 200), false);
@@ -382,6 +385,144 @@ export const handler = async (event: APIGatewayProxyEvent): Promise<APIGatewayPr
     }, null, 2) } as APIGatewayProxyResult;
   }
 
+  // SPACE RESET — wipe a space's BRAIN GRAPH + SUGGESTED ACTIONS for a clean re-test, while KEEPING
+  // meetings (task_history + meeting items), the knowledge graph, and connector_credentials
+  // (connections). A fresh sync then rebuilds the brain from scratch. DRY-RUN unless { commit:true }.
+  if ((event as any).__job === 'space-reset') {
+    const spaceId = String((event as any).spaceId || '');
+    const commit = (event as any).commit === true;
+    const results: any = {
+      mode: commit ? 'COMMIT — deleted' : 'DRY-RUN — would delete (nothing changed)', space: spaceId,
+      keeps: ['meetings (task_history + meeting knowledge_item)', 'knowledge_graph (decisions/action_items)', 'connector_credentials (Jira/GitHub stay connected)'],
+    };
+    const step = async (label: string, countSql: string, deleteSql: string) => {
+      try { const r = await query<any>(commit ? deleteSql : countSql, [spaceId]); results[label] = r?.[0]?.n ?? 0; }
+      catch (e: any) { results[label] = `error: ${e?.message}`; }
+    };
+    // 1) Link cursor for ALL this space's items (do FIRST — needs the items to still exist).
+    await step('linkStateReset',
+      `SELECT COUNT(*)::int AS n FROM brain_link_state WHERE item_id IN (SELECT id FROM knowledge_item WHERE space_id=$1)`,
+      `WITH d AS (DELETE FROM brain_link_state WHERE item_id IN (SELECT id FROM knowledge_item WHERE space_id=$1) RETURNING 1) SELECT COUNT(*)::int AS n FROM d`);
+    // 2) Suggestion coverage markers for this space's meetings → reasoner re-processes them.
+    await step('suggestionCoverageReset',
+      `SELECT COUNT(*)::int AS n FROM suggestion_reasoned WHERE meeting_id IN (SELECT id::text FROM task_history WHERE space_id=$1)`,
+      `WITH d AS (DELETE FROM suggestion_reasoned WHERE meeting_id IN (SELECT id::text FROM task_history WHERE space_id=$1) RETURNING 1) SELECT COUNT(*)::int AS n FROM d`);
+    // 3) Connector items (Jira/GitHub/sessions) — KEEP meetings.
+    await step('connectorItemsDeleted',
+      `SELECT COUNT(*)::int AS n FROM knowledge_item WHERE space_id=$1 AND source <> 'meeting'`,
+      `WITH d AS (DELETE FROM knowledge_item WHERE space_id=$1 AND source <> 'meeting' RETURNING 1) SELECT COUNT(*)::int AS n FROM d`);
+    // 4) Brain edges (whole graph for the space — rebuilds on next link).
+    await step('brainEdgesDeleted',
+      `SELECT COUNT(*)::int AS n FROM brain_edge WHERE space_id=$1`,
+      `WITH d AS (DELETE FROM brain_edge WHERE space_id=$1 RETURNING 1) SELECT COUNT(*)::int AS n FROM d`);
+    // 5) Brain events (activity feed).
+    await step('brainEventsDeleted',
+      `SELECT COUNT(*)::int AS n FROM brain_event WHERE space_id=$1`,
+      `WITH d AS (DELETE FROM brain_event WHERE space_id=$1 RETURNING 1) SELECT COUNT(*)::int AS n FROM d`);
+    // 6) Suggested actions (proposals queue).
+    await step('proposalsDeleted',
+      `SELECT COUNT(*)::int AS n FROM action_proposal WHERE space_id=$1`,
+      `WITH d AS (DELETE FROM action_proposal WHERE space_id=$1 RETURNING 1) SELECT COUNT(*)::int AS n FROM d`);
+    // 7) Sync cursors for this space → connectors re-pull from scratch on the next sync.
+    await step('syncCursorsReset',
+      `SELECT COUNT(*)::int AS n FROM sync_state WHERE scope LIKE '%'||$1||'%'`,
+      `WITH d AS (DELETE FROM sync_state WHERE scope LIKE '%'||$1||'%' RETURNING 1) SELECT COUNT(*)::int AS n FROM d`);
+    return { statusCode: 200, body: JSON.stringify(results, null, 2) } as APIGatewayProxyResult;
+  }
+
+  // BRAIN-EDGE CLEANUP — removes redundant SAME-SOURCE edges that blob the map (commit↔commit,
+  // ticket↔ticket) and trims meeting↔meeting to the strongest few per meeting. DRY-RUN by default;
+  // deletes only with { commit:true }. With { resetLinkState:true } it also clears the link cursor for
+  // the space so the next brain-link rebuilds proper cross-source lineage (meeting→ticket→commit).
+  if ((event as any).__job === 'brain-edge-cleanup') {
+    const spaceId = String((event as any).spaceId || '');
+    const commit = (event as any).commit === true;
+    const MM_KEEP = 3;   // meeting↔meeting links kept per meeting (its strongest)
+    const results: any = { mode: commit ? 'COMMIT — edges deleted' : 'DRY-RUN — edges that WOULD be deleted', space: spaceId, meetingLinksKeptPerMeeting: MM_KEEP };
+    const step = async (label: string, countSql: string, deleteSql: string) => {
+      try { const r = await query<any>(commit ? deleteSql : countSql, [spaceId]); results[label] = r?.[0]?.n ?? 0; }
+      catch (e: any) { results[label] = `error: ${e?.message}`; }
+    };
+    // 1) Same-source semantic blobs: github↔github + jira↔jira → remove entirely.
+    await step('sameSourceBlobsDeleted',
+      `SELECT COUNT(*)::int AS n FROM brain_edge t
+         JOIN knowledge_item a ON a.id::text=t.src_id JOIN knowledge_item b ON b.id::text=t.dst_id
+        WHERE t.space_id=$1 AND t.origin='semantic' AND a.source=b.source AND a.source IN ('github','jira')`,
+      `WITH d AS (DELETE FROM brain_edge t USING knowledge_item a, knowledge_item b
+         WHERE a.id::text=t.src_id AND b.id::text=t.dst_id AND t.space_id=$1
+           AND t.origin='semantic' AND a.source=b.source AND a.source IN ('github','jira') RETURNING 1)
+       SELECT COUNT(*)::int AS n FROM d`);
+    // 2) Meeting↔meeting: keep each meeting's top-MM_KEEP by confidence; delete an edge only if it's
+    //    beyond the top-K for BOTH its endpoints (so every meeting keeps its strongest links).
+    const mmRanked = `SELECT t.id,
+         row_number() OVER (PARTITION BY t.src_id ORDER BY t.confidence DESC NULLS LAST, t.created_at DESC) AS r_src,
+         row_number() OVER (PARTITION BY t.dst_id ORDER BY t.confidence DESC NULLS LAST, t.created_at DESC) AS r_dst
+       FROM brain_edge t
+       JOIN knowledge_item a ON a.id::text=t.src_id AND a.source='meeting'
+       JOIN knowledge_item b ON b.id::text=t.dst_id AND b.source='meeting'
+      WHERE t.space_id=$1`;
+    await step('meetingLinksTrimmed',
+      `WITH mm AS (${mmRanked}) SELECT COUNT(*)::int AS n FROM mm WHERE r_src > ${MM_KEEP} AND r_dst > ${MM_KEEP}`,
+      `WITH mm AS (${mmRanked}), d AS (DELETE FROM brain_edge WHERE id IN (SELECT id FROM mm WHERE r_src > ${MM_KEEP} AND r_dst > ${MM_KEEP}) RETURNING 1)
+       SELECT COUNT(*)::int AS n FROM d`);
+    // 3) Optional: clear the link cursor for this space's items so brain-link re-derives lineage.
+    //    resetSource (e.g. 'github') scopes the reset to one source — re-link commits without
+    //    re-running the expensive meeting/ticket LLM verdicts.
+    if (commit && (event as any).resetLinkState === true) {
+      const resetSource = (event as any).resetSource ? String((event as any).resetSource) : null;
+      const sql = resetSource
+        ? `WITH d AS (DELETE FROM brain_link_state WHERE item_id IN (SELECT id FROM knowledge_item WHERE space_id=$1 AND source=$2) RETURNING 1) SELECT COUNT(*)::int AS n FROM d`
+        : `WITH d AS (DELETE FROM brain_link_state WHERE item_id IN (SELECT id FROM knowledge_item WHERE space_id=$1) RETURNING 1) SELECT COUNT(*)::int AS n FROM d`;
+      try { const r = await query<any>(sql, resetSource ? [spaceId, resetSource] : [spaceId]);
+        results.linkStateReset = r?.[0]?.n ?? 0;
+      } catch (e: any) { results.linkStateReset = `error: ${e?.message}`; }
+    }
+    return { statusCode: 200, body: JSON.stringify(results, null, 2) } as APIGatewayProxyResult;
+  }
+
+  // BRAIN-MAP DEBUG — READ-ONLY. Reports edge composition + fragmentation for a space, so we can see
+  // WHY the map looks fragmented/redundant (e.g. github↔github blobs vs. meeting→connector lineage).
+  if ((event as any).__job === 'brain-map-debug') {
+    const spaceId = String((event as any).spaceId || '');
+    const safe = async (sql: string, params: any[] = []) => { try { return await query<any>(sql, params); } catch (e: any) { return [{ error: e?.message }]; } };
+    // Edges grouped by origin + the (source-pair) they connect — shows redundant same-source vs lineage.
+    const byPair = await safe(
+      `SELECT e.origin,
+              least(a.source, b.source) AS s1, greatest(a.source, b.source) AS s2,
+              (a.source = b.source) AS same_source, COUNT(*)::int AS n
+         FROM brain_edge e
+         JOIN knowledge_item a ON a.id::text = e.src_id
+         JOIN knowledge_item b ON b.id::text = e.dst_id
+        WHERE e.space_id=$1
+        GROUP BY 1,2,3,4 ORDER BY n DESC`, [spaceId]);
+    // Per-node degree distribution by source: are meetings under-connected to connectors?
+    const degree = await safe(
+      `WITH ends AS (
+         SELECT e.src_id AS id FROM brain_edge e WHERE e.space_id=$1
+         UNION ALL SELECT e.dst_id FROM brain_edge e WHERE e.space_id=$1)
+       SELECT ki.source, COUNT(DISTINCT ki.id)::int AS nodes,
+              COALESCE(SUM(d.deg),0)::int AS total_edges,
+              COUNT(DISTINCT ki.id) FILTER (WHERE d.deg IS NULL)::int AS isolated
+         FROM knowledge_item ki
+         LEFT JOIN (SELECT id, COUNT(*)::int AS deg FROM ends GROUP BY id) d ON d.id = ki.id::text
+        WHERE ki.space_id=$1
+        GROUP BY ki.source ORDER BY nodes DESC`, [spaceId]);
+    // Meeting → connector reach: how many meetings have ANY edge to a jira/github item?
+    const meetingReach = await safe(
+      `SELECT COUNT(*)::int AS meetings,
+              COUNT(*) FILTER (WHERE EXISTS (
+                SELECT 1 FROM brain_edge e JOIN knowledge_item o ON o.id::text = (CASE WHEN e.src_id=m.id::text THEN e.dst_id ELSE e.src_id END)
+                 WHERE e.space_id=m.space_id AND (e.src_id=m.id::text OR e.dst_id=m.id::text)
+                   AND o.source IN ('jira','github')))::int AS meetings_linked_to_a_connector
+         FROM knowledge_item m WHERE m.space_id=$1 AND m.source='meeting'`, [spaceId]);
+    return { statusCode: 200, body: JSON.stringify({
+      note: 'READ-ONLY. space=' + spaceId,
+      edgesByOriginAndSourcePair: byPair,
+      nodesAndDegreeBySource: degree,
+      meetingConnectorReach: meetingReach,
+    }, null, 2) } as APIGatewayProxyResult;
+  }
+
   // SPACE-LEAK REPORT (P1 dry-run) — READ-ONLY. Reports exactly what the P1 cleanup migration
   // WOULD remove/fix, without changing a single row. Run before any destructive cleanup so the
   // user can see the blast radius. No writes anywhere in this branch.
@@ -551,7 +692,30 @@ export const handler = async (event: APIGatewayProxyEvent): Promise<APIGatewayPr
     if (process.env.CONNECTORS_ENABLED !== '1') return { statusCode: 200, body: JSON.stringify({ disabled: true }) } as APIGatewayProxyResult;
     try {
       const { runBrainLink } = await import('./connectors/brainLink');
-      return { statusCode: 200, body: JSON.stringify(await runBrainLink()) } as APIGatewayProxyResult;
+      // Optional targeting (rebuild a specific workspace with a real LLM budget) — used to re-derive
+      // lineage after an edge cleanup. Defaults to the normal all-workspace sweep.
+      const ws = (event as any).workspaceId as string | undefined;
+      const llmBudget = typeof (event as any).llmBudget === 'number' ? (event as any).llmBudget : undefined;
+      const timeBudgetMs = typeof (event as any).timeBudgetMs === 'number' ? (event as any).timeBudgetMs : undefined;
+      const opts = (ws || llmBudget !== undefined || timeBudgetMs !== undefined) ? { workspaceId: ws, llmBudget, timeBudgetMs } : undefined;
+      // DRAIN: keep linking until a full pass produces NOTHING new (backlog empty) or we approach the
+      // Lambda limit — so no meeting / connector node is ever left permanently unprocessed. The cron
+      // runs this; each round advances the brain_link_state cursor, so successive rounds cover newer
+      // items until the whole space is linked. Cheap to re-run when there's nothing to do.
+      const drain = (event as any).drain === true;
+      if (drain) {
+        const started = Date.now();
+        const agg = { rounds: 0, provenance: 0, reference: 0, semantic: 0, llm: 0, workspaces: 0 };
+        const MAX_MS = 240_000;   // Lambda is 300s; leave headroom
+        while (Date.now() - started < MAX_MS && agg.rounds < 60) {
+          const r = await runBrainLink({ ...(opts || {}), timeBudgetMs: Math.min(timeBudgetMs ?? 30_000, MAX_MS - (Date.now() - started)) });
+          agg.rounds++; agg.provenance += r.provenance; agg.reference += r.reference; agg.semantic += r.semantic; agg.llm += r.llm; agg.workspaces = r.workspaces;
+          if (r.provenance + r.reference + r.semantic + r.llm === 0) break;   // nothing new → drained
+        }
+        console.log('brain_link_drained', JSON.stringify(agg));
+        return { statusCode: 200, body: JSON.stringify(agg) } as APIGatewayProxyResult;
+      }
+      return { statusCode: 200, body: JSON.stringify(await runBrainLink(opts)) } as APIGatewayProxyResult;
     } catch (err: any) {
       console.error('brain_link_failed', JSON.stringify({ message: err?.message }));
       return { statusCode: 500, body: 'brain-link-error' } as APIGatewayProxyResult;
@@ -1078,7 +1242,7 @@ async function handleConnectors(method: string, segments: string[], userId: stri
     const providedClient = id.startsWith('custom-')
       ? await getCustomConnectorOAuthClient(userId, workspaceId, id).catch(() => null)
       : await getRegistryOAuthClient(id, userId, workspaceId).catch(() => null);
-    const { authorizeUrl, inflight } = await beginMcpOAuth(server, CONNECTOR_REDIRECT_URI, providedClient || undefined);
+    const { authorizeUrl, inflight } = await beginMcpOAuth(server, oauthCallbackUrl(event), providedClient || undefined);
     await query(
       `INSERT INTO oauth_state (state, user_id, source, workspace_id, space_id, inflight) VALUES ($1,$2,$3,$4,$5,$6)
        ON CONFLICT (state) DO UPDATE SET inflight=EXCLUDED.inflight, workspace_id=EXCLUDED.workspace_id, space_id=EXCLUDED.space_id, created_at=NOW()`,
@@ -1159,6 +1323,14 @@ async function handleBrain(method: string, segments: string[], userId: string, e
     const ws = event.queryStringParameters?.workspace;
     if (!ws) return badRequest('workspace required');
     const syncSpace = event.queryStringParameters?.space || undefined;
+    // LINK-ONLY nudge (the UI's progress-bar drain): skip the heavy connector pull + just advance the
+    // brain LINK + embed cursor a bit, so repeated cheap calls drain the backlog with visible progress.
+    if (event.queryStringParameters?.link === '1') {
+      const out: any = { embedded: 0, linked: true };
+      try { const { embedKnowledgeItems } = await import('./connectors/embed'); out.embedded = (await embedKnowledgeItems(48)).embedded; } catch { /* best-effort */ }
+      try { const { runBrainLink } = await import('./connectors/brainLink'); await runBrainLink({ workspaceId: ws, llmBudget: 8, timeBudgetMs: 18_000 }); } catch { /* best-effort */ }
+      return ok({ enabled: true, ...out, syncedAt: new Date().toISOString() });
+    }
     const out: any = { synced: 0, ingested: 0, embedded: 0, fingerprinted: 0 };
     try {
       // FIRST recover any connector data orphaned under a deleted/account workspace → bring it into
@@ -1180,6 +1352,43 @@ async function handleBrain(method: string, segments: string[], userId: string, e
       console.error('brain_sync_now_failed', JSON.stringify({ message: err?.message }));
     }
     return ok({ enabled: true, ...out, syncedAt: new Date().toISOString() });
+  }
+
+  // GET /brain/progress?workspace=[&space=] → brain BUILD progress for the UI bar. An item is
+  // "processed" once it's LINKED (brain_link_state fresh ≥ its synced_at); a meeting's SUGGESTIONS
+  // are processed once it's been reasoned over. Drives the progress bar + tells the UI to keep
+  // nudging the drain until pending = 0 (so no meeting / connector node is ever left unprocessed).
+  if (method === 'GET' && segments[1] === 'progress') {
+    const ws = event.queryStringParameters?.workspace;
+    if (!ws) return badRequest('workspace required');
+    const space = event.queryStringParameters?.space || null;
+    const bySpace = !!space && space !== ACCOUNT_SCOPE;
+    const col = bySpace ? 'space_id' : 'workspace_id';     // controlled set — safe to interpolate
+    const scopeVal = bySpace ? space : ws;
+    const graph = await queryOne<{ total: number; linked: number }>(
+      `SELECT COUNT(*)::int AS total,
+              COUNT(*) FILTER (WHERE EXISTS (SELECT 1 FROM brain_link_state s
+                 WHERE s.item_id = k.id AND s.linked_at >= k.synced_at))::int AS linked
+         FROM knowledge_item k WHERE k.user_id=$1 AND k.${col}=$2`,
+      [userId, scopeVal],
+    ).catch(() => null);
+    const sugg = await queryOne<{ meetings: number; reasoned: number }>(
+      `SELECT COUNT(*)::int AS meetings,
+              COUNT(*) FILTER (WHERE EXISTS (SELECT 1 FROM suggestion_reasoned r
+                 WHERE r.meeting_id = th.id::text AND r.user_id = th.user_id))::int AS reasoned
+         FROM task_history th WHERE th.user_id=$1 AND th.${col}=$2`,
+      [userId, scopeVal],
+    ).catch(() => null);
+    const total = graph?.total ?? 0, linked = graph?.linked ?? 0;
+    const meetings = sugg?.meetings ?? 0, reasoned = sugg?.reasoned ?? 0;
+    const graphPending = Math.max(0, total - linked);
+    const suggPending = Math.max(0, meetings - reasoned);
+    return ok({
+      graph: { total, processed: linked, pending: graphPending },
+      suggestions: { total: meetings, processed: reasoned, pending: suggPending },
+      pct: total ? Math.round((linked / total) * 100) : 100,
+      processing: graphPending > 0 || suggPending > 0,
+    });
   }
 
   // GET /brain/alerts?workspace= → the leader-facing OFF-TRACK digest: code that diverged

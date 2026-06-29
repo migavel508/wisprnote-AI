@@ -158,6 +158,14 @@ export default function ConnectionsTab({ fixedWorkspaceId, fixedSpaceId, embedde
 
   useEffect(() => { void refresh(); }, [refresh]);
 
+  // Re-check status whenever the app regains focus (e.g. returning from the OAuth browser tab), so a
+  // server-side-completed connection shows up without needing the deep-link callback.
+  useEffect(() => {
+    const onFocus = () => { void refresh(); };
+    window.addEventListener('focus', onFocus);
+    return () => window.removeEventListener('focus', onFocus);
+  }, [refresh]);
+
   // Project mapping: scope each PROJECT (folder) to its own Jira project + GitHub repos.
   // mapFolderId = null → the workspace-wide default ("unfiled"); a folder id → that project.
   const [jiraProject, setJiraProject] = useState('');
@@ -296,10 +304,23 @@ export default function ConnectionsTab({ fixedWorkspaceId, fixedSpaceId, embedde
       if (isTauri) {
         const { open } = await import('@tauri-apps/plugin-shell');
         await open(url);
+        // OAuth completes SERVER-SIDE (the browser shows "Connected"); the wisprnote:// deep link is
+        // unreliable, so we POLL connection status to clear the spinner once the token lands — rather
+        // than waiting on the deep-link callback (which may never fire). Gives up after 3 min.
+        const startedAt = Date.now();
+        const poll = async () => {
+          if (Date.now() - startedAt > 180_000) { setBusyId((b) => (b === id ? null : b)); return; }
+          try {
+            const { connectors } = await listConnectors(workspaceId ?? undefined, spaceId ?? undefined);
+            setStatusById(Object.fromEntries(connectors.map((c) => [c.id, c])));
+            if (connectors.find((c) => c.id === id)?.connected) { setBusyId((b) => (b === id ? null : b)); return; }
+          } catch { /* keep polling */ }
+          window.setTimeout(poll, 2500);
+        };
+        window.setTimeout(poll, 3000);
       } else {
         window.location.href = url;
       }
-      // busy stays until the callback resolves (onOAuthDone) or the user retries.
     } catch (e) {
       setBusyId(null);
       console.error('connector_oauth_url_failed', e);
