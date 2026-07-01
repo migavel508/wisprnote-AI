@@ -443,10 +443,12 @@ pub mod macos {
             mic_cpal_hz, out_hz
         );
 
-        // Drain any stale device-change events that fired during setup
-        // (creating the aggregate device itself triggers HW_DEVICES changes)
-        std::thread::sleep(std::time::Duration::from_millis(500));
+        // Drain events already queued from setup (creating the aggregate device fires
+        // HW_DEVICES changes). Don't block ~500ms here — start capturing immediately; the
+        // grace window below ignores the self-triggered DefaultInputChanged that follows.
         while dev_rx.try_recv().is_ok() {}
+        let session_start = std::time::Instant::now();
+        const DEVICE_CHANGE_GRACE_MS: u64 = 700;
 
         // Record loop — also checks for device changes
         while is_recording.load(Ordering::Relaxed) {
@@ -455,8 +457,12 @@ pub mod macos {
             if let Ok(change) = dev_rx.try_recv() {
                 match change {
                     crate::device_monitor::DeviceChange::DefaultInputChanged => {
-                        eprintln!("Batch recording: input device changed, restarting capture...");
-                        return Err(anyhow::anyhow!("device_change"));
+                        // Skip the aggregate device's own setup churn; only a genuine later
+                        // change (after the grace window) restarts capture.
+                        if session_start.elapsed().as_millis() as u64 >= DEVICE_CHANGE_GRACE_MS {
+                            eprintln!("Batch recording: input device changed, restarting capture...");
+                            return Err(anyhow::anyhow!("device_change"));
+                        }
                     }
                     _ => {}
                 }
@@ -806,10 +812,13 @@ pub mod macos {
             mic_cpal_hz, sample_rate, tap_common_format
         );
 
-        // Drain stale device-change events from setup phase
-        // (creating the aggregate device fires HW_DEVICES notifications)
-        std::thread::sleep(std::time::Duration::from_millis(500));
+        // Drain events already queued from setup (creating the aggregate device fires
+        // HW_DEVICES notifications). Don't block ~500ms here — anarlog streams immediately.
+        // Any self-triggered DefaultInputChanged that lands a beat later is ignored by the
+        // grace window in the loop below, so transcription starts ~0.5s sooner.
         while dev_rx.try_recv().is_ok() {}
+        let session_start = std::time::Instant::now();
+        const DEVICE_CHANGE_GRACE_MS: u64 = 700;
 
         // Stream to Deepgram at 16 kHz, not the tap's native rate (~48 kHz). nova-3 is a
         // 16 kHz model, so this is no accuracy loss but ~1/3 the upload bytes — the single
@@ -844,9 +853,13 @@ pub mod macos {
             if let Ok(change) = dev_rx.try_recv() {
                 match change {
                     crate::device_monitor::DeviceChange::DefaultInputChanged => {
-                        eprintln!("Realtime: input device changed, signaling restart...");
-                        device_changed = true;
-                        break;
+                        // Ignore the aggregate device's own setup churn (fires within a few
+                        // hundred ms of device_start); only a genuine later change restarts.
+                        if session_start.elapsed().as_millis() as u64 >= DEVICE_CHANGE_GRACE_MS {
+                            eprintln!("Realtime: input device changed, signaling restart...");
+                            device_changed = true;
+                            break;
+                        }
                     }
                     _ => {}
                 }

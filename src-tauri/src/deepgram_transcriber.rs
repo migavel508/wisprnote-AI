@@ -233,15 +233,22 @@ impl DeepgramTranscriber {
             "{}?encoding=linear16&sample_rate={}&channels=2&multichannel=true&model=nova-3&language={}&interim_results=true&smart_format=true&punctuate=true&numerals=true&diarize=true&utterances=true&filler_words=false&endpointing=300&utterance_end_ms=1000&vad_events=true&no_delay=true",
             DEEPGRAM_WS_URL, sample_rate, language
         );
-        if let Some(terms) = keyterms {
-            for term in terms
-                .into_iter()
-                .map(|t| t.trim().to_string())
-                .filter(|t| !t.is_empty())
-                .take(50)
-            {
-                url.push_str("&keyterm=");
-                url.push_str(&percent_encode_query_value(&term));
+        // Deepgram keyterm prompting is Nova-3 ENGLISH-ONLY. Sending `keyterm=` with a
+        // non-English/multilingual model makes the WebSocket handshake fail (400), which
+        // surfaced as a repeating realtime_recording_error once the dictionary always
+        // populated keyterms. Only bias for English; other languages still benefit from
+        // the post-transcription dictionary correction pass.
+        if language.starts_with("en") {
+            if let Some(terms) = keyterms {
+                for term in terms
+                    .into_iter()
+                    .map(|t| t.trim().to_string())
+                    .filter(|t| !t.is_empty())
+                    .take(50)
+                {
+                    url.push_str("&keyterm=");
+                    url.push_str(&percent_encode_query_value(&term));
+                }
             }
         }
         url

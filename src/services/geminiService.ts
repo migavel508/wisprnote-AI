@@ -829,6 +829,139 @@ ${sample}`;
   }
 }
 
+// ─── Dictionary-aware transcript correction (robust, scales with the dictionary) ──
+// Keyterm biasing only NUDGES the ASR and is capped (Deepgram: 50). It cannot fix a
+// name the recognizer already got wrong, and it doesn't scale as the user's dictionary
+// grows. This is the real accuracy fix (mirrors Hyprnote's structured "transcript-patch"):
+// the model FINDS mis-transcriptions of the user's dictionary terms and returns targeted
+// {wrong → right} replacements; we then apply them DETERMINISTICALLY and globally across
+// the full transcript. Replace-only, so the model can never reword/summarize/reorder — we
+// only ever swap exact strings it flagged, validated against the dictionary. Non-fatal.
+export interface DictionaryContext {
+  terms: string[];                              // correct names / jargon / product terms
+  corrections: Array<{ from: string; to: string }>; // known misspelling → correct spelling
+}
+
+const DICT_MAX_TERMS = 400;        // cap the vocab injected into one prompt (keeps token cost bounded)
+const DICT_SAMPLE_HEAD = 9000;     // chars of transcript head the model scans for errors
+const DICT_SAMPLE_TAIL = 4000;     // + a tail sample (names can appear late)
+
+/** Escape a string for use as a literal in a RegExp. */
+function escapeRegExp(s: string): string {
+  return s.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+}
+
+/** Apply one {wrong → right} replacement globally, word-boundary where the term is word-like. */
+function applyReplacement(text: string, wrong: string, right: string): string {
+  const esc = escapeRegExp(wrong);
+  const boundary = /^[\w'’.-]+$/.test(wrong) ? '\\b' : '';
+  try {
+    return text.replace(new RegExp(`${boundary}${esc}${boundary}`, 'gi'), right);
+  } catch {
+    return text;
+  }
+}
+
+export async function correctTranscriptWithDictionary(
+  transcript: string,
+  dict: DictionaryContext,
+): Promise<string> {
+  if (!transcript || !transcript.trim()) return transcript;
+  const terms = (dict.terms || []).filter(t => t && t.trim().length >= 2).slice(0, DICT_MAX_TERMS);
+  const corrections = (dict.corrections || []).filter(c => c.from && c.to);
+  if (terms.length === 0 && corrections.length === 0) return transcript;
+
+  // 1) Deterministic pass first — apply the user's KNOWN corrections exactly (free, precise).
+  let out = transcript;
+  for (const { from, to } of corrections) {
+    if (from.trim().toLowerCase() !== to.trim().toLowerCase()) out = applyReplacement(out, from.trim(), to.trim());
+  }
+
+  // 2) LLM pass — catch FUZZY mis-transcriptions of dictionary terms the ASR got wrong
+  //    (phonetic/accent/spelling errors) that no exact correction entry covers.
+  //    The model only sees a bounded sample (head+tail) but its replacements are applied
+  //    to the FULL transcript, so a name spotted once is fixed everywhere → scales cheaply.
+  const sample = out.length > DICT_SAMPLE_HEAD + DICT_SAMPLE_TAIL
+    ? `${out.slice(0, DICT_SAMPLE_HEAD)}\n...\n${out.slice(-DICT_SAMPLE_TAIL)}`
+    : out;
+
+  const vocab = terms.join(', ');
+  const knownCorrections = corrections.length
+    ? `\nKnown corrections already applied (for context): ${corrections.map(c => `${c.from}→${c.to}`).join('; ')}.`
+    : '';
+
+  const instruction = `You are a conservative ASR (speech-to-text) transcript corrector.
+The speaker uses these EXACT names, terms, and jargon (the "dictionary"):
+${vocab}${knownCorrections}
+
+The transcript below may contain words that the speech recognizer mis-heard as something close to a dictionary term — wrong spelling, a phonetically similar word, split/merged words, or an accented pronunciation transcribed wrong (e.g. a dictionary name "Migavel" mis-transcribed as "Miguel" or "Megaville"; "Kubernetes" as "cooper netties").
+
+Your job: find ONLY those mis-transcriptions and map each back to the correct dictionary term.
+
+STRICT RULES:
+- Return ONLY high-confidence fixes where the transcript word is clearly a mis-transcription of a specific dictionary term. When unsure, leave it out.
+- "wrong" must be an EXACT substring that currently appears in the transcript (copy it verbatim, matching case).
+- "right" must be one of the dictionary terms above (or its correct spelling).
+- Do NOT correct ordinary English words, grammar, punctuation, or filler. Do NOT rephrase, translate, or summarize. Only dictionary-term mis-transcriptions.
+- Do NOT map a word to a dictionary term just because it is vaguely similar — it must be a genuine recognition error.
+- It is correct and expected to return an empty list when nothing needs fixing.
+
+Return JSON: { "corrections": [ { "wrong": "Miguel", "right": "Migavel" } ] }
+
+Transcript:
+${sample}`;
+
+  try {
+    const response = await generateContent({
+      model: MODELS.summary.primary,
+      contents: instruction,
+      config: {
+        responseMimeType: 'application/json',
+        responseSchema: {
+          type: Type.OBJECT,
+          properties: {
+            corrections: {
+              type: Type.ARRAY,
+              items: {
+                type: Type.OBJECT,
+                properties: {
+                  wrong: { type: Type.STRING, description: 'Exact substring currently in the transcript' },
+                  right: { type: Type.STRING, description: 'The correct dictionary term' },
+                },
+                required: ['wrong', 'right'],
+              },
+            },
+          },
+          required: ['corrections'],
+        },
+      },
+    });
+
+    const parsed = JSON.parse(response.text || '{}');
+    const fixes: Array<{ wrong?: string; right?: string }> = Array.isArray(parsed?.corrections) ? parsed.corrections : [];
+    // Validate the correct-spelling side against the dictionary so the model can't invent targets.
+    const termSet = new Set(terms.map(t => t.trim().toLowerCase()));
+    let applied = 0;
+    for (const f of fixes) {
+      const wrong = (f?.wrong || '').trim();
+      const right = (f?.right || '').trim();
+      if (!wrong || !right || wrong.length < 2 || right.length > 80) continue;
+      if (wrong.toLowerCase() === right.toLowerCase()) continue;
+      // `right` must be a known dictionary term (guards against drift / hallucinated targets).
+      if (!termSet.has(right.toLowerCase())) continue;
+      // `wrong` must actually be present (the model saw only a sample — skip anything not in the full text).
+      if (!out.toLowerCase().includes(wrong.toLowerCase())) continue;
+      const next = applyReplacement(out, wrong, right);
+      if (next !== out) { out = next; applied++; }
+    }
+    if (applied > 0) log.info('dictionary_corrections_applied', { count: applied });
+    return out;
+  } catch (e) {
+    log.warn('dictionary_correction_failed', { error: e instanceof Error ? e : undefined });
+    return out; // non-fatal — keep the deterministic-pass result
+  }
+}
+
 export async function generateSummary(text: string): Promise<string> {
   const response = await generateWithFallback({
     model: MODELS.summary.primary,
@@ -1482,6 +1615,134 @@ ${fullContext}`;
       if (!answer) answer = await runGemini();
     } catch (e) {
       log.warn('chat_notes_gemini_model_failed_fallback_default', { error: e instanceof Error ? e : undefined });
+      answer = await runGemini();
+    }
+  } else {
+    answer = await runGemini();
+  }
+
+  return enforceGroundedAnswer({
+    question: message,
+    answer,
+    context: fullContext,
+  });
+}
+
+/**
+ * Chat against the LIVE, in-progress transcript of the meeting being recorded
+ * RIGHT NOW — the anarlog-style "current session" pattern. Unlike chatWithNotes
+ * (a finished meeting) and agentChatAllMeetings (RAG across the whole history),
+ * this scopes the model to ONE source of truth: the transcript captured so far
+ * in this recording. No retrieval, no other meetings — just the live text,
+ * re-read on every turn so each answer reflects whatever has been said up to
+ * the moment the user hit send.
+ *
+ * `liveTranscript` is the speaker-labeled transcript so far (one line per turn,
+ * e.g. "You: …" / "Speaker 1: …"), optionally ending with an in-progress line.
+ */
+export async function chatWithLiveTranscript(
+  liveTranscript: string,
+  message: string,
+  history: { role: 'user' | 'model', parts: { text: string }[] }[],
+  opts?: { title?: string; elapsedLabel?: string },
+): Promise<string> {
+  const questionCategory = detectQuestionCategory(message);
+  const formatGuide = buildFormatGuide(questionCategory);
+
+  // Keep the WHOLE live transcript in context — it IS the meeting and is usually
+  // short while recording. If a long meeting balloons past the budget, bias to
+  // the most-recent speech (recency matters most live) while preserving the
+  // opening for "what did we decide / how did this start" questions.
+  const MAX_CHARS = 40000;
+  const clean = liveTranscript.trim();
+  let transcriptForContext = clean;
+  if (clean.length > MAX_CHARS) {
+    const head = clean.slice(0, 8000);
+    const tail = clean.slice(clean.length - (MAX_CHARS - 8000));
+    transcriptForContext = `${head}\n\n[… earlier portion of the meeting omitted to fit the window …]\n\n${tail}`;
+  }
+
+  const metaLines = [
+    opts?.title ? `Meeting: ${opts.title}` : 'Meeting: Current recording (in progress)',
+    opts?.elapsedLabel ? `Elapsed: ${opts.elapsedLabel}` : undefined,
+  ].filter(Boolean).join('\n');
+
+  const transcriptBlock = transcriptForContext
+    ? `Live transcript so far:\n${transcriptForContext}`
+    : 'Live transcript so far:\n(No speech has been transcribed yet — the meeting just started.)';
+
+  const fullContext = `<context>\n\n${metaLines}\n\n${transcriptBlock}\n\n</context>`;
+
+  const today = new Date().toLocaleDateString('en-US', { year: 'numeric', month: 'long', day: 'numeric' });
+
+  const systemInstruction = `Current date: ${today}
+
+You are WisprNote AI, a live meeting assistant. A meeting is being recorded RIGHT NOW, and the transcript below updates in real time as people keep talking. The user is asking about THIS meeting as it happens.
+
+${SECURITY_CLAUSE}
+
+- Your ONLY source of truth is the live transcript below. Answer strictly from what has actually been said so far — never invent, infer, or pull in anything from other meetings.
+- Speaker labels: "You" is the user (this person's microphone); "Speaker 1", "Speaker 2", … are other participants. Use these labels when attributing who said what.
+- The transcript is incomplete and still growing. A final line marked as still in progress may be a partial utterance — treat it as tentative.
+- If the user asks about something that has NOT been discussed yet, say plainly that it hasn't come up in the meeting so far — do not guess what might be said later.
+- Be concise, conversational, and immediately useful — this is a live assistant during an ongoing meeting.
+- Do NOT print citation markers like [1], [M1-E2], [Summary], or [Source], and do NOT add source references or footnotes.
+- If the transcript is empty, let the user know the meeting just started and nothing has been transcribed yet.
+
+${formatGuide}
+
+${fullContext}`;
+
+  const recentHistory = trimHistoryToTokenBudget(history, 2400);
+  const maxOut = 2000;
+
+  const runGemini = async (): Promise<string> => {
+    const response = await generateWithFallback({
+      model: MODELS.singleMeetingChat.primary,
+      contents: [
+        ...recentHistory,
+        { role: 'user', parts: [{ text: message }] }
+      ],
+      config: {
+        systemInstruction,
+        temperature: 0.15,
+        maxOutputTokens: maxOut,
+      }
+    });
+    return response.text || '';
+  };
+
+  // Route to the user-selected model, mirroring chatWithNotes: Claude → Anthropic
+  // (proxied), specific Gemini → Gemini, else the fast Gemini default. Any failure
+  // falls back to the Gemini default so live chat never breaks mid-meeting.
+  const chosen = getChatModel();
+  let answer: string;
+  if (chosen.provider === 'anthropic' && chosen.providerModel) {
+    try {
+      answer = await generateAnswerWithAnthropic({
+        model: chosen,
+        systemInstruction,
+        history: recentHistory,
+        userMessage: message,
+        maxTokens: maxOut,
+      });
+      if (!answer) answer = await runGemini();
+    } catch (e) {
+      log.warn('chat_live_anthropic_failed_fallback_gemini', { error: e instanceof Error ? e : undefined });
+      answer = await runGemini();
+    }
+  } else if (chosen.provider === 'gemini' && chosen.providerModel) {
+    try {
+      answer = await generateAnswerWithGemini({
+        model: chosen.providerModel,
+        systemInstruction,
+        history: recentHistory,
+        userMessage: message,
+        maxTokens: maxOut,
+      });
+      if (!answer) answer = await runGemini();
+    } catch (e) {
+      log.warn('chat_live_gemini_model_failed_fallback_default', { error: e instanceof Error ? e : undefined });
       answer = await runGemini();
     }
   } else {
