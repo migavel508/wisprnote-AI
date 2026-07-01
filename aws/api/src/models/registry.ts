@@ -37,7 +37,7 @@ export const MODELS = {
    *  (cross-provider; the verdict caller switches endpoints). NOT Opus (cost). Runs on a
    *  SMALL volume (1 batched call per meeting over its top-K candidates), so premium-rate
    *  here is affordable. Diff COMPRESSION (Tier 2) stays on cheap Flash (kgExtract). */
-  brainVerdict: { provider: 'anthropic', primary: 'claude-sonnet-4-6', fallbacks: ['gemini-3.1-pro'] },
+  brainVerdict: { provider: 'anthropic', primary: 'claude-sonnet-4-6', fallbacks: ['gemini-3-flash-preview', 'gemini-2.5-pro'] },
   /** Server chat agent — Gemini synthesis / fallback path (chatAgent.ts).
    *  DRIFT: still gemini-2.5-flash while the KG pipeline moved to gemini-3 —
    *  left as-is by the registry migration; change here to unify. */

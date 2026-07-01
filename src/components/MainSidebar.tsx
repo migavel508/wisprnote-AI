@@ -6,6 +6,7 @@ import {
   House,
   LogOut,
   Users,
+  BookOpen,
   Plus,
   Lock,
   Folder as FolderIcon,
@@ -36,7 +37,7 @@ import WorkspaceCreationWizard from './WorkspaceCreationWizard';
 import WorkspaceSwitcher from './WorkspaceSwitcher';
 import { WisprnoteLogo } from './WisprnoteLogo';
 
-type View = 'process' | 'history' | 'notes' | 'chat' | 'knowledge' | 'notebooks' | 'audio-devices' | 'workspace' | 'people' | 'settings' | 'spaces';
+type View = 'process' | 'history' | 'notes' | 'chat' | 'knowledge' | 'notebooks' | 'audio-devices' | 'workspace' | 'people' | 'settings' | 'spaces' | 'dictionary';
 
 interface MainSidebarProps {
   currentView: View;
@@ -438,6 +439,7 @@ export default function MainSidebar({
     { id: 'chat' as View, label: 'Chat', icon: ChatIcon },
     { id: 'knowledge' as View, label: 'Knowledge', icon: GraphSparkleIcon },
     { id: 'people' as View, label: 'People', icon: Users },
+    { id: 'dictionary' as View, label: 'Dictionary', icon: BookOpen },
   ];
 
   // ── Collapsed: icon rail ────────────────────────────────────────────────────

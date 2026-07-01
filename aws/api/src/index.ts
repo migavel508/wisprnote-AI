@@ -32,6 +32,7 @@ import './connectors/github';    // registers the GitHub (remote MCP) connector
 import { ensurePeopleSchema, upsertPerson } from './people';
 import { activeWorkspaceId, ensureWorkspacePartition, ensureWorkspacePartitionSchema, validateOwnedWorkspaceId } from './workspaceScope';
 import { ensureSpacesSchema, migrateFoldersToSpacesOnce, reconcileSpaces, resolveDefaultSpaceId, validateOwnedSpaceId } from './spaces';
+import { ensureDictionarySchema } from './dictionary';
 
 // Connector OAuth redirect — the app's own custom scheme; the desktop deep-link handler catches it
 // (`wisprnote://connector-callback?code=…&state=…`) and POSTs to /exchange. The https /oauth/callback
@@ -430,6 +431,57 @@ export const handler = async (event: APIGatewayProxyEvent): Promise<APIGatewayPr
     return { statusCode: 200, body: JSON.stringify(results, null, 2) } as APIGatewayProxyResult;
   }
 
+  // LLM PROBE — READ-ONLY. Tests the brain-verdict model call so we can see WHY judgeAlignment
+  // returns nothing (auth 401 / model 404 / rate 429 / works).
+  if ((event as any).__job === 'llm-probe') {
+    const { getSecrets } = await import('./secrets');
+    const { MODELS } = await import('./models/registry');
+    const s = await getSecrets();
+    const out: any = { hasAnthropic: !!s.ANTHROPIC_API_KEY, hasGemini: !!s.GEMINI_API_KEY, anthropicKeyLen: (s.ANTHROPIC_API_KEY || '').length, model: MODELS.brainVerdict.primary };
+    if (s.ANTHROPIC_API_KEY) {
+      try {
+        const r = await fetch('https://api.anthropic.com/v1/messages', {
+          method: 'POST', headers: { 'content-type': 'application/json', 'x-api-key': s.ANTHROPIC_API_KEY, 'anthropic-version': '2023-06-01' },
+          body: JSON.stringify({ model: MODELS.brainVerdict.primary, max_tokens: 40, messages: [{ role: 'user', content: 'Reply with the single word OK.' }] }),
+        });
+        out.anthropicStatus = r.status;
+        out.anthropicBody = (await r.text()).slice(0, 400);
+      } catch (e: any) { out.anthropicError = e?.message; }
+    }
+    if (s.GEMINI_API_KEY) {
+      const candidates = Array.isArray((event as any).geminiModels) ? (event as any).geminiModels
+        : ['gemini-3-pro-preview', 'gemini-3-flash-preview', 'gemini-2.5-pro', 'gemini-2.0-flash'];
+      out.geminiTests = [];
+      for (const m of candidates) {
+        try {
+          const r = await fetch(`https://generativelanguage.googleapis.com/v1beta/models/${m}:generateContent?key=${s.GEMINI_API_KEY}`, {
+            method: 'POST', headers: { 'content-type': 'application/json' },
+            body: JSON.stringify({ contents: [{ role: 'user', parts: [{ text: 'Reply with the single word OK.' }] }] }),
+          });
+          out.geminiTests.push({ model: m, status: r.status, ok: r.ok });
+        } catch (e: any) { out.geminiTests.push({ model: m, error: e?.message }); }
+      }
+    }
+    // Does the EMBEDDING call work? (brainLink needs this; null = no vectors = no links.)
+    try {
+      const { embedTexts } = await import('./kgEmbed');
+      const v = await embedTexts(['hello world test', 'second test text']);
+      out.embedOk = Array.isArray(v) && v.length === 2 && Array.isArray(v[0]);
+      out.embedDims = v?.[0]?.length ?? null;
+    } catch (e: any) { out.embedError = e?.message; }
+    // Direct embedding HTTP status (quota 429 vs model 404 vs auth 400)?
+    if (s.GEMINI_API_KEY) {
+      try {
+        const r = await fetch(`https://generativelanguage.googleapis.com/v1beta/models/gemini-embedding-001:batchEmbedContents?key=${s.GEMINI_API_KEY}`, {
+          method: 'POST', headers: { 'content-type': 'application/json' },
+          body: JSON.stringify({ requests: [{ model: 'models/gemini-embedding-001', content: { parts: [{ text: 'test' }] } }] }),
+        });
+        out.embedStatus = r.status; out.embedBody = (await r.text()).slice(0, 300);
+      } catch (e: any) { out.embedHttpError = e?.message; }
+    }
+    return { statusCode: 200, body: JSON.stringify(out, null, 2) } as APIGatewayProxyResult;
+  }
+
   // BRAIN-EDGE CLEANUP — removes redundant SAME-SOURCE edges that blob the map (commit↔commit,
   // ticket↔ticket) and trims meeting↔meeting to the strongest few per meeting. DRY-RUN by default;
   // deletes only with { commit:true }. With { resetLinkState:true } it also clears the link cursor for
@@ -443,6 +495,12 @@ export const handler = async (event: APIGatewayProxyEvent): Promise<APIGatewayPr
       try { const r = await query<any>(commit ? deleteSql : countSql, [spaceId]); results[label] = r?.[0]?.n ?? 0; }
       catch (e: any) { results[label] = `error: ${e?.message}`; }
     };
+    // 0) Optional full edge reset (clean graph rebuild): delete ALL edges for the space.
+    if ((event as any).allEdges === true) {
+      await step('allEdgesDeleted',
+        `SELECT COUNT(*)::int AS n FROM brain_edge WHERE space_id=$1`,
+        `WITH d AS (DELETE FROM brain_edge WHERE space_id=$1 RETURNING 1) SELECT COUNT(*)::int AS n FROM d`);
+    }
     // 1) Same-source semantic blobs: github↔github + jira↔jira → remove entirely.
     await step('sameSourceBlobsDeleted',
       `SELECT COUNT(*)::int AS n FROM brain_edge t
@@ -705,12 +763,26 @@ export const handler = async (event: APIGatewayProxyEvent): Promise<APIGatewayPr
       const drain = (event as any).drain === true;
       if (drain) {
         const started = Date.now();
-        const agg = { rounds: 0, provenance: 0, reference: 0, semantic: 0, llm: 0, workspaces: 0 };
+        const agg = { rounds: 0, provenance: 0, reference: 0, semantic: 0, llm: 0, workspaces: 0, pending: 0 };
         const MAX_MS = 240_000;   // Lambda is 300s; leave headroom
-        while (Date.now() - started < MAX_MS && agg.rounds < 60) {
-          const r = await runBrainLink({ ...(opts || {}), timeBudgetMs: Math.min(timeBudgetMs ?? 30_000, MAX_MS - (Date.now() - started)) });
+        // STOP on PENDING (items not yet linked), NOT on "0 new edges" — a batch can legitimately
+        // produce no edges (items that don't relate) while more items still need processing. We loop
+        // until every meeting/connector node is processed, or no round makes progress (stuck guard).
+        const pendingSql = ws
+          ? `SELECT COUNT(*)::int AS n FROM knowledge_item k WHERE k.workspace_id=$1
+               AND NOT EXISTS (SELECT 1 FROM brain_link_state s WHERE s.item_id=k.id AND s.linked_at >= k.synced_at)`
+          : `SELECT COUNT(*)::int AS n FROM knowledge_item k
+               WHERE NOT EXISTS (SELECT 1 FROM brain_link_state s WHERE s.item_id=k.id AND s.linked_at >= k.synced_at)`;
+        let lastPending = Number.POSITIVE_INFINITY;
+        while (Date.now() - started < MAX_MS && agg.rounds < 80) {
+          const r = await runBrainLink({ ...(opts || {}), timeBudgetMs: Math.min(timeBudgetMs ?? 28_000, MAX_MS - (Date.now() - started)) });
           agg.rounds++; agg.provenance += r.provenance; agg.reference += r.reference; agg.semantic += r.semantic; agg.llm += r.llm; agg.workspaces = r.workspaces;
-          if (r.provenance + r.reference + r.semantic + r.llm === 0) break;   // nothing new → drained
+          const pend = await query<{ n: number }>(pendingSql, ws ? [ws] : []).catch(() => null);
+          const pending = pend?.[0]?.n ?? 0;
+          agg.pending = pending;
+          if (pending === 0) break;                 // everything processed → done
+          if (pending >= lastPending) break;        // no progress this round → avoid an infinite loop
+          lastPending = pending;
         }
         console.log('brain_link_drained', JSON.stringify(agg));
         return { statusCode: 200, body: JSON.stringify(agg) } as APIGatewayProxyResult;
@@ -787,6 +859,7 @@ export const handler = async (event: APIGatewayProxyEvent): Promise<APIGatewayPr
       case 'storage':    return await handleStorage(method, segments, userId, event);
       case 'workspaces': return await handleWorkspaces(method, segments, userId, event);
       case 'spaces':     return await handleSpaces(method, segments, userId, event);
+      case 'dictionary': return await handleDictionary(method, segments, userId, event);
       case 'folders':    return await handleFolders(method, segments, userId, event);
       case 'connectors': return await handleConnectors(method, segments, userId, event);
       case 'proposals':  return await handleProposals(method, segments, userId, event);
@@ -2468,6 +2541,76 @@ async function handleSpaces(method: string, segments: string[], userId: string, 
     await query('UPDATE folders SET space_id=NULL WHERE space_id=$1', [spaceId]);
     await query('UPDATE task_history SET space_id=NULL, folder_id=NULL WHERE space_id=$1 AND user_id=$2', [spaceId, userId]);
     await query('DELETE FROM spaces WHERE id=$1', [spaceId]); // cascades space_members
+    return noContent();
+  }
+
+  return notFound();
+}
+
+// ─── DICTIONARY (custom vocabulary → transcription accuracy) ─────────────────
+// Per-USER (account-level). GET returns the user's own entries PLUS entries teammates shared
+// into a workspace this user belongs to. Mutations are guarded by user_id ownership.
+async function handleDictionary(method: string, segments: string[], userId: string, event: APIGatewayProxyEvent): Promise<APIGatewayProxyResult> {
+  await ensureDictionarySchema();
+  const entryId = segments[1];
+  const email = getUserEmail();
+  const COLS = 'id, user_id, workspace_id, term, misspelling, shared, created_at';
+
+  if (method === 'GET' && !entryId) {
+    const rows = await query(
+      `SELECT ${COLS} FROM dictionary
+        WHERE user_id=$1
+           OR (shared=true AND workspace_id IN (
+                SELECT id FROM workspaces WHERE user_id=$1
+                UNION SELECT workspace_id FROM workspace_members WHERE lower(email)=lower($2)))
+        ORDER BY created_at DESC`,
+      [userId, email],
+    );
+    return ok(rows);
+  }
+
+  if (method === 'POST' && !entryId) {
+    const body = parseBody(event);
+    const term = (body.term ?? '').trim();
+    if (!term) return badRequest('term is required');
+    const misspelling = (body.misspelling ?? '').trim() || null;
+    const shared = body.shared === true;
+    const wsId = shared ? await activeWorkspaceId(event, userId, email) : null;
+    const row = await queryOne(
+      `INSERT INTO dictionary (user_id, workspace_id, term, misspelling, shared)
+       VALUES ($1,$2,$3,$4,$5) RETURNING ${COLS}`,
+      [userId, wsId, term, misspelling, shared],
+    );
+    return created(row);
+  }
+
+  // Ownership guard — a user can only edit/delete their OWN entries.
+  const entry = entryId ? await queryOne<{ id: string }>('SELECT id FROM dictionary WHERE id=$1 AND user_id=$2', [entryId, userId]) : null;
+  if (entryId && !entry) return notFound();
+
+  if (method === 'PUT' && entryId) {
+    const body = parseBody(event);
+    const shared = typeof body.shared === 'boolean' ? body.shared : null;
+    const wsId = body.shared === true ? await activeWorkspaceId(event, userId, email) : null;
+    const row = await queryOne(
+      `UPDATE dictionary SET
+         term = COALESCE($1, term),
+         misspelling = COALESCE($2, misspelling),
+         shared = COALESCE($3, shared),
+         workspace_id = CASE WHEN $3 = true THEN $4 WHEN $3 = false THEN NULL ELSE workspace_id END,
+         updated_at = now()
+       WHERE id=$5 RETURNING ${COLS}`,
+      [
+        body.term?.trim() || null,
+        body.misspelling !== undefined ? ((body.misspelling ?? '').trim() || null) : null,
+        shared, wsId, entryId,
+      ],
+    );
+    return ok(row);
+  }
+
+  if (method === 'DELETE' && entryId) {
+    await query('DELETE FROM dictionary WHERE id=$1 AND user_id=$2', [entryId, userId]);
     return noContent();
   }
 

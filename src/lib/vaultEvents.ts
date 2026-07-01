@@ -9,7 +9,7 @@
  *   - 'spaces:changed' — spaces or their folders changed (create/rename/delete). payload: {}
  */
 
-export type VaultEvent = 'notes:changed' | 'spaces:changed';
+export type VaultEvent = 'notes:changed' | 'spaces:changed' | 'dictionary:changed';
 
 export interface NotesChangedPayload {
   taskId: string;
@@ -20,11 +20,13 @@ export interface NotesChangedPayload {
 type Payloads = {
   'notes:changed': NotesChangedPayload;
   'spaces:changed': Record<string, never>;
+  'dictionary:changed': Record<string, never>;
 };
 
 const listeners: { [K in VaultEvent]: Set<(p: Payloads[K]) => void> } = {
   'notes:changed': new Set(),
   'spaces:changed': new Set(),
+  'dictionary:changed': new Set(),
 };
 
 /** Subscribe to a vault event. Returns an unsubscribe function. */

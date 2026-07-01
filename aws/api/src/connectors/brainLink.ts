@@ -70,7 +70,7 @@ async function callAnthropic(model: string, sys: string, user: string, key: stri
 
 async function callGemini(model: string, sys: string, user: string, key: string): Promise<string> {
   const ctrl = new AbortController();
-  const timer = setTimeout(() => ctrl.abort(), 10_000);
+  const timer = setTimeout(() => ctrl.abort(), 9_000);   // fast-fail: the verdict must never block the build
   try {
     const r = await fetch(`https://generativelanguage.googleapis.com/v1beta/models/${model}:generateContent?key=${key}`, {
       method: 'POST', headers: { 'content-type': 'application/json' },
@@ -226,13 +226,13 @@ export async function runBrainLink(opts?: BrainLinkOpts): Promise<BrainLinkResul
     // (once linked they drop out, so meetings then get the full budget on later ticks).
     const fresh = [...freshTasks, ...freshMeetings, ...freshOther];
     if (fresh.length) {
-      // Embed only the items that take the SEMANTIC branch (meetings + Jira tasks use the
-      // intent/verdict pipeline, so they don't need a precomputed self-vector here).
-      const nonMeeting = fresh.filter((f) => f.source !== 'meeting' && f.source !== 'jira');
+      // Embed ALL fresh items in ONE batch call (not per-intent) — the intent pipeline below reads its
+      // self-vector from here instead of re-embedding each meeting/ticket individually. That per-item
+      // re-embed was hammering the embedding API (429s → retries) and made bulk brain-building crawl.
       const vecById = new Map<string, number[]>();
-      if (nonMeeting.length) {
-        const vecs = await embedTexts(nonMeeting.map((f) => [f.title, (f.body || '').slice(0, 1500)].filter(Boolean).join('\n'))).catch(() => null);
-        if (vecs) nonMeeting.forEach((f, i) => vecById.set(String(f.id), vecs[i]));
+      {
+        const vecs = await embedTexts(fresh.map((f) => [f.title, (f.body || '').slice(0, 1500)].filter(Boolean).join('\n'))).catch(() => null);
+        if (vecs) fresh.forEach((f, i) => vecById.set(String(f.id), vecs[i]));
       }
       let llmUsed = 0;
       for (const self of fresh) {
@@ -247,8 +247,9 @@ export async function runBrainLink(opts?: BrainLinkOpts): Promise<BrainLinkResul
         //   3. VERDICT (Tier 3): ONE batched Sonnet→Gemini call → verdict+rationale stored
         //      DIRECTLY on the edge (the brain map colours + explains the line).
         if (self.source === 'meeting' || self.source === 'jira' || self.source === 'claude-code' || self.source === 'codex') {
-          if (llmUsed >= llmBudget) continue;   // budget hit (or 0 = fast path) → leave unmarked for a later tick
-          llmUsed++;
+          // NOTE: connectivity (semantic, turbopuffer) ALWAYS runs below — it does NOT depend on the
+          // LLM. Only the VERDICT (quality colouring) is budget-gated, so a slow/unavailable verdict
+          // model never blocks the brain from connecting its nodes.
           const isTask = self.source === 'jira';
           const isSession = self.source === 'claude-code' || self.source === 'codex';
           // FOLDER SCOPING — but asymmetric, because a meeting and a task have different shapes:
@@ -265,12 +266,14 @@ export async function runBrainLink(opts?: BrainLinkOpts): Promise<BrainLinkResul
           // produced. (Modelling it as an intent — not a candidate — means a freshly-synced session
           // links to ALREADY-linked meetings/tasks without re-running them.)
           // A MEETING links to related MEETINGS too (so a space of related meetings shows
-          // interconnections, not just isolated nodes) plus Jira/GitHub. A Jira task stays
-          // code-only (task→commit); a dev session links to all three.
-          const candSources = isSession ? ['meeting', 'jira', 'github'] : isTask ? ['github'] : ['meeting', 'jira', 'github'];
-          const candK = (isTask || isSession) ? CAND_K : 10;   // meetings may legitimately touch several projects
-          const mv = await embedTexts([[self.title, (self.body || '').slice(0, 1500)].filter(Boolean).join('\n')]).catch(() => null);
-          const hits = mv?.[0] ? await queryNearestItems(userId, workspaceId, mv[0], candK * 4, candSources).catch(() => null) : null;
+          // interconnections, not just isolated nodes) plus Jira/GitHub. A Jira TASK links to the
+          // MEETING it came from (a ticket auto-suggested from a meeting MUST connect back to it) AND
+          // the commits that implement it. A dev session links to all three. (Meetings are exempt from
+          // the per-folder gate below, so a task finds its source meeting even when unfiled.)
+          const candSources = isSession ? ['meeting', 'jira', 'github'] : isTask ? ['meeting', 'github'] : ['meeting', 'jira', 'github'];
+          const candK = (isTask || isSession) ? CAND_K + 4 : 10;   // room for both the source meeting + commits
+          const mv = vecById.get(String(self.id));   // batch-embedded above — no per-intent re-embed
+          const hits = mv ? await queryNearestItems(userId, workspaceId, mv, candK * 4, candSources).catch(() => null) : null;
           const candIds: string[] = (hits || [])
             .filter((h) => {
               if (h.id === String(self.id) || h.similarity < CAND_MIN_SIM) return false;
@@ -307,23 +310,38 @@ export async function runBrainLink(opts?: BrainLinkOpts): Promise<BrainLinkResul
             }
             cands.push({ id: cid, source: it.source, text });
           }
-          const links = await judgeAlignment({ kind: isSession ? 'DEV SESSION' : isTask ? 'JIRA TASK' : 'MEETING', title: self.title, body: self.body }, cands);
-          // Cap SAME-SOURCE links (e.g. meeting↔meeting) to the strongest few so related meetings stay
-          // interconnected WITHOUT forming a dense redundant blob. Cross-source lineage is never capped.
-          const SAME_SOURCE_CAP = 3;
-          let sameSourceMade = 0;
-          for (const l of links) {
-            const sameSrc = itemById.get(l.id)?.source === self.source;
-            if (sameSrc && sameSourceMade >= SAME_SOURCE_CAP) continue;
-            // Verdict + rationale stored ON the edge → the line is coloured & explains itself.
-            const inserted = await insertEdge({ userId, workspaceId, spaceId: itemById.get(String(self.id))?.space_id ?? itemById.get(l.id)?.space_id ?? null, srcKind: 'item', srcId: String(self.id), dstKind: 'item', dstId: l.id, relation: l.relation, origin: 'llm', confidence: 0.9, evidence: l.verdict, verdict: l.verdict, rationale: l.rationale });
-            if (inserted) { result.llm++; if (sameSrc) sameSourceMade++; }
-            // Keep the reasoning ledger too (history) for meeting intents.
-            if (!isTask && !isSession) await insertReasoning({ userId, workspaceId, meetingId: String(self.id), implId: l.id, verdict: l.verdict, rationale: l.rationale, tags: [l.verdict, l.relation] }).catch(() => {});
-            // Co-architect advisory: store the code read on the COMMIT itself (diff-grounded).
-            if (l.assessment && itemById.get(l.id)?.type === 'commit') {
-              await query(`UPDATE knowledge_item SET advisory_assessment=$2, advisory_note=$3 WHERE id=$1`, [l.id, l.assessment, l.suggestion]).catch(() => {});
+          // VERDICT (Tier 3, quality colouring) — BUDGET-GATED + best-effort. A slow/credit-less
+          // verdict model never blocks the connectivity below; it just leaves the edge uncoloured.
+          const verdictTargets = new Set<string>();
+          if (llmUsed < llmBudget) {
+            llmUsed++;
+            const links = await judgeAlignment({ kind: isSession ? 'DEV SESSION' : isTask ? 'JIRA TASK' : 'MEETING', title: self.title, body: self.body }, cands);
+            // Cap SAME-SOURCE links (e.g. meeting↔meeting) to the strongest few — interconnected, not a blob.
+            const SAME_SOURCE_CAP = 3;
+            let sameSourceMade = 0;
+            for (const l of links) {
+              const sameSrc = itemById.get(l.id)?.source === self.source;
+              if (sameSrc && sameSourceMade >= SAME_SOURCE_CAP) continue;
+              const inserted = await insertEdge({ userId, workspaceId, spaceId: itemById.get(String(self.id))?.space_id ?? itemById.get(l.id)?.space_id ?? null, srcKind: 'item', srcId: String(self.id), dstKind: 'item', dstId: l.id, relation: l.relation, origin: 'llm', confidence: 0.9, evidence: l.verdict, verdict: l.verdict, rationale: l.rationale });
+              if (inserted) { result.llm++; if (sameSrc) sameSourceMade++; }
+              verdictTargets.add(l.id);
+              if (!isTask && !isSession) await insertReasoning({ userId, workspaceId, meetingId: String(self.id), implId: l.id, verdict: l.verdict, rationale: l.rationale, tags: [l.verdict, l.relation] }).catch(() => {});
+              if (l.assessment && itemById.get(l.id)?.type === 'commit') {
+                await query(`UPDATE knowledge_item SET advisory_assessment=$2, advisory_note=$3 WHERE id=$1`, [l.id, l.assessment, l.suggestion]).catch(() => {});
+              }
             }
+          }
+          // CONNECTIVITY (semantic, turbopuffer) — ALWAYS runs (no LLM), so every meeting/ticket links
+          // to its NEAREST related items even when the verdict is unavailable. Capped + floored — enough
+          // that no node floats alone, never enough to re-form a blob. Skips pairs the verdict coloured.
+          let fb = 0;
+          for (const h of (hits || [])) {
+            if (fb >= 2) break;
+            if (h.id === String(self.id) || h.similarity < 0.40 || verdictTargets.has(h.id)) continue;
+            const hit = itemById.get(h.id);
+            if (!hit) continue;
+            if ((isTask || isSession) && hit.source !== 'meeting' && (hit.folder_id ?? null) !== intentFolder) continue;
+            if (await insertEdge({ userId, workspaceId, spaceId: itemById.get(String(self.id))?.space_id ?? hit.space_id ?? null, srcKind: 'item', srcId: String(self.id), dstKind: 'item', dstId: h.id, relation: 'related', origin: 'semantic', confidence: h.similarity })) { result.semantic++; fb++; }
           }
         } else {
           // A GitHub commit links CROSS-SOURCE ONLY — to the Jira ticket / meeting it relates to,

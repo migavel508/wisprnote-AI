@@ -40,6 +40,8 @@ import ChatIcon from './components/ChatIcon';
 import MeetingsIcon from './components/MeetingsIcon';
 import GraphSparkleIcon from './components/GraphSparkleIcon';
 import SpacesPage from './pages/SpacesPage';
+import DictionaryPage from './pages/DictionaryPage';
+import { loadDictionary, dictionaryKeyterms, dictionaryCorrections, dictionaryContext } from './services/dictionaryService';
 import { motion, AnimatePresence } from 'motion/react';
 import Markdown from 'react-markdown';
 import remarkGfm from 'remark-gfm';
@@ -49,6 +51,7 @@ import {
   generateSummary,
   generateNotes,
   chatWithNotes,
+  chatWithLiveTranscript,
   agentChatAllMeetings,
   extractAcrossMeetings,
   generateConceptImage,
@@ -62,6 +65,7 @@ import {
   transcribeViaFileAPI,
   isFileApiDisabledByFailures,
   resolveSpeakerNames,
+  correctTranscriptWithDictionary,
 } from './services/geminiService';
 import { EXTRACT_DIRECTIVE } from './services/gemsService';
 import { reconcileLeadingSpeaker, type AudioSourceKind } from './services/speakerLabeling';
@@ -198,7 +202,7 @@ declare global {
   }
 }
 
-type View = 'process' | 'history' | 'notes' | 'chat' | 'knowledge' | 'notebooks' | 'audio-devices' | 'shared' | 'workspace' | 'people' | 'settings' | 'spaces';
+type View = 'process' | 'history' | 'notes' | 'chat' | 'knowledge' | 'notebooks' | 'audio-devices' | 'shared' | 'workspace' | 'people' | 'settings' | 'spaces' | 'dictionary';
 type Status = 'idle' | 'splitting' | 'processing' | 'finalizing' | 'completed' | 'error';
 type NoteTab = 'transcription' | 'summary' | 'notes';
 
@@ -407,6 +411,7 @@ export default function App() {
     if (path === '/people') return 'people';
     if (path.startsWith('/settings')) return 'settings';
     if (path.startsWith('/spaces')) return 'spaces';
+    if (path.startsWith('/dictionary')) return 'dictionary';
     return 'process';
   };
   
@@ -444,6 +449,9 @@ export default function App() {
         break;
       case 'spaces':
         navigate('/spaces');
+        break;
+      case 'dictionary':
+        navigate('/dictionary');
         break;
     }
   };
@@ -513,6 +521,19 @@ export default function App() {
   // Native Desktop Recording
   const [nativeServerAvailable, setNativeServerAvailable] = useState(false);
   const [desktopRecordingMode, setDesktopRecordingMode] = useState<RecordingMode>('batch');
+  // Transcription language for realtime (Deepgram): 'en' (best accuracy, enables keyterm
+  // biasing) or 'multi' (multilingual/code-switching). Persisted so it survives reloads and
+  // is read by the native recorder. A ref mirrors it so the record-start closure (and the
+  // ref-based tray/detection triggers) always pass the current value.
+  const [transcriptionLanguage, setTranscriptionLanguageState] = useState<string>(() => {
+    try { return localStorage.getItem('transcriptionLanguage') || 'en'; } catch { return 'en'; }
+  });
+  const transcriptionLanguageRef = useRef(transcriptionLanguage);
+  const setTranscriptionLanguage = (v: string) => {
+    transcriptionLanguageRef.current = v;
+    setTranscriptionLanguageState(v);
+    try { localStorage.setItem('transcriptionLanguage', v); } catch { /* ignore */ }
+  };
   const [realtimeTranscript, setRealtimeTranscript] = useState<string[]>([]);
   const [interimTranscript, setInterimTranscript] = useState('');
   const unlistenRef = useRef<(() => void) | null>(null);
@@ -544,6 +565,7 @@ export default function App() {
   const recordingOpLockRef = useRef<Promise<unknown>>(Promise.resolve());
   const controlBusyRef = useRef(false);
   const isStoppingRef = useRef(false);
+  const isStartingRef = useRef(false);
   const isPausedRef = useRef(false);
   const realtimeEngineActiveRef = useRef(false);
   const [permissionsGranted, setPermissionsGranted] = useState(false);
@@ -597,7 +619,22 @@ export default function App() {
   const [selectedTask, setSelectedTask] = useState<TaskHistory | null>(null);
   const [isLoadingTaskDetails, setIsLoadingTaskDetails] = useState(false);
   const [isLoadingHistory, setIsLoadingHistory] = useState(true);
-  
+
+  // Keep the custom-vocabulary (Dictionary) cache warm so realtime keyterms + batch
+  // prompts + finalize corrections always see the latest terms. Refresh on edits.
+  useEffect(() => {
+    void loadDictionary();
+    return onVaultEvent('dictionary:changed', () => { void loadDictionary(true); });
+  }, []);
+
+  // Pre-warm the Deepgram streaming token the moment the user is signed in, so the FIRST
+  // realtime record doesn't pay a token network round-trip at click time (this was the
+  // "very 1st time it's slow" latency — the token is then cached ~1h). Best-effort/silent.
+  useEffect(() => {
+    if (!session) return;
+    void getDeepgramToken().catch(() => { /* falls back to lazy mint at record time */ });
+  }, [session]);
+
   // Extract task ID from URL and select it immediately (full details load via effect below)
   useEffect(() => {
     const path = location.pathname;
@@ -1557,6 +1594,40 @@ export default function App() {
       .slice(0, 25);
   };
 
+  // ── Dictionary (custom vocabulary) → transcription accuracy ─────────────────
+  // Merge the user's dictionary terms into the Deepgram keyterms (deduped, Deepgram caps at 50).
+  // Dictionary terms go FIRST: they're the user's explicit vocabulary and must not be starved
+  // out of the 50-slot cap by prompt-derived words when the dictionary is large.
+  const buildKeyterms = (rawPrompt: string): string[] => {
+    const seen = new Set<string>();
+    const out: string[] = [];
+    for (const t of [...dictionaryKeyterms(), ...extractDeepgramKeyterms(rawPrompt)]) {
+      const k = t.toLowerCase();
+      if (!t || seen.has(k)) continue;
+      seen.add(k); out.push(t);
+      if (out.length >= 50) break;
+    }
+    return out;
+  };
+  // Append the dictionary to a Gemini batch prompt so uploads spell names/terms right + apply corrections.
+  const withDictionaryPrompt = (rawPrompt: string): string => {
+    const terms = dictionaryKeyterms();
+    const corrections = dictionaryCorrections();
+    if (!terms.length && !corrections.length) return rawPrompt;
+    const parts = [rawPrompt?.trim() || ''];
+    if (terms.length) parts.push(`Custom vocabulary — spell these EXACTLY (names, emails, jargon): ${terms.join(', ')}.`);
+    if (corrections.length) parts.push(`Corrections — wherever you hear the left form, write the right one: ${corrections.map(c => `${c.from} → ${c.to}`).join('; ')}.`);
+    return parts.filter(Boolean).join('\n\n');
+  };
+  // Correct a NEWLY finalized transcript with the user's dictionary: exact known
+  // corrections (deterministic) + fuzzy ASR mis-transcriptions of dictionary terms
+  // (LLM, replace-only). Scales with the dictionary; non-fatal. Existing notes untouched.
+  const applyDictionaryCorrections = async (text: string): Promise<string> => {
+    const dict = dictionaryContext();
+    if (!dict.terms.length && !dict.corrections.length) return text;
+    try { return await correctTranscriptWithDictionary(text, dict); } catch { return text; }
+  };
+
   const startRealtimeBackupCapture = async () => {
     try {
       const stream = await getBrowserMicMediaStream();
@@ -1759,8 +1830,19 @@ export default function App() {
   };
 
   const startRecording = async () => {
+    // Re-entrancy guard: a start can be triggered from the record button, the tray
+    // menu, and the meeting-detection prompt — sometimes near-simultaneously, and the
+    // optimistic UI leaves a window where React state hasn't flipped yet. Without this,
+    // a second start locks the native recorder first, then every later call rejects with
+    // "Already recording in realtime mode" (the repeating realtime_recording_error).
+    // A synchronous ref latch is the only reliable gate across those async gaps.
+    if (isStartingRef.current || realtimeEngineActiveRef.current || isRecording) {
+      log.info('start_recording_ignored', { reason: 'already starting or active' });
+      return;
+    }
+    isStartingRef.current = true;
     // Free-tier gate: block before recording if the meeting quota is exhausted.
-    if (!requireMeetingQuota()) return;
+    if (!requireMeetingQuota()) { isStartingRef.current = false; return; }
     // When started from the meeting-detection prompt the mode is forced via a
     // ref, so we don't depend on setDesktopRecordingMode having propagated yet
     // (the main window may be backgrounded and its state updates throttled).
@@ -1825,22 +1907,43 @@ export default function App() {
         setRecordingTime(prev => prev + 1);
       }, 1000);
 
-      try {
-        // Mint a short-lived Deepgram token (cached) — the real key lives in
-        // Secrets Manager, never in the client bundle.
-        const apiKey = await getDeepgramToken();
-        await attachRealtimeTranscriptListener();
-        await startRealtimeRecording(apiKey, extractDeepgramKeyterms(prompt));
-        realtimeEngineActiveRef.current = true;
-      } catch (err: any) {
-        log.error('realtime_recording_error', { error: err instanceof Error ? err : undefined });
-        if (unlistenRef.current) { unlistenRef.current(); unlistenRef.current = null; }
-        realtimeEngineActiveRef.current = false;
-        // Roll back the optimistic UI.
-        if (timerRef.current) clearInterval(timerRef.current);
-        setIsRecording(false);
-        setIsPaused(false);
-        setError(err.message || 'Failed to start integrated real-time recording.');
+      // The cold first start can fail transiently (token mint, engine spin-up) or leave a
+      // half-open native session — which is what produced the single "1st time" error that
+      // then worked. Try twice: on the retry, clear any half-open session first so it starts
+      // clean. Only surface an error to the user if BOTH attempts fail.
+      let started = false;
+      for (let attempt = 0; attempt < 2 && !started; attempt++) {
+        try {
+          if (attempt > 0) {
+            try { await safeStopRealtimeRecording(); } catch { /* clear any half-open session */ }
+            await new Promise((r) => setTimeout(r, 400));
+          }
+          // Mint a short-lived Deepgram token (cached) — the real key lives in
+          // Secrets Manager, never in the client bundle.
+          const apiKey = await getDeepgramToken();
+          await attachRealtimeTranscriptListener();
+          await startRealtimeRecording(apiKey, buildKeyterms(prompt), transcriptionLanguageRef.current);
+          realtimeEngineActiveRef.current = true;
+          started = true;
+        } catch (err: any) {
+          // Tauri invoke rejections are often plain strings/objects, not Error — capture the
+          // raw reason so failures like a rejected Deepgram handshake are diagnosable.
+          const reason = String(err?.message ?? err);
+          if (attempt === 0) {
+            log.warn('realtime_recording_retry', { reason });
+            continue; // silent retry — don't scare the user on a recoverable cold start
+          }
+          log.error('realtime_recording_error', { error: err instanceof Error ? err : undefined, reason });
+          if (unlistenRef.current) { unlistenRef.current(); unlistenRef.current = null; }
+          realtimeEngineActiveRef.current = false;
+          // Roll back the optimistic UI.
+          if (timerRef.current) clearInterval(timerRef.current);
+          setIsRecording(false);
+          setIsPaused(false);
+          // Surface the ACTUAL reason in the panel (not a generic message) so a persistent
+          // failure (e.g. a rejected Deepgram handshake) is visible without the console.
+          setError(reason && reason !== 'undefined' ? `Recording couldn't start: ${reason}` : 'Failed to start integrated real-time recording.');
+        }
       }
     } else {
       // ── Browser Recording (microphone only via MediaRecorder) ──
@@ -1879,6 +1982,11 @@ export default function App() {
         setError('Could not access microphone. Please check permissions.');
       }
     }
+    // Start attempt settled (engine active, or rolled back on failure). Release the
+    // latch here — held across every await above so concurrent triggers can't slip
+    // through the optimistic-UI gap. Steady-state re-entry is then blocked by
+    // realtimeEngineActiveRef / isRecording.
+    isStartingRef.current = false;
   };
 
   // Serialize a recording-control operation behind any in-flight one. The lock
@@ -1976,7 +2084,7 @@ export default function App() {
               await attachRealtimeTranscriptListener();
             }
             if (!realtimeEngineActiveRef.current && !(await isRealtimeRecording())) {
-              await startRealtimeRecording(apiKey, extractDeepgramKeyterms(prompt));
+              await startRealtimeRecording(apiKey, buildKeyterms(prompt));
             }
             realtimeEngineActiveRef.current = true;
           }
@@ -2153,6 +2261,10 @@ export default function App() {
     resumeFromProgress?: ProcessingProgress
   ) => {
     if (!transcript.trim()) return;
+
+    // Correct this newly finalized realtime transcript with the user's dictionary (exact +
+    // fuzzy ASR mis-transcriptions) before summary/notes. Existing notes are untouched.
+    transcript = await applyDictionaryCorrections(transcript);
 
     try {
       setStatus('processing');
@@ -3262,6 +3374,11 @@ export default function App() {
       setChatMessages(prev => [...prev, agentPlaceholder]);
 
       const isSingleMeeting = !!selectedTask;
+      // LIVE RECORDING chat: while a meeting is being recorded, the home/all-meetings
+      // chat is scoped to ONLY that in-progress meeting's live transcript — not RAG
+      // across all past notes. (anarlog's "current session" pattern.) A meeting open
+      // in a tab (selectedTask) keeps its own single-meeting behavior.
+      const isLiveRecording = isRecording && !selectedTask;
       // Built from the paginated `history` (first page). For the ALL-MEETINGS chat we
       // replace this below with the COMPLETE meeting set (getAllTaskIds), so the agent
       // never thinks the user only has the 24 most-recent meetings.
@@ -3280,7 +3397,7 @@ export default function App() {
       // read/analyze/listing paths via getTaskById — so coverage is complete without
       // pulling every transcript up front.
       let fullMeta: import('./services/awsService').TaskMetadata[] = [];
-      if (!isSingleMeeting) {
+      if (!isSingleMeeting && !isLiveRecording) {
         const ALL_META_TTL_MS = 60_000;
         // W1: the full index is per-workspace — invalidate the cache when the active
         // workspace differs so a vault switch never shows the previous vault's meetings.
@@ -3319,7 +3436,49 @@ export default function App() {
       let responseCitations: Message['citations'] = undefined;
       let responseRetrievalMeta: Message['retrievalMeta'] = undefined;
 
-      if (isSingleMeeting) {
+      if (isLiveRecording) {
+        // --- Live recording: chat ONLY with the in-progress meeting transcript ---
+        // Re-read the live transcript fresh on each send (pull model) so the answer
+        // reflects everything said up to this moment, including the faded interim line.
+        const liveLines = realtimeTranscriptRef.current;
+        const interim = interimTranscriptRef.current.trim();
+        const liveText = [
+          ...liveLines,
+          interim ? `${interim}  …(still speaking)` : '',
+        ].filter(Boolean).join('\n');
+
+        const mm = Math.floor(recordingTime / 60);
+        const ss = recordingTime % 60;
+        const elapsedLabel = `${mm}:${ss.toString().padStart(2, '0')}`;
+
+        const liveSteps: AgentStep[] = [
+          { id: 'live', label: 'Reading live meeting transcript', status: 'pending' },
+          { id: 'respond', label: 'Generate response', status: 'pending' },
+        ];
+        updateAgentMessage(() => ({ agentStatus: 'planning', agentPlan: liveSteps }));
+        await new Promise(r => setTimeout(r, 120));
+        updateAgentMessage(() => ({ agentStatus: 'executing' }));
+
+        updateStep('live', 'running');
+        const lineCount = liveLines.length + (interim ? 1 : 0);
+        updateStep('live', 'done', lineCount ? `${lineCount} line${lineCount !== 1 ? 's' : ''} so far` : 'no speech yet');
+
+        updateStep('respond', 'running');
+        response = await chatWithLiveTranscript(liveText, userInput, msgHistory, {
+          title: 'Current recording (in progress)',
+          elapsedLabel,
+        });
+        updateStep('respond', 'done');
+
+        responseRetrievalMeta = {
+          scope: 'single',
+          confidence: 1,
+          selectedMeetingIds: [],
+          coveredMeetingsCount: 1,
+          totalMeetingsCount: 1,
+        };
+
+      } else if (isSingleMeeting) {
         // --- Single meeting: RAG retrieval + chatWithNotes ---
         const singleSteps: AgentStep[] = [
           { id: 'retrieve', label: 'Retrieve evidence', status: 'pending' },
@@ -4967,7 +5126,7 @@ export default function App() {
           await waitForFileActive(name);
 
           // Transcribe via File API (single call for entire file)
-          fullTranscription = await transcribeViaFileAPI(uri, currentFile.type || 'audio/mpeg', prompt, fileSourceRef.current);
+          fullTranscription = await transcribeViaFileAPI(uri, currentFile.type || 'audio/mpeg', withDictionaryPrompt(prompt), fileSourceRef.current);
 
           // Clean up uploaded file
           await deleteFromFileAPI(name);
@@ -5143,7 +5302,7 @@ export default function App() {
               toProcess.map(async ({ batch, originalIndex }) => {
                 await acquireBatchSlot();
                 try {
-                  const result = await processAudioBatch(batch, prompt, fileSourceRef.current);
+                  const result = await processAudioBatch(batch, withDictionaryPrompt(prompt), fileSourceRef.current);
                   results[originalIndex] = { ...results[originalIndex], status: 'completed', result: result.text };
                 } catch (err: any) {
                   if (err instanceof BlobReadError || err?.isBlobError) {
@@ -5282,6 +5441,10 @@ export default function App() {
       } catch (e) {
         log.warn('speaker_name_resolution_skipped', { error: e instanceof Error ? e : undefined });
       }
+
+      // Correct this NEWLY finalized transcript with the user's dictionary (exact + fuzzy
+      // ASR mis-transcriptions of dictionary terms). Only new transcripts — saved notes untouched.
+      fullTranscription = await applyDictionaryCorrections(fullTranscription);
 
       // ── Post-processing with visible milestones ──────────────────────────────
       setStatus('finalizing');
@@ -5699,6 +5862,8 @@ export default function App() {
                   nativeServerAvailable={nativeServerAvailable}
                   desktopRecordingMode={desktopRecordingMode}
                   setDesktopRecordingMode={setDesktopRecordingMode}
+                  transcriptionLanguage={transcriptionLanguage}
+                  setTranscriptionLanguage={setTranscriptionLanguage}
                   realtimeTranscript={realtimeTranscript}
                   interimTranscript={interimTranscript}
                   permissionsGranted={permissionsGranted}
@@ -5910,6 +6075,17 @@ export default function App() {
                   allTasks={history}
                   onSelectTask={(task) => setCurrentView('notes', task.id)}
                 />
+              </motion.div>
+            )}
+            {currentView === 'dictionary' && (
+              <motion.div
+                key="dictionary"
+                initial={{ opacity: 0 }}
+                animate={{ opacity: 1 }}
+                exit={{ opacity: 0 }}
+                className="h-full"
+              >
+                <DictionaryPage />
               </motion.div>
             )}
             {/* Settings now renders as a full-window overlay (see above), not here. */}

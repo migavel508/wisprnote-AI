@@ -15,6 +15,8 @@ import {
   Sparkles,
   Radio,
   Layers,
+  Languages,
+  Globe,
   Paperclip,
   History,
   LayoutGrid,
@@ -66,6 +68,8 @@ interface ProcessPageProps {
   nativeServerAvailable: boolean;
   desktopRecordingMode: RecordingMode;
   setDesktopRecordingMode: (mode: RecordingMode) => void;
+  transcriptionLanguage: string;
+  setTranscriptionLanguage: (lang: string) => void;
   realtimeTranscript: string[];
   interimTranscript: string;
   permissionsGranted: boolean;
@@ -147,6 +151,8 @@ export default function ProcessPage({
   nativeServerAvailable,
   desktopRecordingMode,
   setDesktopRecordingMode,
+  transcriptionLanguage,
+  setTranscriptionLanguage,
   realtimeTranscript,
   interimTranscript,
   permissionsGranted,
@@ -256,6 +262,17 @@ export default function ProcessPage({
     setIsChatOpen(true);
     setIsCommandBarOpen(true);
     setIsHistoryOpen(false);
+    onAskAnything?.();
+  };
+
+  // Ask the LIVE meeting. The inline command-bar chat is hidden while recording
+  // (the record panel takes its place), so route to the full-screen chat — it isn't
+  // gated by `isRecording` and renders the conversation. handleSendMessage detects the
+  // active recording and scopes the answer to the in-progress transcript only.
+  const submitLiveChat = () => {
+    if (!chatInput.trim()) return;
+    setIsHistoryOpen(false);
+    setFullScreen(true);
     onAskAnything?.();
   };
 
@@ -1022,6 +1039,28 @@ export default function ProcessPage({
                             </div>
                           )}
                         </div>
+
+                        {/* Ask the LIVE meeting — opens the full chat, scoped to the in-progress transcript */}
+                        <div className="flex-shrink-0 pt-2 -mx-5 px-5 border-t border-zinc-200/80 dark:border-app-border">
+                          <div className="flex items-center gap-2 px-3 py-2 rounded-full bg-zinc-50 dark:bg-app-panel border border-zinc-200 dark:border-app-border">
+                            <MessageSquare className="w-3.5 h-3.5 text-zinc-400 dark:text-zinc-500 flex-shrink-0" />
+                            <input
+                              value={chatInput}
+                              onChange={(e) => setChatInput?.(e.target.value)}
+                              onKeyDown={(e) => { if (e.key === 'Enter' && chatInput.trim()) { e.preventDefault(); submitLiveChat(); } }}
+                              placeholder="Ask about this meeting…"
+                              className="flex-1 bg-transparent outline-none text-[13px] text-zinc-800 dark:text-app-fg placeholder:text-zinc-400 dark:placeholder:text-zinc-500"
+                            />
+                            <button
+                              onClick={submitLiveChat}
+                              disabled={!chatInput.trim()}
+                              className="p-1.5 rounded-full bg-[#6f871a] text-white hover:opacity-90 disabled:opacity-40 transition-opacity flex-shrink-0"
+                              title="Ask the live meeting"
+                            >
+                              <ArrowUp className="w-3.5 h-3.5" />
+                            </button>
+                          </div>
+                        </div>
                       </div>
                       ) : (
                       /* Batch Recording */
@@ -1117,6 +1156,36 @@ export default function ProcessPage({
                               </div>
                             )}
 
+                            {/* Transcription language — realtime (Deepgram) only. English enables
+                                keyterm biasing + is most accurate; Multilingual adapts to mixed speech. */}
+                            {desktopRecordingMode === 'realtime' && (
+                              <div className="flex flex-col items-center gap-2">
+                                <div className="flex gap-0.5 bg-[#1a1a1a]/[0.04] dark:bg-app-panel rounded-lg p-0.5 ring-1 ring-transparent dark:ring-white/[0.06]">
+                                  <button
+                                    onClick={() => setTranscriptionLanguage('en')}
+                                    className={`flex items-center gap-1.5 px-3.5 py-[6px] rounded-md text-[12px] font-medium transition-all ${
+                                      transcriptionLanguage === 'en' ? 'bg-white dark:bg-app-chip text-zinc-900 dark:text-app-fg shadow-sm shadow-black/[0.04] dark:shadow-black/35' : 'text-zinc-500 dark:text-app-fg-subtle hover:text-zinc-800 dark:hover:text-app-fg-muted'
+                                    }`}
+                                  >
+                                    <Languages className="w-3 h-3" /> English
+                                  </button>
+                                  <button
+                                    onClick={() => setTranscriptionLanguage('multi')}
+                                    className={`flex items-center gap-1.5 px-3.5 py-[6px] rounded-md text-[12px] font-medium transition-all ${
+                                      transcriptionLanguage === 'multi' ? 'bg-white dark:bg-app-chip text-zinc-900 dark:text-app-fg shadow-sm shadow-black/[0.04] dark:shadow-black/35' : 'text-zinc-500 dark:text-app-fg-subtle hover:text-zinc-800 dark:hover:text-app-fg-muted'
+                                    }`}
+                                  >
+                                    <Globe className="w-3 h-3" /> Multilingual
+                                  </button>
+                                </div>
+                                <p className="text-[10px] text-zinc-400 dark:text-zinc-500 text-center max-w-[260px] leading-relaxed">
+                                  {transcriptionLanguage === 'en'
+                                    ? 'English — most accurate, with your Dictionary names & terms applied.'
+                                    : 'Multilingual — adapts to mixed / non-English speech (code-switching).'}
+                                </p>
+                              </div>
+                            )}
+
                             <button
                               onClick={startRecording}
                               className="group flex items-center gap-2.5 px-6 py-3 bg-[#1a1a1a] text-white text-[13px] font-medium rounded-full hover:bg-[#333] transition-all hover:scale-[1.02] active:scale-[0.98]"
@@ -1178,6 +1247,11 @@ export default function ProcessPage({
             <button onClick={() => setHistoryOpen((o) => !o)} className="ml-1 flex items-center gap-1.5 px-2 py-1.5 rounded-lg text-app-fg hover:bg-app-nav-hover-bg transition-colors">
               <History className="w-4 h-4" /><span className="text-[13px] font-medium">History</span><ChevronDown className={`w-3.5 h-3.5 transition-transform ${historyOpen ? 'rotate-180' : ''}`} />
             </button>
+            {isRecording && (
+              <span className="ml-2 flex items-center gap-1.5 px-2.5 py-1 rounded-full bg-red-50 dark:bg-red-500/10 text-red-600/90 dark:text-red-400 text-[11px] font-medium">
+                <span className="w-1.5 h-1.5 rounded-full bg-red-500 animate-pulse" /> Talking to your live meeting
+              </span>
+            )}
             {historyOpen && (
               <div className="absolute left-12 top-full mt-1.5 z-20 w-[340px] max-h-[60vh] overflow-y-auto bg-white dark:bg-app-raised rounded-2xl border border-zinc-200 dark:border-app-border shadow-[0_16px_44px_-12px_rgba(0,0,0,0.28)] p-1.5">
                 {renderThreadGroups()}
