@@ -54,9 +54,14 @@ export const aiProxyFetch: typeof globalThis.fetch = (async (
     typeof init.body === 'string' ? init.body :
     JSON.stringify(init.body);
 
+  // Usage analytics: forward the caller's feature tag (set via the X-Usage-Feature header on
+  // the original init) so the proxy attributes this call's tokens to the right product function.
+  let feature = 'other';
+  try { feature = new Headers(init.headers as any).get('X-Usage-Feature') || 'other'; } catch { /* no headers */ }
+
   return baseFetch(`${API_BASE}/ai/proxy`, {
     method: 'POST',
-    headers: { 'Content-Type': 'application/json', Authorization: token },
+    headers: { 'Content-Type': 'application/json', Authorization: token, 'X-Usage-Feature': feature },
     body: JSON.stringify({ url, method, body }),
     signal: init.signal ?? undefined,
   });

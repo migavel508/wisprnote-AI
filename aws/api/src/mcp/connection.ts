@@ -34,6 +34,12 @@ export async function resolveMcpConnection(userId: string, workspaceId: string, 
   const token = ((cred?.token as any)?.access_token) ?? '';
   // OAuth connectors need a token; no-auth custom servers connect with an empty token.
   if (!token && server.auth !== 'none') return null;
+  // SLACK: OAuth runs against Slack (issues the token above), but Slack's HOSTED MCP is gated to
+  // Slack-approved clients, so TOOL calls go to our own Web-API-backed MCP bridge instead. The agent
+  // stays fully generic — only the endpoint is swapped here (connector-level, not per-tool).
+  if (connector === 'slack' && process.env.SLACK_BRIDGE_URL) {
+    return { connector, server: { ...server, url: process.env.SLACK_BRIDGE_URL, auth: 'oauth2.0' }, token };
+  }
   return { connector, server, token };
 }
 

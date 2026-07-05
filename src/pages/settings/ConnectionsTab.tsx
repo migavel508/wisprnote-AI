@@ -40,7 +40,12 @@ function ConnectorCard({
   // Connect asks for the MCP server URL. Only non-MCP / feature-off cards stay "coming soon".
   const actionable = enabled && (c.status === 'live' || available === true);
   const isLocal = c.via === 'local';
-  const canConfigure = enabled && !isLocal && !actionable;     // BYO-endpoint path
+  // Named catalog connectors (Slack, Google, …) are enabled by the OPERATOR: the MCP endpoint +
+  // OAuth client live in Secrets, so when configured `available` flips true and Connect runs the
+  // browser OAuth flow — the user never pastes an MCP URL or a token. We deliberately do NOT offer
+  // the per-user "paste URL + tokens" form on these cards anymore; a genuinely arbitrary server is
+  // added through the separate "Add custom connector" flow instead.
+  const canConfigure = false;
   const showConnect = actionable || canConfigure;
 
   return (

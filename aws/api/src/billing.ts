@@ -4,7 +4,7 @@ import { query, queryOne } from './db';
 import { ok, badRequest } from './response';
 import { getSecrets } from './secrets';
 import { planLabel } from './plans';
-import { getMonthlyTokenUsage, getMeetingUsage, getBatchHoursUsage } from './usage';
+import { getMonthlyTokenUsage, getMonthlyUsageByFeature, getMeetingUsage, getBatchHoursUsage } from './usage';
 
 /**
  * Paddle billing: webhook ingestion + subscription status.
@@ -247,15 +247,16 @@ export async function handleBilling(
   // token usage per model + meeting and batch-hour consumption vs plan limits.
   if (method === 'GET' && segments[1] === 'usage') {
     const plan = await getUserPlan(userId, email);
-    const [tokens, meeting, batch] = await Promise.all([
+    const [tokens, byFeature, meeting, batch] = await Promise.all([
       getMonthlyTokenUsage(userId),
+      getMonthlyUsageByFeature(userId),
       getMeetingUsage(userId, plan),
       getBatchHoursUsage(userId, plan),
     ]);
     return ok({
       plan,
       planLabel: planLabel(plan),
-      tokens,
+      tokens: { ...tokens, byFeature },
       meetings: {
         used: meeting.used,
         limit: meeting.limit,

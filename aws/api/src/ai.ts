@@ -9,7 +9,7 @@ import {
   usageMetrics,
   audioMetrics,
 } from './observability';
-import { recordTokenUsage, recordAudioUsage } from './usage';
+import { recordTokenUsage, recordAudioUsage, normalizeFeature } from './usage';
 import { handleChatAgent } from './chatAgent';
 import { MODELS } from './models/registry';
 import { runAgentTurn, providerFor } from './chat/agentTurn';
@@ -64,6 +64,11 @@ async function routeAI(
 
   let body: any = {};
   try { body = JSON.parse(event.body || '{}'); } catch { return badRequest('Invalid JSON body'); }
+
+  // FEATURE tag for usage analytics: the client sets X-Usage-Feature (or a body.feature) so
+  // every metered call is attributed to the product function that made it (meeting, chat, …).
+  const h = event.headers || {};
+  const feature = normalizeFeature(h['x-usage-feature'] || h['X-Usage-Feature'] || body.feature);
 
   const secrets = await getSecrets();
 
@@ -127,7 +132,7 @@ async function routeAI(
       }
     );
     // Meter the audio processed (per user/model) for billing & analytics.
-    await recordAudioUsage(userId, 'deepgram', MODELS.transcription.primary, Number(out.metrics?.audio_seconds) || 0);
+    await recordAudioUsage(userId, 'deepgram', MODELS.transcription.primary, Number(out.metrics?.audio_seconds) || 0, 'transcription');
     return { statusCode: out.status, headers: jsonHeaders(), body: out.body };
   }
 
@@ -154,7 +159,7 @@ async function routeAI(
       },
       async () => ({ status: 200, output: `[${seconds.toFixed(1)}s transcribed]`, metrics: audioMetrics(seconds, words) }),
     );
-    await recordAudioUsage(userId, 'deepgram', model, seconds);
+    await recordAudioUsage(userId, 'deepgram', model, seconds, 'transcription');
     return { statusCode: 200, headers: jsonHeaders(), body: JSON.stringify({ ok: true }) };
   }
 
@@ -184,6 +189,10 @@ async function routeAI(
         const seen = new Set(tools.map((t: any) => t?.name));
         for (const t of built) if (!seen.has(t.name)) { tools.push(t); seen.add(t.name); }
       }
+      // TOOL-USE RESILIENCE + HONESTY — appended to EVERY agent turn's system prompt, connector-
+      // agnostic. A single tool error must NOT end the task or produce a false "done": the model
+      // must adapt (the error often names the correct tool / valid args) and report truthfully.
+      const system = `${body.system ? body.system + '\n\n' : ''}${AGENT_RESILIENCE_DIRECTIVE}`;
       let turn: Awaited<ReturnType<typeof runAgentTurn>> | undefined;
       await traceAI(
         { name: `${provider}.${model}`, kind: 'llm', provider, model, userId, input: { system: body.system, messages: body.messages, tools: tools.map((t: any) => t?.name) } },
@@ -191,7 +200,7 @@ async function routeAI(
           turn = await runAgentTurn({
             model,
             provider: body.provider,
-            system: body.system,
+            system,
             messages: body.messages,
             tools,
             maxOutputTokens: body.maxOutputTokens,
@@ -203,7 +212,7 @@ async function routeAI(
           return { status: 200, output: turn.text || `[${turn.toolCalls.length} tool call(s)]`, metrics };
         }
       );
-      void recordTokenUsage(userId, provider, model, { input_tokens: turn?.usage?.input, output_tokens: turn?.usage?.output } as any).catch(() => {});
+      void recordTokenUsage(userId, provider, model, { input_tokens: turn?.usage?.input, output_tokens: turn?.usage?.output } as any, feature !== 'other' ? feature : 'chat').catch(() => {});
       return { statusCode: 200, headers: jsonHeaders(), body: JSON.stringify(turn) };
     } catch (e: any) {
       return serverError(`agent-turn failed: ${String(e?.message || e).slice(0, 300)}`);
@@ -307,7 +316,7 @@ async function routeAI(
     );
     // Persist token usage to our DB (per user/provider/model) for billing &
     // analytics. Fire-and-forget so it never adds latency to the response.
-    void recordTokenUsage(userId, provider, model, out.metrics ?? {}).catch(() => {});
+    void recordTokenUsage(userId, provider, model, out.metrics ?? {}, feature).catch(() => {});
     return { statusCode: out.status, headers: jsonHeaders(), body: out.body };
   }
 
@@ -353,6 +362,19 @@ function tenantScopeTurbopuffer(rawBody: string | undefined, userId: string, enf
  * (honoring Retry-After) turns a user-facing failure into a brief delay. Caps
  * total added latency so it never hangs the request.
  */
+/**
+ * Appended to every agentic chat turn's system prompt. Makes the loop resilient + honest across ALL
+ * connectors (no per-tool rules): recover from a tool error by adapting, and never claim success for
+ * an action that failed or wasn't executed. Mirrors the reference agent's error-as-feedback loop.
+ */
+const AGENT_RESILIENCE_DIRECTIVE = [
+  'TOOL USE — RESILIENCE & HONESTY (applies to every tool, every connector):',
+  '• A tool error is NOT the end of the task — it is feedback. Read it: it usually names the correct tool or the valid arguments (e.g. "the server currently offers: …"). Immediately RETRY with the corrected tool name / arguments. If one tool cannot do it, try an alternative tool or a different approach before giving up.',
+  '• NEVER say a task is "done", "completed", or "posted" if its tool call errored, was blocked, needed approval, or was never successfully executed. That is a false claim. Instead, state exactly what succeeded, what failed and why, and either retry or tell the user precisely what you need from them.',
+  '• An action that changes a connected tool (send a message, create/edit a ticket, etc.) is only complete once its tool call actually returns success. A request for approval is not completion.',
+  '• Keep working the task across as many tool calls as it takes; only stop when you have genuinely finished it or have a specific blocker to report.',
+].join('\n');
+
 const RETRYABLE = new Set([429, 502, 503, 504]);
 async function fetchWithRetry(url: string, init: any, maxRetries = 2): Promise<Response> {
   let attempt = 0;

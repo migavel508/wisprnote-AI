@@ -152,6 +152,27 @@ export async function reconcileSpaces(userId: string, defaultWorkspaceId: string
   }
 }
 
+/**
+ * MEMBERSHIP GATE (Brain P0) — can this requester READ this space's brain? True if they OWN the
+ * space or are a member (`space_members`, by email). This is what makes the brain SHARED: every
+ * member of a space sees the same brain, while a non-member is denied. Ownership stays provenance
+ * ("who brought an item"); membership decides visibility. ACCOUNT_SCOPE / no space = not a space
+ * view, allowed (those paths are gated by workspace ownership elsewhere).
+ */
+export async function canAccessSpace(userId: string, userEmail: string | null, spaceId?: string | null): Promise<boolean> {
+  if (!spaceId || spaceId === ACCOUNT_SCOPE) return true;
+  await ensureSpacesSchema();
+  const owned = await queryOne<{ id: string }>('SELECT id FROM spaces WHERE id=$1 AND user_id=$2', [spaceId, userId]).catch(() => null);
+  if (owned) return true;
+  if (userEmail) {
+    const m = await queryOne<{ email: string }>(
+      'SELECT email FROM space_members WHERE space_id=$1 AND lower(email)=lower($2)', [spaceId, userEmail],
+    ).catch(() => null);
+    if (m) return true;
+  }
+  return false;
+}
+
 /** Returns the candidate space id only if it belongs to this user AND workspace, else null. */
 export async function validateOwnedSpaceId(userId: string, workspaceId: string, candidate?: string | null): Promise<string | null> {
   if (!candidate) return null;

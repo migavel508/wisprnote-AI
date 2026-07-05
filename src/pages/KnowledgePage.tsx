@@ -42,7 +42,8 @@ import { buildFingerprint, loadCachedArtifact, saveCachedArtifact } from '../lib
 import { useTheme } from '../theme/ThemeProvider';
 import { getWorkspaces } from '../services/workspaceService';
 import { getWorkspaceKnowledgeGraph, getKnowledgeGraphEdges } from '../services/awsService';
-import { isServerKgEnabled, buildArtifactFromServerEdges } from '../lib/serverKgGraph';
+import { isServerKgEnabled, buildArtifactFromServerEdges, isBrainGraphEnabled, buildArtifactFromBrainGraph } from '../lib/serverKgGraph';
+import { getBrainGraph } from '../services/brainService';
 
 /**
  * Lightweight collision force (no extra dependency). Each tick it relaxes
@@ -191,6 +192,9 @@ export default function KnowledgePage({
   const lastBuildKeyRef = useRef('');
   const kgDataKeyRef = useRef(kgDataKey);
   kgDataKeyRef.current = kgDataKey;
+  // Current workspace scope, read inside the render effect (whose closure would otherwise be stale).
+  const selectedWsIdRef = useRef(selectedWsId);
+  selectedWsIdRef.current = selectedWsId;
 
   // Clear the artifact when a rebuild is initiated (kgBuilt goes false)
   useEffect(() => {
@@ -220,6 +224,22 @@ export default function KnowledgePage({
       const fingerprint = buildFingerprint(kgData.map((m: any) => m.meetingId));
 
       try {
+        // UNIFIED brain-graph path (opt-in, VITE_BRAIN_GRAPH=1): draw the meeting graph from the SAME
+        // `brain_edge` data as the brain map — ONE graph, retiring the legacy `kg_edges` dependency.
+        // Needs a workspace scope (the brain graph is workspace-scoped); falls through when "All
+        // meetings" is selected or the fetch fails, so nothing breaks.
+        const brainWs = selectedWsIdRef.current;
+        if (isBrainGraphEnabled() && brainWs) {
+          const graph = await getBrainGraph(brainWs).catch(() => null);
+          if (graph && graph.nodes.length && !cancelled && snapshotKey === kgDataKeyRef.current) {
+            const artifact = buildArtifactFromBrainGraph(kgData as MeetingRecord[], graph);
+            setKgBuildArtifact(artifact);
+            lastBuildKeyRef.current = snapshotKey;
+            log.info('kg_brain_render', { meetings: kgData.length, links: graph.links.length });
+            return;
+          }
+        }
+
         // Server-side render path (opt-in, VITE_SERVER_KG_GRAPH=1): use the
         // precomputed edges from the cloud pipeline — ZERO client embedding/LLM
         // work. Falls through to the client pipeline below if unavailable, so

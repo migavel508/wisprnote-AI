@@ -40,33 +40,39 @@ async function tpFetch(path: string, body: unknown, timeoutMs = 8000): Promise<a
   }
 }
 
-export interface ItemVectorRow { id: string; vector: number[]; user_id: string; workspace_id: string; source: string }
+// A row may be a whole ITEM (id = knowledge_item.id) or a DERIVED MEMORY UNIT (Phase 3: a decision /
+// action item / topic — id = `${parentItemId}~<type><idx>`). `unit_type` distinguishes them and
+// `parent_id` maps a unit back to its knowledge_item so retrieval resolves to a real source. Both
+// default to the whole-item case ('item' / self) so existing rows keep working.
+export interface ItemVectorRow { id: string; vector: number[]; user_id: string; workspace_id: string; source: string; unit_type?: string; parent_id?: string }
 
-/** Upsert knowledge_item vectors. Idempotent by id (= knowledge_item.id). */
+/** Upsert item/unit vectors. Idempotent by id. */
 export async function upsertItemVectors(rows: ItemVectorRow[]): Promise<boolean> {
   if (rows.length === 0) return true;
   const res = await tpFetch('', {
-    upsert_rows: rows.map((r) => ({ id: r.id, vector: r.vector, user_id: r.user_id, workspace_id: r.workspace_id, source: r.source })),
+    upsert_rows: rows.map((r) => ({ id: r.id, vector: r.vector, user_id: r.user_id, workspace_id: r.workspace_id, source: r.source, unit_type: r.unit_type ?? 'item', parent_id: r.parent_id ?? r.id })),
     distance_metric: 'cosine_distance',
-    schema: { user_id: { type: 'string' }, workspace_id: { type: 'string' }, source: { type: 'string' } },
+    schema: { user_id: { type: 'string' }, workspace_id: { type: 'string' }, source: { type: 'string' }, unit_type: { type: 'string' }, parent_id: { type: 'string' } },
   }, 15000);
   return res != null;
 }
 
-export interface ItemHit { id: string; source: string; similarity: number }
+export interface ItemHit { id: string; source: string; similarity: number; unit_type?: string; parent_id?: string }
 
 /** Top-K nearest knowledge_items to `vector` within (user, workspace). null on failure.
  *  `sources` restricts the search to specific sources (e.g. ['jira','github']) — essential
  *  for candidate generation, since meetings cluster so tightly they'd otherwise fill every
  *  top-K slot and crowd out the cross-source work items we actually want. */
-export async function queryNearestItems(userId: string, workspaceId: string, vector: number[], k: number, sources?: string[]): Promise<ItemHit[] | null> {
+export async function queryNearestItems(userId: string, workspaceId: string, vector: number[], k: number, sources?: string[], unitTypes?: string[]): Promise<ItemHit[] | null> {
   const filters: any[] = [['user_id', 'Eq', userId], ['workspace_id', 'Eq', workspaceId]];
   if (sources?.length) filters.push(['source', 'In', sources]);
+  // Restrict which granularities to search (e.g. exclude 'chunk' to A/B the chunk contribution).
+  if (unitTypes?.length) filters.push(['unit_type', 'In', unitTypes]);
   const res = await tpFetch('/query', {
     rank_by: ['vector', 'ANN', vector],
     top_k: k,
     filters: ['And', filters],
-    include_attributes: ['source'],
+    include_attributes: ['source', 'unit_type', 'parent_id'],
   });
   if (res == null) return null;
   const rows: any[] = Array.isArray(res.rows) ? res.rows : Array.isArray(res) ? res : [];
@@ -75,7 +81,7 @@ export async function queryNearestItems(userId: string, workspaceId: string, vec
     const id = r.id ?? r.ID;
     if (id == null) continue;
     const dist = typeof r.$dist === 'number' ? r.$dist : typeof r.dist === 'number' ? r.dist : undefined;
-    out.push({ id: String(id), source: r.source ?? '', similarity: dist == null ? 0 : Math.max(0, 1 - dist) });
+    out.push({ id: String(id), source: r.source ?? '', similarity: dist == null ? 0 : Math.max(0, 1 - dist), unit_type: r.unit_type ?? 'item', parent_id: r.parent_id != null ? String(r.parent_id) : String(id) });
   }
   return out;
 }

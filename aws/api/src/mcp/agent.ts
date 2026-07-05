@@ -3,8 +3,9 @@ import { MODELS } from '../models/registry';
 import { mcpListTools, mcpCallTool } from './client';
 import { connectedConnectors, resolveMcpConnection } from './connection';
 
-// Connectors whose MCP tools we expose to the agent. Add an id here once it's connectable.
-const AGENT_CONNECTORS = new Set(['jira', 'github']);
+// NOTE: we no longer gate agent tools to a hard-coded connector allowlist. Like the reference
+// (Claude Code), EVERY connected MCP server's tools are exposed to the agent — resolveMcpConnection
+// returns null for anything not actually connectable (local/unconfigured), so it self-filters.
 
 /**
  * Generic, provider-agnostic MCP tool-use agent — the Claude-Code architecture for
@@ -100,7 +101,7 @@ async function buildRegistry(userId: string, workspaceId: string, localTools: Ag
 
   let jiraSiteUrl: string | undefined;
   // Discover tools across EVERY connected connector in the workspace (Jira, GitHub, …).
-  const connectors = (await connectedConnectors(userId, workspaceId)).filter((c) => AGENT_CONNECTORS.has(c));
+  const connectors = await connectedConnectors(userId, workspaceId);
   for (const connector of connectors) {
     const conn = await resolveMcpConnection(userId, workspaceId, connector).catch(() => null);
     if (!conn) continue;

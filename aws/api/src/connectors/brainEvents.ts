@@ -77,20 +77,24 @@ export async function getEvents(userId: string, workspaceId: string, limit = 40,
   // space_id alone (user-filtered, so still tenant-safe); at the workspace root (no space, or
   // space==workspace) scope by workspace_id. DEDUP collapses the same transition that was ingested
   // under multiple spaces/workspace_ids so each change shows ONCE.
+  // SPACE view (Brain P0): scope by space_id ALONE → the activity feed is SHARED across the space's
+  // members (space_id is globally unique; membership gated upstream). Root view: owner-scoped.
   const bySpace = !!spaceId && spaceId !== workspaceId;
-  const scopeClause = bySpace ? 'e.space_id=$2' : 'e.workspace_id=$2';
-  const scopeVal = bySpace ? spaceId : workspaceId;
+  const params: any[] = bySpace ? [spaceId] : [userId, workspaceId];
+  const scope = bySpace ? 'e.space_id=$1' : 'e.user_id=$1 AND e.workspace_id=$2';
+  params.push(folderId ?? null);
+  const f = params.length;
   return query<BrainEventRow>(
     `SELECT d.kind, d.source, d.source_id, d.actor, d.from_state, d.to_state, d.title, d.occurred_at FROM (
        SELECT DISTINCT ON (e.source, e.source_id, e.kind, e.to_state, e.occurred_at)
               e.kind, e.source, e.source_id, e.actor, e.from_state, e.to_state, e.title, e.occurred_at, e.created_at
          FROM brain_event e
          LEFT JOIN knowledge_item ki ON ki.id = e.item_id
-        WHERE e.user_id=$1 AND ${scopeClause}
-          AND ($3::uuid IS NULL OR ki.folder_id=$3)
+        WHERE ${scope}
+          AND ($${f}::uuid IS NULL OR ki.folder_id=$${f})
         ORDER BY e.source, e.source_id, e.kind, e.to_state, e.occurred_at, e.created_at DESC
      ) d
      ORDER BY d.occurred_at DESC NULLS LAST, d.created_at DESC LIMIT ${limit}`,
-    [userId, scopeVal, folderId ?? null],
+    params,
   ).catch(() => []);
 }

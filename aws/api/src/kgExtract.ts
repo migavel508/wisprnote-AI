@@ -1,5 +1,6 @@
 import { getSecrets } from './secrets';
 import { MODELS, chain } from './models/registry';
+import { recordProviderUsage } from './usage';
 
 /**
  * Server-side knowledge-graph extraction.
@@ -111,7 +112,7 @@ function sanitize(parsed: any): KGResult {
 }
 
 /** One Gemini generateContent call returning raw text, with retry on 429/503. */
-async function generate(apiKey: string, model: string, prompt: string): Promise<string | null> {
+async function generate(apiKey: string, model: string, prompt: string, userId?: string): Promise<string | null> {
   const MAX_RETRIES = 3;
   for (let attempt = 0; attempt <= MAX_RETRIES; attempt++) {
     const resp = await fetch(
@@ -127,6 +128,7 @@ async function generate(apiKey: string, model: string, prompt: string): Promise<
     );
     if (resp.ok) {
       const data: any = await resp.json();
+      if (userId) void recordProviderUsage(userId, 'knowledge-graph', 'gemini', model, data).catch(() => {});
       return data.candidates?.[0]?.content?.parts?.[0]?.text || '{}';
     }
     if (resp.status !== 503 && resp.status !== 429) return null;
@@ -146,7 +148,7 @@ async function generate(apiKey: string, model: string, prompt: string): Promise<
  * the caller knows to retry it on a later sweep rather than persisting a blank.
  * Never throws — a single bad meeting can't break a sweep.
  */
-export async function extractKnowledgeGraph(title: string, transcription: string): Promise<KGResult | null> {
+export async function extractKnowledgeGraph(title: string, transcription: string, userId?: string): Promise<KGResult | null> {
   const text = (transcription || '').trim();
   // Too short to ever yield anything — terminal "empty", safe to persist.
   if (text.length < 50) return EMPTY;
@@ -161,7 +163,7 @@ export async function extractKnowledgeGraph(title: string, transcription: string
   let result = EMPTY;
   let anySuccess = false;
   for (const model of models) {
-    const raw = await generate(GEMINI_API_KEY, model, prompt);
+    const raw = await generate(GEMINI_API_KEY, model, prompt, userId);
     if (raw == null) continue;
     anySuccess = true;
     result = sanitize(parseLoose(raw));
@@ -182,7 +184,7 @@ Return: {"topics":[{"name":"Topic Name","summary":"What was discussed","status":
 
 Meeting: ${title}
 Text: ${cleanTranscript(text, 4000)}`;
-    const raw = await generate(GEMINI_API_KEY, MODELS.kgExtract.primary, retryPrompt);
+    const raw = await generate(GEMINI_API_KEY, MODELS.kgExtract.primary, retryPrompt, userId);
     if (raw != null) {
       const retry = sanitize(parseLoose(raw));
       if (retry.topics.length > 0) result = retry;

@@ -7,6 +7,8 @@ import { jiraMeta, jiraReadForChat, jiraRecentActivity, type JiraActionProposal,
 import { resolveProjectKey } from './connectors/routing';
 import { runWorkspaceMcpAgent, type AgentTool } from './mcp/agent';
 import { semanticSearchItems, expandWithNeighbours } from './connectors/embed';
+import { connectedConnectors } from './mcp/connection';
+import { recordProviderUsage } from './usage';
 
 /**
  * SERVER-SIDE chat agent (Tier-0 architecture).
@@ -229,7 +231,7 @@ function card(row: any): string {
 }
 
 // ── Provider synthesis (server-side; keys from Secrets Manager) ──────────────
-async function synthesize(model: 'gemini' | 'claude', system: string, user: string): Promise<string> {
+async function synthesize(model: 'gemini' | 'claude', system: string, user: string, userId?: string): Promise<string> {
   const secrets = await getSecrets();
   if (model === 'claude' && secrets.ANTHROPIC_API_KEY) {
     const r = await fetch('https://api.anthropic.com/v1/messages', {
@@ -238,7 +240,10 @@ async function synthesize(model: 'gemini' | 'claude', system: string, user: stri
       body: JSON.stringify({ model: MODELS.chatClaude.primary, max_tokens: 1800, system, messages: [{ role: 'user', content: user }] }),
     });
     const d: any = await r.json();
-    if (r.ok) return (d.content ?? []).filter((b: any) => b.type === 'text').map((b: any) => b.text).join('').trim();
+    if (r.ok) {
+      if (userId) void recordProviderUsage(userId, 'chat', 'anthropic', MODELS.chatClaude.primary, d).catch(() => {});
+      return (d.content ?? []).filter((b: any) => b.type === 'text').map((b: any) => b.text).join('').trim();
+    }
     // fall through to Gemini on Anthropic failure
   }
   if (!secrets.GEMINI_API_KEY) throw new Error('No synthesis model configured');
@@ -249,6 +254,7 @@ async function synthesize(model: 'gemini' | 'claude', system: string, user: stri
   });
   const d: any = await r.json();
   if (!r.ok) throw new Error(`Gemini ${r.status}`);
+  if (userId) void recordProviderUsage(userId, 'chat', 'gemini', MODELS.chatGemini.primary, d).catch(() => {});
   return (d.candidates?.[0]?.content?.parts ?? []).map((p: any) => p?.text ?? '').join('').trim();
 }
 
@@ -262,6 +268,23 @@ function looksLikeJiraAction(q: string): boolean { return ACTION_VERB.test(q) &&
 function looksLikeConnectorWrite(q: string): boolean {
   return /\b(create|add|update|edit|make|write|log|link|publish|post|attach)\b/i.test(q)
     && /\b(confluence|page|pages|wiki|space|worklog|work log|log\s*time|time\s*log|link|links|relate|related|compass|component|components|field|teamwork graph)\b/i.test(q);
+}
+
+// GENERIC connector action/target detection — NOT Jira/Confluence-specific. Any messaging/action
+// verb + any tool target routes the query to the MCP agent (which now holds EVERY connected
+// connector's tools), instead of falling through to meeting RAG. This is what lets "send a Slack
+// message", "email the team", "add a calendar event", etc. reach the connector that can do it —
+// the reference's model of "give the agent all tools and let it act". Over-routing is safe: the
+// agent also has search_meetings + search_brain, so it still answers plain recall questions.
+const GENERIC_ACTION = /\b(send|sent|post|posted|message|dm|notify|share|ping|remind|reply|email|e-?mail|mail|schedule|invite|draft|create|add|update|comment)\b/i;
+const CONNECTOR_TARGET = /\b(slack|channel|channels|thread|dm|gmail|email|e-?mail|mail|inbox|calendar|event|events|invite|drive|doc|docs|file|files|notion|linear|asana|trello|page|confluence|github|repo|repos|pr|prs|jira|ticket|tickets|issue|issues)\b/i;
+/** Does the query name one of THIS workspace's actually-connected connectors? (handles any id, incl. custom-*). */
+function mentionsConnectedConnector(q: string, connected: string[]): boolean {
+  const lc = q.toLowerCase();
+  return connected.some((id) => {
+    const bare = id.replace(/^custom-/, '').replace(/[^a-z0-9]+/gi, ' ').trim();
+    return bare.length >= 3 && lc.includes(bare.split(' ')[0]);
+  });
 }
 
 interface ProposeResult { proposal: JiraActionProposal; reply: string; meta: any; }
@@ -291,6 +314,7 @@ Rules: isAction=false if the user is just asking a question (not requesting a ch
     });
     const d: any = await r.json();
     if (!r.ok) return null;
+    void recordProviderUsage(userId, 'chat', 'gemini', MODELS.chatGemini.primary, d).catch(() => {});
     const text = (d.candidates?.[0]?.content?.parts ?? []).map((p: any) => p?.text ?? '').join('').trim();
     const parsed = JSON.parse(text);
     if (!parsed?.isAction || !parsed?.operation) return null;
@@ -357,7 +381,7 @@ export async function handleChatAgent(userId: string, raw: any): Promise<APIGate
       const todayStr = new Date().toLocaleDateString('en-US', { year: 'numeric', month: 'long', day: 'numeric' });
       const sys = `Today is ${todayStr}. Answer the user's question using ONLY the Jira change activity below. Each issue line includes its URL — render the issue key as a markdown link [KEY](url), never a bare URL. State exactly which issue moved from what to what and when; if nothing matches, say so. Never invent changes.\n\n${SECURITY_CLAUSE}`;
       try {
-        const out = await synthesize(model, sys, `Jira change activity:\n${activity}\n\nQuestion: ${q}`);
+        const out = await synthesize(model, sys, `Jira change activity:\n${activity}\n\nQuestion: ${q}`, userId);
         return respond(200, { answer: out, sources: ['jira'], meetings: [], scope: 'workspace' });
       } catch { /* fall through to the agent */ }
     }
@@ -367,7 +391,17 @@ export async function handleChatAgent(userId: string, raw: any): Promise<APIGate
   //    architecture). Unified: it also gets a search_meetings tool so it can connect
   //    Jira issues to what was discussed. Honors the model selector (Claude/Gemini).
   //    Falls through to the evidence path if it can't run. ──
-  if (body.scope === 'workspace' && body.workspaceId && (looksLikeJiraRead(q) || looksLikeConnectorWrite(q))) {
+  // Route to the connector agent for ANY connector/action query — not just Jira/GitHub keywords.
+  // Signals: the existing Jira/GitHub read/write matchers, a generic action verb + tool target, or
+  // an explicit mention of one of THIS workspace's connected connectors. The agent has every
+  // connected server's tools, so it can search + act across N connectors like the reference.
+  const connectedIds = (body.scope === 'workspace' && body.workspaceId)
+    ? await connectedConnectors(userId, body.workspaceId).catch(() => [])
+    : [];
+  const genericAction = GENERIC_ACTION.test(q) && CONNECTOR_TARGET.test(q);
+  const namesConnector = mentionsConnectedConnector(q, connectedIds);
+  if (body.scope === 'workspace' && body.workspaceId
+      && (looksLikeJiraRead(q) || looksLikeConnectorWrite(q) || genericAction || namesConnector)) {
     const wsId = body.workspaceId;
     const searchMeetings: AgentTool = {
       def: {
@@ -520,7 +554,7 @@ export async function handleChatAgent(userId: string, raw: any): Promise<APIGate
   try {
     const out = await traceAI(
       { name: `chat-agent.${model}`, provider: model === 'claude' ? 'anthropic' : 'gemini', userId, input: q, metadata: { scope: body.scope ?? 'all', meetings: meetingsUsed.length, dateLabel: dateRange?.label, offTrack } },
-      async () => ({ status: 200, output: await synthesize(model, system, userMsg) }),
+      async () => ({ status: 200, output: await synthesize(model, system, userMsg, userId) }),
     );
     return respond(200, { answer: out.output, meetings: meetingsUsed, sources: [...sourcesUsed], scope: body.scope ?? 'all', dateLabel: dateRange?.label });
   } catch (e) {

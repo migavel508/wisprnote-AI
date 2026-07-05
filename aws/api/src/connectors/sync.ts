@@ -34,7 +34,15 @@ export async function upsertItem(userId: string, workspaceId: string, spaceId: s
      ON CONFLICT (user_id, workspace_id, space_id, source, source_id, type) DO UPDATE SET
        title=EXCLUDED.title, body=EXCLUDED.body, status=EXCLUDED.status, people=EXCLUDED.people,
        links=EXCLUDED.links, raw=EXCLUDED.raw, occurred_at=EXCLUDED.occurred_at,
-       folder_id=COALESCE(EXCLUDED.folder_id, knowledge_item.folder_id), synced_at=NOW()
+       folder_id=COALESCE(EXCLUDED.folder_id, knowledge_item.folder_id),
+       -- COST (Memory-OS P2): only bump synced_at when the item's CONTENT actually changed. A 15-min
+       -- re-sync that re-pulls an unchanged issue no longer moves synced_at, so nothing downstream
+       -- (embed, link, threads) re-processes it. This is the root cause of the recurring re-embed cost.
+       synced_at = CASE WHEN knowledge_item.title  IS DISTINCT FROM EXCLUDED.title
+                          OR knowledge_item.body   IS DISTINCT FROM EXCLUDED.body
+                          OR knowledge_item.status IS DISTINCT FROM EXCLUDED.status
+                          OR knowledge_item.raw    IS DISTINCT FROM EXCLUDED.raw
+                         THEN NOW() ELSE knowledge_item.synced_at END
      RETURNING id`,
     [
       userId, workspaceId, spaceId, it.source, it.source_id, it.type, it.title ?? null, it.body ?? null, it.status ?? null,
