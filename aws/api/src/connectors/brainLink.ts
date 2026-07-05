@@ -2,8 +2,11 @@ import { query } from '../db';
 import { embedTexts } from '../kgEmbed';
 import { getSecrets } from '../secrets';
 import { MODELS } from '../models/registry';
+import { recordProviderUsage } from '../usage';
 import { ensureConnectorSchema } from './schema';
-import { ensureBrainEdgeSchema, insertEdge } from './brainEdges';
+import { ensureBrainEdgeSchema, insertEdge, countSemanticDegree } from './brainEdges';
+import { checkBrainBudget, recordLlmHealth, classifyLlmFailure } from './budget';
+import { bindMeetingFromClaims } from './brainBind';
 import { insertReasoning, type Verdict } from './brainReasoning';
 import { queryNearestItems } from './brainVector';
 import { enrichCommit } from './github/enrich';
@@ -22,8 +25,16 @@ const WORKSPACE_CAP = 25;
 const SEM_BATCH = 24;          // items semantically linked per workspace per tick
 const SEM_K = 6;
 const SEM_MIN_SIM = 0.74;
-const GH_XSRC_SIM = 0.45;      // recall floor for a commit→meeting/ticket link (code↔prose is weak)
+const GH_XSRC_SIM = 0.55;      // recall floor for a commit→meeting/ticket link (code↔prose is weak);
+                               // raised (CF-2) so a commit isolates rather than draw a FALSE link —
+                               // an accurate gap beats an inaccurate connection. CF-5 keeps these
+                               // 'possible' commits OUT of a ticket's confirmed evidence count.
 const GH_XSRC_CAP = 2;         // a commit links to at most its 1-2 most-related meeting/ticket
+const CONNECTIVITY_SIM = 0.60; // anti-isolation floor for meeting/ticket → nearest item. Raised from
+                               // 0.40 (CF-2): the old floor MANUFACTURED links just to avoid a lone
+                               // node. Coverage comes from CLAIMS (bind), not a weak similarity bar.
+const SEM_DEGREE_CAP = 2;      // total 'possible' (semantic) edges a node may hold — counted ACROSS
+                               // runs (not per-run), so repeated relink cycles can't accumulate.
 const TIME_BUDGET_MS = 32_000;   // stay well under the 60s Lambda cap even with LLM calls
 
 const JIRA_KEY = /\b([A-Z][A-Z0-9]+-\d+)\b/g;
@@ -52,7 +63,7 @@ function extractJson(text: string): any | null {
   try { return JSON.parse(text.slice(s, e + 1)); } catch { return null; }
 }
 
-async function callAnthropic(model: string, sys: string, user: string, key: string): Promise<string> {
+async function callAnthropic(model: string, sys: string, user: string, key: string, userId?: string): Promise<string> {
   const ctrl = new AbortController();
   const timer = setTimeout(() => ctrl.abort(), 12_000);
   try {
@@ -62,13 +73,20 @@ async function callAnthropic(model: string, sys: string, user: string, key: stri
       body: JSON.stringify({ model, max_tokens: 1600, system: sys, messages: [{ role: 'user', content: user }] }),
       signal: ctrl.signal,
     });
-    if (!r.ok) return '';
+    if (!r.ok) {
+      // Record WHY it failed (credit depletion vs outage) so `meaning:` degrades visibly (CF-4).
+      const body = await r.text().catch(() => '');
+      void recordLlmHealth('anthropic', classifyLlmFailure(r.status, body), `${r.status} ${body.slice(0, 120)}`).catch(() => {});
+      return '';
+    }
     const d: any = await r.json();
+    void recordLlmHealth('anthropic', 'ok', null).catch(() => {});
+    if (userId) void recordProviderUsage(userId, 'brain', 'anthropic', model, d).catch(() => {});
     return (Array.isArray(d?.content) ? d.content : []).map((b: any) => b?.text ?? '').join('').trim();
   } catch { return ''; } finally { clearTimeout(timer); }
 }
 
-async function callGemini(model: string, sys: string, user: string, key: string): Promise<string> {
+async function callGemini(model: string, sys: string, user: string, key: string, userId?: string): Promise<string> {
   const ctrl = new AbortController();
   const timer = setTimeout(() => ctrl.abort(), 9_000);   // fast-fail: the verdict must never block the build
   try {
@@ -77,28 +95,45 @@ async function callGemini(model: string, sys: string, user: string, key: string)
       body: JSON.stringify({ systemInstruction: { parts: [{ text: sys }] }, contents: [{ role: 'user', parts: [{ text: user }] }], generationConfig: { responseMimeType: 'application/json', temperature: 0.1, maxOutputTokens: 2500 } }),
       signal: ctrl.signal,
     });
-    if (!r.ok) return '';
+    if (!r.ok) {
+      const body = await r.text().catch(() => '');
+      void recordLlmHealth('gemini', classifyLlmFailure(r.status, body), `${r.status} ${body.slice(0, 120)}`).catch(() => {});
+      return '';
+    }
     const d: any = await r.json();
+    void recordLlmHealth('gemini', 'ok', null).catch(() => {});
+    if (userId) void recordProviderUsage(userId, 'brain', 'gemini', model, d).catch(() => {});
     return (d.candidates?.[0]?.content?.parts ?? []).map((p: any) => p?.text ?? '').join('').trim();
   } catch { return ''; } finally { clearTimeout(timer); }
 }
 
 /** TIER 3 — the alignment VERDICT. One batched call per intent (meeting OR Jira task) over
- *  its top-K candidates. Quality-first model (Sonnet primary → Gemini 3.1 Pro fallback;
- *  brainVerdict registry). Candidates carry the REAL diff summary (Tier 2) for commits, so
- *  the judgment is grounded in actual code, not fluff messages. */
+ *  its top-K candidates. Model chosen by DIFFICULTY (see below): clear matches go to cheap
+ *  Gemini, ambiguous ones to Claude — both versions unchanged (brainVerdict registry). The
+ *  other provider is always the fallback so an outage never drops the verdict. Candidates
+ *  carry the REAL diff summary (Tier 2) for commits, so judgment is grounded in actual code. */
 async function judgeAlignment(
   intent: { kind: 'MEETING' | 'JIRA TASK' | 'DEV SESSION'; title: string | null; body: string | null },
   candidates: Array<{ id: string; source: string; text: string }>,
+  difficulty: 'easy' | 'hard' = 'hard',
+  userId?: string,
 ): Promise<Array<{ id: string; relation: string; verdict: Verdict; rationale: string; assessment: string | null; suggestion: string | null }>> {
   if (!candidates.length) return [];
   const secrets = await getSecrets();
   const list = candidates.map((c) => `${c.id} [${c.source}] ${(c.text || '').slice(0, 240)}`).join('\n');
   const user = `INTENT (${intent.kind}):\n${intent.title || ''}\n${(intent.body || '').slice(0, 2500)}\n\nCANDIDATE WORK ITEMS (id [source] description):\n${list}`;
 
+  // Model versions are fixed in the registry. We only choose the ORDER by difficulty:
+  //   easy → Gemini first (cheap, plenty for a clear match), Claude fallback
+  //   hard → Claude first (nuanced judgment for weak/ambiguous/code cases), Gemini fallback
+  const claude = MODELS.brainVerdict.primary;                              // claude-sonnet-4-6
+  const gemini = MODELS.brainVerdict.fallbacks?.[0] || 'gemini-3-flash-preview';
+  const askClaude = () => secrets.ANTHROPIC_API_KEY ? callAnthropic(claude, VERDICT_SYS, user, secrets.ANTHROPIC_API_KEY, userId) : Promise.resolve('');
+  const askGemini = () => secrets.GEMINI_API_KEY ? callGemini(gemini, VERDICT_SYS, user, secrets.GEMINI_API_KEY, userId) : Promise.resolve('');
+
   let text = '';
-  if (secrets.ANTHROPIC_API_KEY) text = await callAnthropic(MODELS.brainVerdict.primary, VERDICT_SYS, user, secrets.ANTHROPIC_API_KEY);
-  if (!text && secrets.GEMINI_API_KEY) text = await callGemini(MODELS.brainVerdict.fallbacks?.[0] || 'gemini-3.1-pro', VERDICT_SYS, user, secrets.GEMINI_API_KEY);
+  if (difficulty === 'easy') { text = await askGemini(); if (!text) text = await askClaude(); }
+  else { text = await askClaude(); if (!text) text = await askGemini(); }
   if (!text) return [];
 
   const parsed = extractJson(text);
@@ -140,14 +175,32 @@ export async function runBrainLink(opts?: BrainLinkOpts): Promise<BrainLinkResul
     if (Date.now() - started > timeBudget) break;
     result.workspaces++;
 
+    // BUDGET GATE (D-5) — if this user is over their daily brain-token budget, run the DETERMINISTIC
+    // links only (provenance/reference/connectivity) and DEFER the premium verdict pass. The map still
+    // builds; only the LLM meaning layer pauses, and it does so VISIBLY (logged + health surfaced).
+    const budget = await checkBrainBudget(userId).catch(() => ({ allowed: true } as any));
+    const effLlmBudget = budget.allowed ? llmBudget : 0;
+    if (!budget.allowed) console.log('brain_budget_deferred', JSON.stringify({ userId, workspaceId, spentToday: budget.spentToday, dailyLimit: budget.dailyLimit }));
+
     // Index this workspace's items by (source, source_id) → id, for reference matching.
-    type Item = { id: string; source: string; source_id: string; type: string | null; title: string | null; body: string | null; enriched_summary: string | null; fingerprint: string | null; folder_id: string | null; space_id: string | null };
+    type Item = { id: string; source: string; source_id: string; type: string | null; title: string | null; body: string | null; enriched_summary: string | null; fingerprint: string | null; folder_id: string | null; space_id: string | null; people: any };
     const items: Item[] = await query<any>(
-      `SELECT id, source, source_id, type, title, body, enriched_summary, fingerprint, folder_id, space_id FROM knowledge_item WHERE user_id=$1 AND workspace_id=$2`,
+      `SELECT id, source, source_id, type, title, body, enriched_summary, fingerprint, folder_id, space_id, people FROM knowledge_item WHERE user_id=$1 AND workspace_id=$2`,
       [userId, workspaceId],
     ).catch(() => []);
     const byKey = new Map(items.map((i) => [`${i.source}:${i.source_id}`, String(i.id)]));
     const itemById = new Map(items.map((i) => [String(i.id), i]));
+    // EXTENSIBLE by design: the linker is driven by the sources ACTUALLY present in the
+    // workspace, not a hard-coded list — so connecting a new tool (Slack, Notion, Linear, …)
+    // makes its items first-class brain nodes with no change here. Only two source *shapes*
+    // get special handling; everything else is a generic "intent" that links to all sources.
+    //   • commit-like (code): links CROSS-source only, same-project (a commit↔commit blob adds nothing)
+    //   • task-like (single-project ticket): implementing candidates gated to its own folder
+    // Any other source — meetings and every new connector — is a generic intent.
+    const knownSources = Array.from(new Set(items.map((i) => i.source)));
+    const isCommitLike = (s: string) => s === 'github';
+    const isTaskLike = (s: string) => s === 'jira';
+    const isSessionLike = (s: string) => s === 'claude-code' || s === 'codex';
 
     // 1) PROVENANCE — meeting → the Jira issue the agent created from it.
     try {
@@ -246,12 +299,29 @@ export async function runBrainLink(opts?: BrainLinkOpts): Promise<BrainLinkResul
         //      — i.e. we read the actual commit diff to judge whether it implements the intent.
         //   3. VERDICT (Tier 3): ONE batched Sonnet→Gemini call → verdict+rationale stored
         //      DIRECTLY on the edge (the brain map colours + explains the line).
-        if (self.source === 'meeting' || self.source === 'jira' || self.source === 'claude-code' || self.source === 'codex') {
+        if (!isCommitLike(self.source)) {
+          // Generic INTENT branch: meetings, Jira tasks, dev sessions, AND any newly-connected
+          // connector source (Slack/Notion/Linear/…) all flow through here. Only commit-like
+          // (code) items take the else branch.
           // NOTE: connectivity (semantic, turbopuffer) ALWAYS runs below — it does NOT depend on the
           // LLM. Only the VERDICT (quality colouring) is budget-gated, so a slow/unavailable verdict
           // model never blocks the brain from connecting its nodes.
-          const isTask = self.source === 'jira';
-          const isSession = self.source === 'claude-code' || self.source === 'codex';
+          const isTask = isTaskLike(self.source);
+          const isSession = isSessionLike(self.source);
+          // BIND-FIRST (Brain P1): for a MEETING, turn its extracted claims (people/action_items/refs)
+          // into edges DETERMINISTICALLY before any semantic guessing — a ticket named in the meeting
+          // links to it instantly, at $0. The bound targets are skipped by the semantic fallback below,
+          // so similarity is only the fallback for pairs no claim explained.
+          const claimBound = new Set<string>();
+          const selfItem = itemById.get(String(self.id));
+          if (self.source === 'meeting' && selfItem) {
+            try {
+              const b = await bindMeetingFromClaims(userId, workspaceId, selfItem.space_id ?? null, String(self.id), selfItem.source_id, selfItem.title, items as any);
+              result.provenance += b.result.provenance;
+              result.reference += b.result.reference + b.result.entity;
+              b.bound.forEach((t) => claimBound.add(t));
+            } catch { /* claims optional — semantic still runs */ }
+          }
           // FOLDER SCOPING — but asymmetric, because a meeting and a task have different shapes:
           //  • A JIRA TASK is single-project: its implementing commits MUST be in its own folder
           //    → hard folder gate (prevents task→wrong-repo links).
@@ -270,7 +340,11 @@ export async function runBrainLink(opts?: BrainLinkOpts): Promise<BrainLinkResul
           // MEETING it came from (a ticket auto-suggested from a meeting MUST connect back to it) AND
           // the commits that implement it. A dev session links to all three. (Meetings are exempt from
           // the per-folder gate below, so a task finds its source meeting even when unfiled.)
-          const candSources = isSession ? ['meeting', 'jira', 'github'] : isTask ? ['meeting', 'github'] : ['meeting', 'jira', 'github'];
+          // Candidate sources: sessions/tasks keep their curated lineage; a MEETING or any
+          // OTHER connector source links to EVERY source present in the workspace (knownSources)
+          // — so a new tool's items interlink with meetings, tickets, code and each other with
+          // zero source-specific code. The similarity floor + strict verdict keep it clean.
+          const candSources = isSession ? ['meeting', 'jira', 'github'] : isTask ? ['meeting', 'github'] : knownSources;
           const candK = (isTask || isSession) ? CAND_K + 4 : 10;   // room for both the source meeting + commits
           const mv = vecById.get(String(self.id));   // batch-embedded above — no per-intent re-embed
           const hits = mv ? await queryNearestItems(userId, workspaceId, mv, candK * 4, candSources).catch(() => null) : null;
@@ -313,9 +387,18 @@ export async function runBrainLink(opts?: BrainLinkOpts): Promise<BrainLinkResul
           // VERDICT (Tier 3, quality colouring) — BUDGET-GATED + best-effort. A slow/credit-less
           // verdict model never blocks the connectivity below; it just leaves the edge uncoloured.
           const verdictTargets = new Set<string>();
-          if (llmUsed < llmBudget) {
+          if (llmUsed < effLlmBudget) {
             llmUsed++;
-            const links = await judgeAlignment({ kind: isSession ? 'DEV SESSION' : isTask ? 'JIRA TASK' : 'MEETING', title: self.title, body: self.body }, cands);
+            // DIFFICULTY ROUTING — cheap Gemini for a CLEAR match (single, highly-similar,
+            // same-domain candidate); escalate to Claude when it's genuinely ambiguous:
+            // weak/low top similarity, many candidates to disambiguate, or code↔prose
+            // (a commit candidate) where nuanced judgment earns its cost.
+            const candSims = (hits || []).filter((h) => candIds.includes(h.id)).map((h) => h.similarity);
+            const topSim = candSims.length ? Math.max(...candSims) : 0;
+            const hasCode = cands.some((c) => c.source === 'github');
+            const difficulty: 'easy' | 'hard' =
+              (hasCode || topSim < 0.55 || (cands.length >= 5 && topSim < 0.68)) ? 'hard' : 'easy';
+            const links = await judgeAlignment({ kind: isSession ? 'DEV SESSION' : isTask ? 'JIRA TASK' : 'MEETING', title: self.title, body: self.body }, cands, difficulty, userId);
             // Cap SAME-SOURCE links (e.g. meeting↔meeting) to the strongest few — interconnected, not a blob.
             const SAME_SOURCE_CAP = 3;
             let sameSourceMade = 0;
@@ -334,13 +417,19 @@ export async function runBrainLink(opts?: BrainLinkOpts): Promise<BrainLinkResul
           // CONNECTIVITY (semantic, turbopuffer) — ALWAYS runs (no LLM), so every meeting/ticket links
           // to its NEAREST related items even when the verdict is unavailable. Capped + floored — enough
           // that no node floats alone, never enough to re-form a blob. Skips pairs the verdict coloured.
-          let fb = 0;
+          // Count EXISTING semantic edges for this node first — the cap is real across runs, not a
+          // per-run counter that resets every drain cycle (that reset was how the map re-inflated).
+          let fb = await countSemanticDegree(userId, workspaceId, 'item', String(self.id));
           for (const h of (hits || [])) {
-            if (fb >= 2) break;
-            if (h.id === String(self.id) || h.similarity < 0.40 || verdictTargets.has(h.id)) continue;
+            if (fb >= SEM_DEGREE_CAP) break;
+            if (h.id === String(self.id) || h.similarity < CONNECTIVITY_SIM || verdictTargets.has(h.id) || claimBound.has(h.id)) continue;
             const hit = itemById.get(h.id);
             if (!hit) continue;
-            if ((isTask || isSession) && hit.source !== 'meeting' && (hit.folder_id ?? null) !== intentFolder) continue;
+            // CROSS-SOURCE ONLY (accuracy): an unconfirmed 'possible' edge is only valuable as
+            // cross-tool LINEAGE (meeting↔ticket↔commit). Same-source similarity (meeting↔meeting,
+            // ticket↔ticket) is noise on the map — meeting continuity is captured by TOPIC threads (D-2).
+            if (hit.source === self.source) continue;
+            if ((isTask || isSession) && hit.source !== 'meeting') { const hf = hit.folder_id ?? null; if (hf && intentFolder && hf !== intentFolder) continue; }   // block only genuine cross-project (both known & differ)
             if (await insertEdge({ userId, workspaceId, spaceId: itemById.get(String(self.id))?.space_id ?? hit.space_id ?? null, srcKind: 'item', srcId: String(self.id), dstKind: 'item', dstId: h.id, relation: 'related', origin: 'semantic', confidence: h.similarity })) { result.semantic++; fb++; }
           }
         } else {
@@ -351,12 +440,18 @@ export async function runBrainLink(opts?: BrainLinkOpts): Promise<BrainLinkResul
           const selfFolder = itemById.get(String(self.id))?.folder_id ?? null;
           const vec = vecById.get(String(self.id));
           const hits = vec ? await queryNearestItems(userId, workspaceId, vec, SEM_K * 4, ['meeting', 'jira']).catch(() => null) : null;
-          let made = 0;
+          let made = await countSemanticDegree(userId, workspaceId, 'item', String(self.id));
           for (const h of hits || []) {
             if (made >= GH_XSRC_CAP) break;
             if (h.id === String(self.id) || h.similarity < GH_XSRC_SIM) continue;
             const hit = itemById.get(h.id);
-            if (!hit || (hit.folder_id ?? null) !== selfFolder) continue;   // same project only
+            if (!hit) continue;
+            // Same-project gate, RELAXED for space-scoping: space_id already isolates the space, and a
+            // commit often has NO folder mapping (null). Only block a genuine cross-PROJECT link (both
+            // folders known AND different) — otherwise a folder-less commit could never attach to its
+            // space's work, leaving every commit ISOLATED (the "disconnected github nodes" bug).
+            const hf = hit.folder_id ?? null;
+            if (hf && selfFolder && hf !== selfFolder) continue;
             if (hit.source === self.source) continue;                       // cross-source only
             if (await insertEdge({ userId, workspaceId, spaceId: itemById.get(String(self.id))?.space_id ?? hit.space_id ?? null, srcKind: 'item', srcId: String(self.id), dstKind: 'item', dstId: h.id, relation: 'related', origin: 'semantic', confidence: h.similarity })) { result.semantic++; made++; }
           }

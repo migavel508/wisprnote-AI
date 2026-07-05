@@ -50,7 +50,7 @@ async function findPending(limit: number): Promise<PendingMeeting[]> {
 async function processOne(m: PendingMeeting): Promise<'done' | 'empty' | 'retry'> {
   try {
     const title = m.filename || 'Untitled meeting';
-    const kg = await extractKnowledgeGraph(title, m.transcription || '');
+    const kg = await extractKnowledgeGraph(title, m.transcription || '', m.user_id);
     if (kg == null) return 'retry'; // transient — leave for the next sweep
 
     await queryOne(

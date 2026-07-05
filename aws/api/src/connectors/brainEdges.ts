@@ -69,8 +69,31 @@ export interface EdgeInput {
 /** Upsert an edge (idempotent). Skips self-loops. Returns true if NEWLY inserted (not an
  *  update). When verdict/rationale are supplied they refresh on conflict, so re-judging a
  *  link updates the reasoning shown on the line; otherwise existing values are kept. */
+// Relations with no inherent direction — A related-to B is the same fact as B related-to A. For
+// these we canonicalize endpoint order so the two directions collapse to ONE row (no reciprocal
+// duplicate double-counting the map). Directional relations (references/implements/spawned) keep
+// their orientation — provenance flows one way and that meaning must be preserved.
+const SYMMETRIC_RELATIONS = new Set(['related', 'people']);
+
+/** How many 'possible' (semantic) edges a node already holds — used to enforce a REAL degree cap
+ *  across relink runs (a per-run counter reset every cycle and let the map re-inflate). */
+export async function countSemanticDegree(userId: string, workspaceId: string, kind: string, id: string): Promise<number> {
+  const r = await queryOne<{ n: string }>(
+    `SELECT COUNT(*)::text AS n FROM brain_edge
+      WHERE user_id=$1 AND workspace_id=$2 AND origin='semantic'
+        AND ((src_kind=$3 AND src_id=$4) OR (dst_kind=$3 AND dst_id=$4))`,
+    [userId, workspaceId, kind, id],
+  ).catch(() => null);
+  return r ? parseInt(r.n, 10) || 0 : 0;
+}
+
 export async function insertEdge(e: EdgeInput): Promise<boolean> {
   if (e.srcKind === e.dstKind && e.srcId === e.dstId) return false;
+  // CF-2 precision: canonicalize symmetric edges so (A→B) and (B→A) map to the same unique key.
+  if (SYMMETRIC_RELATIONS.has(e.relation)) {
+    const a = `${e.srcKind}:${e.srcId}`, b = `${e.dstKind}:${e.dstId}`;
+    if (a > b) e = { ...e, srcKind: e.dstKind, srcId: e.dstId, dstKind: e.srcKind, dstId: e.srcId };
+  }
   // STRICT space isolation (P0): never link two items in DIFFERENT real spaces. Cross-space edges
   // were how a meeting in one space pulled in another space's Jira/commits. Unscoped endpoints
   // (sentinel/null — not yet space-assigned) are allowed; a genuinely cross-space pair is refused.
@@ -104,29 +127,32 @@ export interface BrainEdgeRow {
   verdict: string | null; rationale: string | null;
 }
 
-/** All edges for a workspace (for the brain map + lineage). When `spaceId` is given, strictly
- *  scoped to that space — the brain is always (workspace + space) scoped. */
+/** All edges for the brain map. A SPACE view (Brain P0) scopes by `space_id` ALONE — globally
+ *  unique, so it returns every member's edges in that space (the SHARED brain), gated upstream by
+ *  membership. The workspace-root view (no real space) stays owner-scoped (user_id + workspace_id). */
 export async function getBrainEdges(userId: string, workspaceId: string, limit = 500, spaceId?: string | null): Promise<BrainEdgeRow[]> {
   await ensureBrainEdgeSchema();
+  const bySpace = !!spaceId && spaceId !== ACCOUNT_SCOPE;
   return query<BrainEdgeRow>(
     `SELECT src_kind, src_id, dst_kind, dst_id, relation, origin, confidence, evidence, verdict, rationale
        FROM brain_edge
-      WHERE user_id=$1 AND workspace_id=$2 AND ($3::uuid IS NULL OR space_id=$3)
+      WHERE ${bySpace ? 'space_id=$1' : 'user_id=$1 AND workspace_id=$2'}
       ORDER BY created_at DESC LIMIT ${limit}`,
-    [userId, workspaceId, spaceId ?? null],
+    bySpace ? [spaceId] : [userId, workspaceId],
   );
 }
 
-/** Neighbours of a node (both directions), strictly (workspace + space) scoped. Used by the
- *  brain map's node-detail card and chat graph-expansion. `spaceId` null = workspace-wide. */
+/** Neighbours of a node (both directions). SPACE view → scoped by space_id (shared brain); else
+ *  owner-scoped. Used by the node-detail card + chat graph-expansion. */
 export async function neighboursOf(userId: string, workspaceId: string, kind: string, id: string, limit = 12, spaceId?: string | null): Promise<BrainEdgeRow[]> {
   await ensureBrainEdgeSchema();
+  const bySpace = !!spaceId && spaceId !== ACCOUNT_SCOPE;
   return query<BrainEdgeRow>(
     `SELECT src_kind, src_id, dst_kind, dst_id, relation, origin, confidence, evidence, verdict, rationale
        FROM brain_edge
-      WHERE user_id=$1 AND workspace_id=$2 AND ($5::uuid IS NULL OR space_id=$5)
-        AND ((src_kind=$3 AND src_id=$4) OR (dst_kind=$3 AND dst_id=$4))
+      WHERE ${bySpace ? 'space_id=$3' : 'user_id=$3 AND workspace_id=$4'}
+        AND ((src_kind=$1 AND src_id=$2) OR (dst_kind=$1 AND dst_id=$2))
       ORDER BY confidence DESC NULLS LAST LIMIT ${limit}`,
-    [userId, workspaceId, kind, id, spaceId ?? null],
+    bySpace ? [kind, id, spaceId] : [kind, id, userId, workspaceId],
   );
 }

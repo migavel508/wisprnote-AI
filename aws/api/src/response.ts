@@ -26,6 +26,10 @@ export function unauthorized(): APIGatewayProxyResult {
   return { statusCode: 401, headers: { 'Content-Type': 'application/json', ...CORS_HEADERS }, body: JSON.stringify({ message: 'Unauthorized' }) };
 }
 
+export function forbidden(msg = 'Forbidden'): APIGatewayProxyResult {
+  return { statusCode: 403, headers: { 'Content-Type': 'application/json', ...CORS_HEADERS }, body: JSON.stringify({ message: msg }) };
+}
+
 export function notFound(): APIGatewayProxyResult {
   return { statusCode: 404, headers: { 'Content-Type': 'application/json', ...CORS_HEADERS }, body: JSON.stringify({ message: 'Not found' }) };
 }

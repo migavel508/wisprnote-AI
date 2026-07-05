@@ -1,7 +1,7 @@
 import type { APIGatewayProxyEvent, APIGatewayProxyResult } from 'aws-lambda';
 import { CognitoJwtVerifier } from 'aws-jwt-verify';
 import { query, queryOne, queryCount } from './db';
-import { ok, created, noContent, badRequest, notFound, unauthorized, serverError, corsPreflightResponse, paymentRequired } from './response';
+import { ok, created, noContent, badRequest, notFound, unauthorized, serverError, corsPreflightResponse, paymentRequired, forbidden } from './response';
 import { S3Client, PutObjectCommand } from '@aws-sdk/client-s3';
 import { getSignedUrl } from '@aws-sdk/s3-request-presigner';
 import { getSecrets } from './secrets';
@@ -29,9 +29,10 @@ import { beginMcpOAuth, completeMcpOAuth, type OAuthInflight } from './mcp/oauth
 import './connectors/registry'; // registers the no-op connector
 import './connectors/jira';      // registers the Jira (Atlassian MCP) connector
 import './connectors/github';    // registers the GitHub (remote MCP) connector
+import './connectors/google';    // registers Gmail + Google Calendar + Google Drive (direct REST + OAuth)
 import { ensurePeopleSchema, upsertPerson } from './people';
 import { activeWorkspaceId, ensureWorkspacePartition, ensureWorkspacePartitionSchema, validateOwnedWorkspaceId } from './workspaceScope';
-import { ensureSpacesSchema, migrateFoldersToSpacesOnce, reconcileSpaces, resolveDefaultSpaceId, validateOwnedSpaceId } from './spaces';
+import { ensureSpacesSchema, migrateFoldersToSpacesOnce, reconcileSpaces, resolveDefaultSpaceId, validateOwnedSpaceId, canAccessSpace } from './spaces';
 import { ensureDictionarySchema } from './dictionary';
 
 // Connector OAuth redirect — the app's own custom scheme; the desktop deep-link handler catches it
@@ -353,7 +354,26 @@ export const handler = async (event: APIGatewayProxyEvent): Promise<APIGatewayPr
       // Keep each connector's tool catalog (+ classification) fresh for the trust plane.
       try { const { discoverAllConnectorTools } = await import('./mcp/toolPlane'); await discoverAllConnectorTools(25); } catch (e: any) { console.error('tool_discovery_failed', e?.message); }
       try { const { embedKnowledgeItems } = await import('./connectors/embed'); embedded = (await embedKnowledgeItems(96)).embedded; } catch (e: any) { console.error('brain_embed_failed', e?.message); }
-      return { statusCode: 200, body: JSON.stringify({ ...r, ingested, embedded }) } as APIGatewayProxyResult;
+      // AUTONOMY: complete the whole pipeline in this one tick — ingest → embed → LINK — so the
+      // brain is always current SERVER-SIDE without the client ever driving it (the Brain Map is
+      // now read-only). Bounded (small LLM budget + time budget) to stay under the Lambda window;
+      // whatever this tick doesn't reach, the dedicated brain-link cron / next tick finishes. Each
+      // item is verdicted exactly once (brain_link_state), so re-runs are cheap and idempotent.
+      let linked = 0;
+      try {
+        const { runBrainLink } = await import('./connectors/brainLink');
+        const lr = await runBrainLink({ llmBudget: 6, timeBudgetMs: 24_000 });
+        linked = lr.provenance + lr.reference + lr.semantic + lr.llm;
+      } catch (e: any) { console.error('brain_link_after_sync_failed', e?.message); }
+      // EVENT-FIRST bind (Brain P2): re-bind every space that received new data THIS tick, so a
+      // freshly-synced ticket/commit weaves into its meetings in the same operation — deterministic,
+      // $0, and independent of the LLM (so it works even when the verdict is credit-blocked).
+      let bound: any = null;
+      try { const { bindActiveSpaces } = await import('./connectors/brainBind'); bound = await bindActiveSpaces(30); } catch (e: any) { console.error('brain_bind_after_sync_failed', e?.message); }
+      // THREAD LEDGER (Brain P3): refresh open loops for spaces that got new data this tick.
+      let threads: any = null;
+      try { const { buildActiveSpaceThreads } = await import('./connectors/threads'); threads = await buildActiveSpaceThreads(30); } catch (e: any) { console.error('brain_threads_after_sync_failed', e?.message); }
+      return { statusCode: 200, body: JSON.stringify({ ...r, ingested, embedded, linked, bound, threads }) } as APIGatewayProxyResult;
     } catch (err: any) {
       console.error('connector_sync_failed', JSON.stringify({ message: err?.message, code: err?.code, detail: err?.detail }));
       return { statusCode: 500, body: 'connector-sync-error' } as APIGatewayProxyResult;
@@ -479,7 +499,261 @@ export const handler = async (event: APIGatewayProxyEvent): Promise<APIGatewayPr
         out.embedStatus = r.status; out.embedBody = (await r.text()).slice(0, 300);
       } catch (e: any) { out.embedHttpError = e?.message; }
     }
+    // PERSIST health (CF-4) so `/brain/progress` shows `meaning:` continuously between probes.
+    try {
+      const { recordLlmHealth, classifyLlmFailure } = await import('./connectors/budget');
+      if (out.anthropicStatus != null) await recordLlmHealth('anthropic', out.anthropicStatus === 200 ? 'ok' : classifyLlmFailure(out.anthropicStatus, out.anthropicBody), out.anthropicStatus === 200 ? null : `probe ${out.anthropicStatus}`);
+      if (Array.isArray(out.geminiTests) && out.geminiTests.length) {
+        const anyOk = out.geminiTests.some((t: any) => t.ok);
+        const worst = out.geminiTests.find((t: any) => !t.ok);
+        await recordLlmHealth('gemini', anyOk ? 'ok' : classifyLlmFailure(worst?.status || 0, ''), anyOk ? null : `probe ${worst?.status || worst?.error || 'fail'}`);
+      }
+      if (out.embedStatus != null || out.embedOk != null) await recordLlmHealth('embeddings', out.embedOk ? 'ok' : classifyLlmFailure(out.embedStatus || 0, out.embedBody), out.embedOk ? null : `probe ${out.embedStatus || out.embedError || 'fail'}`);
+    } catch { /* health persistence is best-effort */ }
     return { statusCode: 200, body: JSON.stringify(out, null, 2) } as APIGatewayProxyResult;
+  }
+
+  // BRAIN-CONSOLIDATE (Brain P4) — the "sleep" pass: prune dangling edges + drop redundant similarity
+  // a claim already explains. No spaceId → all spaces (the daily cron); spaceId → one. Deterministic $0.
+  if ((event as any).__job === 'brain-consolidate') {
+    const spaceId = String((event as any).spaceId || '');
+    try {
+      const { consolidateSpace, consolidateAll } = await import('./connectors/consolidate');
+      const r = spaceId ? await consolidateSpace(spaceId) : await consolidateAll();
+      console.log('brain_consolidate', JSON.stringify(r));
+      return { statusCode: 200, body: JSON.stringify(r, null, 2) } as APIGatewayProxyResult;
+    } catch (e: any) {
+      console.error('brain_consolidate_failed', JSON.stringify({ message: e?.message }));
+      return { statusCode: 500, body: JSON.stringify({ error: e?.message }) } as APIGatewayProxyResult;
+    }
+  }
+
+  // BRAIN-BIND (Brain P1) — deterministic claim→edge backfill for a space: turn every meeting's
+  // extracted claims (people/action_items/refs) into edges, LLM-FREE. Rebuilds the claim layer of a
+  // space's brain at $0; idempotent (insertEdge dedups). Run after connector sync / on demand.
+  if ((event as any).__job === 'brain-bind') {
+    const spaceId = String((event as any).spaceId || '');
+    if (!spaceId) return { statusCode: 400, body: 'spaceId required' } as APIGatewayProxyResult;
+    try {
+      const { bindSpace } = await import('./connectors/brainBind');
+      const r = await bindSpace(spaceId);
+      console.log('brain_bind', JSON.stringify(r));
+      return { statusCode: 200, body: JSON.stringify(r, null, 2) } as APIGatewayProxyResult;
+    } catch (e: any) {
+      console.error('brain_bind_failed', JSON.stringify({ message: e?.message }));
+      return { statusCode: 500, body: JSON.stringify({ error: e?.message }) } as APIGatewayProxyResult;
+    }
+  }
+
+  // BRAIN-THREADS (Brain P3) — build/refresh a space's thread ledger (ticket lifecycles as open loops
+  // with derived state). Deterministic, $0. Run after bind (a thread's state reads its lineage edges).
+  if ((event as any).__job === 'brain-threads') {
+    const spaceId = String((event as any).spaceId || '');
+    try {
+      const { buildSpaceThreads, buildAllSpaceThreads, proposeGapTickets, listSpaceThreads } = await import('./connectors/threads');
+      // No spaceId → the HOURLY CRON: refresh every space's ledger (keeps `stale` honest) + propose
+      // the missing tickets. One spaceId → build + propose + (optionally) list that space.
+      if (!spaceId) {
+        const r = await buildAllSpaceThreads();
+        return { statusCode: 200, body: JSON.stringify(r, null, 2) } as APIGatewayProxyResult;
+      }
+      const r = await buildSpaceThreads(spaceId);
+      const proposed = (await proposeGapTickets(spaceId).catch(() => ({ proposed: 0 }))).proposed;
+      console.log('brain_threads', JSON.stringify({ ...r, proposed }));
+      const list = (event as any).list ? (await listSpaceThreads(spaceId)).map((t: any) => ({ id: t.anchor_source_id, title: (t.title || '').slice(0, 60), state: t.state, evidence: { meetings: (t.evidence?.meetings || []).length, commits: (t.evidence?.commits || []).length } })) : undefined;
+      return { statusCode: 200, body: JSON.stringify({ ...r, proposed, threads: list }, null, 2) } as APIGatewayProxyResult;
+    } catch (e: any) {
+      console.error('brain_threads_failed', JSON.stringify({ message: e?.message }));
+      return { statusCode: 500, body: JSON.stringify({ error: e?.message }) } as APIGatewayProxyResult;
+    }
+  }
+
+  // BRAIN-BRIEF (Brain D-1) — build/read a space's chief-of-staff brief (what moved, what's slipping,
+  // what's untracked). Deterministic, $0, grounded ONLY in confirmed evidence. No spaceId → rebuild
+  // every space's brief. { spaceId, read:true } → return the stored brief without rebuilding.
+  if ((event as any).__job === 'brain-brief') {
+    const spaceId = String((event as any).spaceId || '');
+    try {
+      const { buildSpaceBrief, buildAllSpaceBriefs, getSpaceBrief } = await import('./connectors/brief');
+      if (!spaceId) {
+        const r = await buildAllSpaceBriefs();
+        return { statusCode: 200, body: JSON.stringify(r, null, 2) } as APIGatewayProxyResult;
+      }
+      const r = (event as any).read === true ? await getSpaceBrief(spaceId) : await buildSpaceBrief(spaceId);
+      return { statusCode: 200, body: JSON.stringify(r, null, 2) } as APIGatewayProxyResult;
+    } catch (e: any) {
+      console.error('brain_brief_failed', JSON.stringify({ message: e?.message }));
+      return { statusCode: 500, body: JSON.stringify({ error: e?.message }) } as APIGatewayProxyResult;
+    }
+  }
+
+  // GOOGLE-CHECK — verify the Google OAuth begin path end-to-end (operator client configured? valid
+  // authorize URL built?) WITHOUT needing a user login. Returns the authorize URL (client_id is public,
+  // not a secret). If this works, the app's Connect button will too.
+  if ((event as any).__job === 'google-check') {
+    const id = String((event as any).connector || 'gmail');
+    const out: any = { connector: id };
+    try {
+      const { getRegistryOAuthClient } = await import('./mcp/customConnectors');
+      const client = await getRegistryOAuthClient(id).catch(() => null);
+      out.clientConfigured = !!client?.clientId;
+      out.clientSecretConfigured = !!client?.clientSecret;
+      if (client?.clientId) {
+        const { getMcpServer } = await import('./mcp/registry');
+        const scopes = getMcpServer(id)?.scopes || [];
+        const { beginGoogleOAuth } = await import('./connectors/google/oauth');
+        const { authorizeUrl } = beginGoogleOAuth(client, scopes, 'https://YOUR-API-ID.execute-api.YOUR-REGION.amazonaws.com/prod/oauth/callback');
+        out.scopes = scopes;
+        out.authorizeUrl = authorizeUrl;
+      } else out.hint = 'GOOGLE_OAUTH_CLIENT_ID not readable (secret not set or cache stale).';
+      // Is the tool catalog populated for this connector? (the "empty tools list" fix)
+      const cat = await query<any>(`SELECT tool_name FROM connector_tool WHERE connector=$1 ORDER BY tool_name`, [id]).catch(() => []);
+      out.catalogTools = (cat || []).map((r: any) => r.tool_name);
+      const connected = await query<any>(`SELECT COUNT(*)::int AS n FROM connector_credentials WHERE source=$1`, [id]).catch(() => [{ n: 0 }]);
+      out.connectedCredentials = connected?.[0]?.n ?? 0;
+    } catch (e: any) { out.error = e?.message; }
+    return { statusCode: 200, body: JSON.stringify(out, null, 2) } as APIGatewayProxyResult;
+  }
+
+  // GITHUB-REMAP — diagnose + fix a stale GitHub repo mapping. When the token's repo access changes,
+  // the connector keeps syncing the OLD `connector_routing.repos` (no auto-discovery) → new repo never
+  // pulled, old repo's commits linger. DRY-RUN shows: current mapping, the repos actually present in
+  // knowledge_item, and (best-effort) the repos the token can now see. { setRepos:['owner/name'],
+  // commit:true } remaps → prunes off-list github items → resets the cursor → triggers a fresh sync.
+  if ((event as any).__job === 'github-remap') {
+    const spaceId = String((event as any).spaceId || '');
+    if (!spaceId) return { statusCode: 400, body: 'spaceId required' } as APIGatewayProxyResult;
+    const owner = await queryOne<{ user_id: string; workspace_id: string }>(
+      `SELECT user_id, workspace_id FROM knowledge_item WHERE space_id=$1 LIMIT 1`, [spaceId],
+    ).catch(() => null);
+    if (!owner) return { statusCode: 404, body: JSON.stringify({ error: 'no items in space' }) } as APIGatewayProxyResult;
+    const out: any = { space: spaceId, workspace: owner.workspace_id };
+    const { getAllMappedRepos, setGithubRepos } = await import('./connectors/routing');
+    out.currentlyMapped = await getAllMappedRepos(owner.user_id, owner.workspace_id).catch(() => []);
+    out.itemRepos = await query<any>(
+      `SELECT split_part(split_part(source_id,'@',1),'#',1) AS repo, COUNT(*)::int AS items FROM knowledge_item
+        WHERE workspace_id=$1 AND source='github' GROUP BY 1 ORDER BY 2 DESC`, [owner.workspace_id],
+    ).catch(() => []);
+    // Best-effort: what repos can the token see NOW? Try the live github tools for a repo lister.
+    try {
+      const { resolveMcpConnection } = await import('./mcp/connection');
+      const { mcpListTools, mcpCallTool, resolveLiveTool } = await import('./mcp/client');
+      const conn = await resolveMcpConnection(owner.user_id, owner.workspace_id, 'github');
+      if (conn) {
+        const tools = await mcpListTools(conn.server, conn.token).catch(() => []);
+        out.githubTools = (tools || []).map((t: any) => t.name).slice(0, 60);
+        const lister = resolveLiveTool(tools, 'search_repositories', 'github') || resolveLiveTool(tools, 'list_repositories', 'github');
+        if (lister) {
+          const r = await mcpCallTool(conn.server, conn.token, String(lister.name), { query: 'user:@me sort:updated', perPage: 30 }).catch(() => null);
+          const text = (r?.content?.[0]?.text ?? '').toString();
+          out.discoverySample = text.slice(0, 600);
+        }
+        // PROBE the mapped repo: how many commits on default branch, and what BRANCHES exist (work on
+        // a non-default branch is invisible to list_commits, which defaults to the default branch).
+        const probeRepo = String((event as any).probeRepo || (out.currentlyMapped?.[0] || ''));
+        if (probeRepo.includes('/')) {
+          const [po, pr] = probeRepo.split('/');
+          const branchesTool = resolveLiveTool(tools, 'list_branches', 'github');
+          if (branchesTool) {
+            const rb = await mcpCallTool(conn.server, conn.token, String(branchesTool.name), { owner: po, repo: pr, perPage: 50 }).catch(() => null);
+            const bt = (rb?.content?.[0]?.text ?? '').toString();
+            try { const j = JSON.parse(bt); const arr = Array.isArray(j) ? j : j.branches || j.items || []; out.branches = arr.map((b: any) => b.name).filter(Boolean); } catch { out.branchesRaw = bt.slice(0, 300); }
+          }
+          const rc = await mcpCallTool(conn.server, conn.token, 'list_commits', { owner: po, repo: pr, perPage: 100 }).catch(() => null);
+          const ct = (rc?.content?.[0]?.text ?? '').toString();
+          try { const j = JSON.parse(ct); const arr = Array.isArray(j) ? j : j.commits || j.items || []; out.defaultBranchCommits = arr.length; } catch { out.commitsRaw = ct.slice(0, 300); }
+        }
+      } else out.githubTools = 'github not connected in this workspace';
+    } catch (e: any) { out.discoveryError = e?.message; }
+
+    if ((event as any).commit === true && Array.isArray((event as any).setRepos)) {
+      const repos = ((event as any).setRepos as any[]).map((r) => String(r).trim()).filter(Boolean);
+      await setGithubRepos(owner.user_id, owner.workspace_id, repos, null);
+      const pruned = await query<any>(
+        `WITH d AS (DELETE FROM knowledge_item WHERE user_id=$1 AND workspace_id=$2 AND source='github'
+             AND split_part(split_part(source_id,'@',1),'#',1) <> ALL($3) RETURNING 1) SELECT COUNT(*)::int AS n FROM d`,
+        [owner.user_id, owner.workspace_id, repos]).catch(() => null);
+      await query(`DELETE FROM sync_state WHERE user_id=$1 AND source='github'`, [owner.user_id]).catch(() => {});
+      out.remapped = { repos, prunedItems: pruned?.[0]?.n ?? 0, cursorReset: true };
+    }
+    return { statusCode: 200, body: JSON.stringify(out, null, 2) } as APIGatewayProxyResult;
+  }
+
+  // BRAIN-REBUILD — wipe a space's DERIVED brain map (edges/threads/brief/atoms/proposals/embed
+  // cursors; KEEPS knowledge_item + knowledge_graph + events + credentials) and rebuild it end-to-end
+  // (embed→bind→atoms→link→threads→brief→consolidate). DRY-RUN by default; { commit:true } wipes;
+  // { commit:true, rebuild:true } wipes AND rebuilds. Idempotent; crons finish any tail. Spends tokens
+  // on rebuild (embeddings + verdicts + atoms).
+  if ((event as any).__job === 'brain-rebuild') {
+    const spaceId = String((event as any).spaceId || '');
+    if (!spaceId) return { statusCode: 400, body: 'spaceId required' } as APIGatewayProxyResult;
+    try {
+      const { resetSpaceBrain, rebuildSpaceBrain } = await import('./connectors/brainRebuild');
+      const commit = (event as any).commit === true;
+      if (commit && (event as any).rebuild === true) {
+        return { statusCode: 200, body: JSON.stringify(await rebuildSpaceBrain(spaceId), null, 2) } as APIGatewayProxyResult;
+      }
+      const reset = await resetSpaceBrain(spaceId, commit);
+      return { statusCode: 200, body: JSON.stringify({ mode: commit ? 'COMMIT — derived brain deleted' : 'DRY-RUN — would delete (source items kept)', keeps: ['knowledge_item', 'knowledge_graph', 'brain_event', 'connector_credentials'], reset }, null, 2) } as APIGatewayProxyResult;
+    } catch (e: any) {
+      console.error('brain_rebuild_failed', JSON.stringify({ message: e?.message }));
+      return { statusCode: 500, body: JSON.stringify({ error: e?.message }) } as APIGatewayProxyResult;
+    }
+  }
+
+  // MEM-UNITS (Memory-OS Phase 3) — index a space's derived memory atoms (decisions/action-items/
+  // topics from knowledge_graph) as first-class vectors, so retrieval hits the decision directly
+  // instead of an averaged whole-meeting vector. Hash-gated (only changed atoms re-embed).
+  if ((event as any).__job === 'mem-units') {
+    const spaceId = String((event as any).spaceId || '');
+    if (!spaceId) return { statusCode: 400, body: 'spaceId required' } as APIGatewayProxyResult;
+    try {
+      const { buildSpaceUnits, buildSpaceChunks, buildSpaceStateUnits } = await import('./connectors/memunits');
+      const atoms = await buildSpaceUnits(spaceId);
+      const chunks = await buildSpaceChunks(spaceId);
+      const state = await buildSpaceStateUnits(spaceId);
+      console.log('mem_units_job', JSON.stringify({ atoms, chunks, state }));
+      return { statusCode: 200, body: JSON.stringify({ atoms, chunks, state }, null, 2) } as APIGatewayProxyResult;
+    } catch (e: any) {
+      console.error('mem_units_failed', JSON.stringify({ message: e?.message }));
+      return { statusCode: 500, body: JSON.stringify({ error: e?.message }) } as APIGatewayProxyResult;
+    }
+  }
+
+  // MEM-SCORE (Memory-OS Phase 1) — the brain's benchmark harness. Turns memory quality into a NUMBER
+  // so every storage/retrieval change is A/B'd. { spaceId, seed:true } auto-generates the golden set
+  // ($0). { spaceId } runs vector retrieval scoring (cheap — query embeddings only). { useGraph:true }
+  // adds brain_edge expansion. { withAnswer:true } adds the LLM answer+judge layer (Flash, metered).
+  // { spaceId, history:true } returns recent runs (the REPORT).
+  if ((event as any).__job === 'mem-score') {
+    const spaceId = String((event as any).spaceId || '');
+    if (!spaceId) return { statusCode: 400, body: 'spaceId required' } as APIGatewayProxyResult;
+    try {
+      const { seedGoldenSet, paraphraseGoldenSet, passageGoldenSet, runMemScore, memScoreHistory } = await import('./connectors/memscore');
+      if ((event as any).history === true) {
+        return { statusCode: 200, body: JSON.stringify(await memScoreHistory(spaceId), null, 2) } as APIGatewayProxyResult;
+      }
+      const out: any = {};
+      if ((event as any).seed === true) out.seed = await seedGoldenSet(spaceId);
+      if ((event as any).paraphrase === true) out.paraphrase = await paraphraseGoldenSet(spaceId);
+      if ((event as any).passage === true) out.passage = await passageGoldenSet(spaceId);
+      if ((event as any).noRun !== true) out.run = await runMemScore(spaceId, {
+        withAnswer: (event as any).withAnswer === true,
+        useGraph: (event as any).useGraph === true,
+        rerank: (event as any).rerank === true,
+        llmRerank: (event as any).llmRerank === true,
+        noChunks: (event as any).noChunks === true,
+        limit: typeof (event as any).limit === 'number' ? (event as any).limit : undefined,
+        k: typeof (event as any).k === 'number' ? (event as any).k : undefined,
+        origin: (event as any).origin,
+        config: (event as any).config,
+      });
+      console.log('mem_score', JSON.stringify(out.run));
+      return { statusCode: 200, body: JSON.stringify(out, null, 2) } as APIGatewayProxyResult;
+    } catch (e: any) {
+      console.error('mem_score_failed', JSON.stringify({ message: e?.message }));
+      return { statusCode: 500, body: JSON.stringify({ error: e?.message }) } as APIGatewayProxyResult;
+    }
   }
 
   // BRAIN-EDGE CLEANUP — removes redundant SAME-SOURCE edges that blob the map (commit↔commit,
@@ -540,6 +814,36 @@ export const handler = async (event: APIGatewayProxyEvent): Promise<APIGatewayPr
 
   // BRAIN-MAP DEBUG — READ-ONLY. Reports edge composition + fragmentation for a space, so we can see
   // WHY the map looks fragmented/redundant (e.g. github↔github blobs vs. meeting→connector lineage).
+  // EDGE-AUDIT — the "hanging lines / isolated nodes" diagnosis. For a space: how many edges have BOTH
+  // endpoints as nodes in this space (render fine) vs endpoints that don't resolve to a space node
+  // (dangling = deleted item; cross-space = endpoint lives in another space) → those are the hanging
+  // lines. Plus how many items are isolated (no edge at all).
+  if ((event as any).__job === 'edge-audit') {
+    const spaceId = String((event as any).spaceId || '');
+    if (!spaceId) return { statusCode: 400, body: 'spaceId required' } as APIGatewayProxyResult;
+    const q = async (sql: string) => { try { return (await query<any>(sql, [spaceId]))?.[0]; } catch (e: any) { return { error: e?.message }; } };
+    const edges = await q(
+      `SELECT COUNT(*)::int AS total,
+              COUNT(*) FILTER (WHERE sa.id IS NOT NULL AND da.id IS NOT NULL)::int AS both_in_space,
+              COUNT(*) FILTER (WHERE (sa.id IS NULL AND se.id IS NULL) OR (da.id IS NULL AND de.id IS NULL))::int AS dangling_deleted_endpoint,
+              COUNT(*) FILTER (WHERE (sa.id IS NULL AND se.id IS NOT NULL) OR (da.id IS NULL AND de.id IS NOT NULL))::int AS endpoint_in_other_space
+         FROM brain_edge e
+         LEFT JOIN knowledge_item sa ON sa.id::text=e.src_id AND sa.space_id=e.space_id
+         LEFT JOIN knowledge_item da ON da.id::text=e.dst_id AND da.space_id=e.space_id
+         LEFT JOIN knowledge_item se ON se.id::text=e.src_id
+         LEFT JOIN knowledge_item de ON de.id::text=e.dst_id
+        WHERE e.space_id=$1`);
+    const nodes = await q(
+      `SELECT COUNT(*)::int AS total_items,
+              COUNT(*) FILTER (WHERE NOT EXISTS (SELECT 1 FROM brain_edge e WHERE e.space_id=$1 AND (e.src_id=ki.id::text OR e.dst_id=ki.id::text)))::int AS isolated_items
+         FROM knowledge_item ki WHERE ki.space_id=$1`);
+    const isolatedBySource = await query<any>(
+      `SELECT ki.source, COUNT(*)::int AS isolated FROM knowledge_item ki
+        WHERE ki.space_id=$1 AND NOT EXISTS (SELECT 1 FROM brain_edge e WHERE e.space_id=$1 AND (e.src_id=ki.id::text OR e.dst_id=ki.id::text))
+        GROUP BY 1 ORDER BY 2 DESC`, [spaceId]).catch(() => []);
+    return { statusCode: 200, body: JSON.stringify({ space: spaceId, edges, nodes, isolatedBySource }, null, 2) } as APIGatewayProxyResult;
+  }
+
   if ((event as any).__job === 'brain-map-debug') {
     const spaceId = String((event as any).spaceId || '');
     const safe = async (sql: string, params: any[] = []) => { try { return await query<any>(sql, params); } catch (e: any) { return [{ error: e?.message }]; } };
@@ -724,6 +1028,54 @@ export const handler = async (event: APIGatewayProxyEvent): Promise<APIGatewayPr
     return { statusCode: 200, body: JSON.stringify(results, null, 2) } as APIGatewayProxyResult;
   }
 
+  // BRAIN-SENTINEL-SWEEP (CF-1) — clears the sentinel/unscoped bucket's LEFTOVERS that produce ghost &
+  // DUPLICATE threads: (a) any thread built for ACCOUNT_SCOPE (never a real space), and (b) connector
+  // item rows stranded at ACCOUNT_SCOPE that ALSO exist (same source+source_id+type) in a real space —
+  // the invisible cross-space dups behind "PROJ-14 appeared twice". DRY-RUN by default; { commit:true }
+  // deletes. Local sources (meeting/claude-code/codex) are never touched. Idempotent + safe to re-run.
+  if ((event as any).__job === 'brain-sentinel-sweep') {
+    const commit = (event as any).commit === true;
+    const SENT = `'${ACCOUNT_SCOPE}'::uuid`;
+    const LOCAL = `('meeting','claude-code','codex')`;
+    const results: any = { mode: commit ? 'COMMIT — rows DELETED' : 'DRY-RUN — rows that WOULD be deleted (nothing changed)' };
+    const step = async (label: string, countSql: string, deleteSql: string) => {
+      try { const r = await query<any>(commit ? deleteSql : countSql); results[label] = r?.[0]?.n ?? 0; }
+      catch (e: any) { results[label] = `error: ${e?.message}`; }
+    };
+    // 0) Report the current cross-space duplication (context for the sweep).
+    try {
+      const d = await query<any>(
+        `SELECT source, COUNT(*)::int AS items_in_multiple_spaces, SUM(c)::int AS total_rows FROM (
+           SELECT source, source_id, type, COUNT(DISTINCT space_id)::int AS spaces, COUNT(*)::int AS c
+             FROM knowledge_item WHERE space_id IS NOT NULL AND source NOT IN ${LOCAL}
+            GROUP BY source, source_id, type HAVING COUNT(DISTINCT space_id) > 1) x
+         GROUP BY source`);
+      results.dupAcrossSpaces = d ?? [];
+    } catch (e: any) { results.dupAcrossSpaces = `error: ${e?.message}`; }
+    // 1) Ghost threads — any ledger row built for the sentinel bucket.
+    await step('sentinelThreadsDeleted',
+      `SELECT COUNT(*)::int AS n FROM brain_thread WHERE space_id=${SENT}`,
+      `WITH d AS (DELETE FROM brain_thread WHERE space_id=${SENT} RETURNING 1) SELECT COUNT(*)::int AS n FROM d`);
+    // 2) Sentinel-bucket duplicate connector items (a real-space copy exists) — the canonical copy in
+    //    the connected space is kept; only the stranded ACCOUNT_SCOPE row is removed.
+    const dupWhere =
+      `t.space_id=${SENT} AND t.source NOT IN ${LOCAL}
+        AND EXISTS (SELECT 1 FROM knowledge_item r WHERE r.source=t.source AND r.source_id=t.source_id
+             AND r.type=t.type AND r.space_id IS NOT NULL AND r.space_id <> ${SENT} AND r.user_id=t.user_id)`;
+    await step('sentinelDupItemsDeleted',
+      `SELECT COUNT(*)::int AS n FROM knowledge_item t WHERE ${dupWhere}`,
+      `WITH d AS (DELETE FROM knowledge_item t WHERE ${dupWhere} RETURNING 1) SELECT COUNT(*)::int AS n FROM d`);
+    // 3) Edges left dangling by (2) — commit mode only (the endpoint item is now gone).
+    if (commit) {
+      await step('danglingEdgesDeleted',
+        '', `WITH d AS (DELETE FROM brain_edge t WHERE
+              (t.src_kind='item' AND NOT EXISTS (SELECT 1 FROM knowledge_item k WHERE k.id::text=t.src_id))
+           OR (t.dst_kind='item' AND NOT EXISTS (SELECT 1 FROM knowledge_item k WHERE k.id::text=t.dst_id))
+           RETURNING 1) SELECT COUNT(*)::int AS n FROM d`);
+    }
+    return { statusCode: 200, body: JSON.stringify(results, null, 2) } as APIGatewayProxyResult;
+  }
+
   // Commit FINGERPRINT sweep (EventBridge) — Tier 1 of the cost-bounded brain pipeline.
   // Cheap & deterministic: get_commit (a GitHub API call, $0 in LLM tokens) → filenames +
   // stats fingerprint, so semantic candidate-matching has strong signal WITHOUT a diff→LLM
@@ -842,6 +1194,14 @@ export const handler = async (event: APIGatewayProxyEvent): Promise<APIGatewayPr
     // by the single-use `state` nonce). Completes the token exchange server-side.
     if (resource === 'oauth' && segments[1] === 'callback' && method === 'GET') {
       return await completeConnectorOAuthCallback(event);
+    }
+
+    // Public route: self-hosted Slack MCP bridge (Slack Web API behind the MCP protocol). Authed by
+    // the Slack Bearer token the MCP client sends — no JWT. Lets the tool-agnostic agent use Slack
+    // without Slack's hosted-MCP app-approval gate.
+    if (resource === 'mcp' && segments[1] === 'slack' && method === 'POST') {
+      const { handleSlackMcpBridge } = await import('./mcp/bridges/slack');
+      return await handleSlackMcpBridge(event);
     }
 
     // Verify JWT and extract claims
@@ -1222,7 +1582,7 @@ async function handleConnectors(method: string, segments: string[], userId: stri
       // additive — each project keeps its own repos; pruning would delete other projects' items).
       if (!folder && repos.length) {
         await query(
-          `DELETE FROM knowledge_item WHERE user_id=$1 AND workspace_id=$2 AND source='github' AND split_part(source_id,'#',1) <> ALL($3)`,
+          `DELETE FROM knowledge_item WHERE user_id=$1 AND workspace_id=$2 AND source='github' AND split_part(split_part(source_id,'@',1),'#',1) <> ALL($3)`,
           [userId, qsWorkspace, repos],
         ).catch(() => {});
       }
@@ -1309,6 +1669,25 @@ async function handleConnectors(method: string, segments: string[], userId: stri
     const spaceId = String(oauthBody.space || ACCOUNT_SCOPE);
     const { getServerConfig, getCustomConnectorOAuthClient, getRegistryOAuthClient } = await import('./mcp/customConnectors');
     const server = await getServerConfig(userId, workspaceId, id);
+    // DIRECT-REST Google (gmail/gcal/gdrive) — no hosted MCP + no DCR, so use Google's FIXED OAuth
+    // endpoints + the operator-configured client. (If MCP_GOOGLE_URL is set, server.url is non-null and
+    // we fall through to the generic MCP path instead — both modes supported.)
+    const GOOGLE_DIRECT = new Set(['gmail', 'gcal', 'gdrive']);
+    if (GOOGLE_DIRECT.has(id) && (!server || !server.url)) {
+      const client = await getRegistryOAuthClient(id, userId, workspaceId).catch(() => null);
+      if (!client?.clientId) return badRequest('Google is not configured yet — the operator must set GOOGLE_OAUTH_CLIENT_ID / GOOGLE_OAUTH_CLIENT_SECRET.');
+      const { getMcpServer } = await import('./mcp/registry');
+      const scopes = getMcpServer(id)?.scopes || [];
+      const { beginGoogleOAuth } = await import('./connectors/google/oauth');
+      const { authorizeUrl, inflight } = beginGoogleOAuth(client, scopes, oauthCallbackUrl(event));
+      await query(
+        `INSERT INTO oauth_state (state, user_id, source, workspace_id, space_id, inflight) VALUES ($1,$2,$3,$4,$5,$6)
+         ON CONFLICT (state) DO UPDATE SET inflight=EXCLUDED.inflight, workspace_id=EXCLUDED.workspace_id, space_id=EXCLUDED.space_id, created_at=NOW()`,
+        [inflight.state, userId, id, workspaceId, spaceId, JSON.stringify(inflight)],
+      );
+      console.log('connector_oauth_url', JSON.stringify({ source: id, workspace: workspaceId, space: spaceId, mode: 'google-direct' }));
+      return ok({ url: authorizeUrl });
+    }
     if (!server || !server.url) return badRequest('connector has no MCP endpoint');
     // A pre-registered OAuth client: custom connectors carry their own; Google/Slack registry
     // connectors use the operator-configured client (they don't support dynamic registration).
@@ -1382,10 +1761,43 @@ async function handleConnectors(method: string, segments: string[], userId: stri
 // ─── BRAIN (cross-source association graph) ──────────────────────────────────
 async function handleBrain(method: string, segments: string[], userId: string, event: APIGatewayProxyEvent): Promise<APIGatewayProxyResult> {
   if (process.env.CONNECTORS_ENABLED !== '1') return ok({ enabled: false, edges: [] });
+  // MEMBERSHIP GATE (Brain P0): a SPACE's brain is shared by its members. Any GET that targets a
+  // real space must be made by an owner or member; otherwise deny. (Owner of a single-user space →
+  // always allowed, so existing behaviour is unchanged.) Space-scoped reads below then filter by
+  // space_id alone (globally-unique), so all members see one shared brain.
+  if (method === 'GET') {
+    const reqSpace = event.queryStringParameters?.space || null;
+    if (reqSpace && reqSpace !== ACCOUNT_SCOPE && !(await canAccessSpace(userId, getUserEmail(), reqSpace))) {
+      return forbidden('You are not a member of this space.');
+    }
+  }
   if (method === 'GET' && segments[1] === 'edges') {
     const ws = event.queryStringParameters?.workspace;
     if (!ws) return badRequest('workspace required');
     return ok({ enabled: true, edges: await getBrainEdges(userId, ws, 500, event.queryStringParameters?.space || null) });
+  }
+
+  // GET /brain/threads?space= → the THREAD LEDGER (Brain P3): the space's work as open loops with
+  // state (stale/open/advancing/resolved), most-attention-first. Membership-gated above.
+  if (method === 'GET' && segments[1] === 'threads') {
+    const space = event.queryStringParameters?.space || null;
+    if (!space || space === ACCOUNT_SCOPE) return ok({ enabled: true, threads: [] });
+    const { listSpaceThreads } = await import('./connectors/threads');
+    return ok({ enabled: true, threads: await listSpaceThreads(space) });
+  }
+
+  // POST /brain/rebuild?space= → wipe this space's DERIVED brain map (edges/threads/brief/atoms) and
+  // rebuild it from scratch. Source items (meetings/Jira/GitHub + knowledge_graph) are KEPT. The reset
+  // runs synchronously (the map clears at once); the rebuild self-invokes in the background and the UI
+  // watches /brain/progress. Membership-gated. This is the "Rebuild map" button.
+  if (method === 'POST' && segments[1] === 'rebuild') {
+    const space = event.queryStringParameters?.space || null;
+    if (!space || space === ACCOUNT_SCOPE) return badRequest('space required');
+    if (!(await canAccessSpace(userId, getUserEmail(), space))) return forbidden('You are not a member of this space.');
+    const { resetSpaceBrain } = await import('./connectors/brainRebuild');
+    const reset = await resetSpaceBrain(space, true);
+    try { const { kickBrainRebuild } = await import('./kgTrigger'); await kickBrainRebuild(space); } catch { /* cron will still rebuild */ }
+    return ok({ ok: true, reset, rebuilding: true });
   }
 
   // POST /brain/sync?workspace= → ON-DEMAND freshness (the sync-now / open-the-app path).
@@ -1402,6 +1814,9 @@ async function handleBrain(method: string, segments: string[], userId: string, e
       const out: any = { embedded: 0, linked: true };
       try { const { embedKnowledgeItems } = await import('./connectors/embed'); out.embedded = (await embedKnowledgeItems(48)).embedded; } catch { /* best-effort */ }
       try { const { runBrainLink } = await import('./connectors/brainLink'); await runBrainLink({ workspaceId: ws, llmBudget: 8, timeBudgetMs: 18_000 }); } catch { /* best-effort */ }
+      // EVENT-FIRST bind (Brain P2): re-bind THIS space's meetings deterministically ($0) so any
+      // newly-arrived ticket/commit that references a meeting connects in this same nudge.
+      if (syncSpace && syncSpace !== ACCOUNT_SCOPE) { try { const { bindSpace } = await import('./connectors/brainBind'); await bindSpace(syncSpace); } catch { /* best-effort */ } }
       return ok({ enabled: true, ...out, syncedAt: new Date().toISOString() });
     }
     const out: any = { synced: 0, ingested: 0, embedded: 0, fingerprinted: 0 };
@@ -1421,6 +1836,13 @@ async function handleBrain(method: string, segments: string[], userId: string, e
       // LAST: file the (now-linked) connector data into the right space (follow-linked-meeting),
       // so this single sync both forms the links AND scopes them to the space.
       try { const { backfillSpaceScoping } = await import('./spaces'); await backfillSpaceScoping(userId); } catch { /* best-effort */ }
+      // EVENT-FIRST bind (Brain P2): the sync that INGESTED the data also ASSOCIATES it — re-bind this
+      // space's meetings deterministically ($0) so freshly-pulled tickets/commits connect immediately.
+      if (syncSpace && syncSpace !== ACCOUNT_SCOPE) {
+        try { const { bindSpace } = await import('./connectors/brainBind'); out.bound = await bindSpace(syncSpace); } catch { /* best-effort */ }
+        // THREAD LEDGER (Brain P3): refresh this space's open loops after binding (state reads lineage).
+        try { const { buildSpaceThreads } = await import('./connectors/threads'); out.threads = await buildSpaceThreads(syncSpace); } catch { /* best-effort */ }
+      }
     } catch (err: any) {
       console.error('brain_sync_now_failed', JSON.stringify({ message: err?.message }));
     }
@@ -1456,11 +1878,23 @@ async function handleBrain(method: string, segments: string[], userId: string, e
     const meetings = sugg?.meetings ?? 0, reasoned = sugg?.reasoned ?? 0;
     const graphPending = Math.max(0, total - linked);
     const suggPending = Math.max(0, meetings - reasoned);
+    // MEANING-LAYER health (CF-4): expose whether the LLM/embedding layer is degraded (e.g. provider
+    // credits depleted) + the user's daily brain-budget headroom. The DETERMINISTIC build above never
+    // stops; this tells the UI to show "connections are being enriched" vs "enrichment paused".
+    const { getLlmHealth, checkBrainBudget } = await import('./connectors/budget');
+    const health = await getLlmHealth().catch(() => ({ status: 'ok', providers: [] }));
+    const bud = await checkBrainBudget(userId).catch(() => null);
     return ok({
       graph: { total, processed: linked, pending: graphPending },
       suggestions: { total: meetings, processed: reasoned, pending: suggPending },
       pct: total ? Math.round((linked / total) * 100) : 100,
       processing: graphPending > 0 || suggPending > 0,
+      meaning: {
+        status: health.status,                              // 'ok' | 'degraded' | 'down'
+        providers: health.providers,
+        note: health.status === 'ok' ? null : 'The meaning layer (AI enrichment) is paused; deterministic connections are unaffected.',
+        budget: bud ? { spentToday: bud.spentToday, dailyLimit: bud.dailyLimit, remaining: bud.remaining, exhausted: !bud.allowed && !bud.unlimited } : null,
+      },
     });
   }
 
@@ -1496,34 +1930,47 @@ async function handleBrain(method: string, segments: string[], userId: string, e
       [userId, ws, scopeId],
     ).catch(() => []);
     for (const r of risky) alerts.push({ type: r.advisory_assessment === 'risk' ? 'risk' : 'concern', severity: r.advisory_assessment === 'risk' ? 'high' : 'low', title: r.title, detail: r.advisory_note || 'Architectural attention suggested', url: r.url ?? null });
-    // 3) Stalled work — a task in progress with no update for over a week.
-    const stalled = await query<any>(
-      `SELECT title, status, occurred_at, links->>'url' url FROM knowledge_item
-        WHERE user_id=$1 AND workspace_id=$2 AND source='jira' AND status ~* 'progress|review|doing'
-          AND occurred_at < NOW() - INTERVAL '7 days'
-          AND ($3::uuid IS NULL OR ${sc}=$3) ORDER BY occurred_at ASC LIMIT 15`,
-      [userId, ws, scopeId],
-    ).catch(() => []);
-    for (const s of stalled) alerts.push({ type: 'stalled', severity: 'medium', title: s.title, detail: `Stuck in "${s.status}" since ${new Date(s.occurred_at).toISOString().slice(0, 10)}`, url: s.url ?? null });
-    // 4) Untracked decisions — a meeting (>7d ago) that HAD action items / decisions but never
-    //    became a Jira task (no edge to any jira item). "Decided, but nobody is tracking it."
-    const untracked = await query<any>(
-      `SELECT ki.title, ki.occurred_at,
-              jsonb_array_length(COALESCE(kg.action_items, '[]'::jsonb)) ai,
-              jsonb_array_length(COALESCE(kg.decisions, '[]'::jsonb)) dec
-         FROM knowledge_item ki
-         JOIN knowledge_graph kg ON kg.task_id::text = ki.source_id AND kg.user_id = ki.user_id
-        WHERE ki.user_id=$1 AND ki.workspace_id=$2 AND ki.source='meeting'
-          AND ki.occurred_at < NOW() - INTERVAL '7 days'
-          AND ($3::uuid IS NULL OR ki.${sc}=$3)
-          AND (jsonb_array_length(COALESCE(kg.action_items, '[]'::jsonb)) > 0 OR jsonb_array_length(COALESCE(kg.decisions, '[]'::jsonb)) > 0)
-          AND NOT EXISTS (
-            SELECT 1 FROM brain_edge e JOIN knowledge_item ji ON ji.id::text = e.dst_id
-             WHERE e.user_id=ki.user_id AND e.workspace_id=ki.workspace_id AND e.src_id = ki.id::text AND ji.source='jira')
-        ORDER BY ki.occurred_at DESC LIMIT 15`,
-      [userId, ws, scopeId],
-    ).catch(() => []);
-    for (const u of untracked) alerts.push({ type: 'untracked', severity: 'medium', title: u.title, detail: `Had ${u.ai} action item(s) / ${u.dec} decision(s) but no Jira task exists — decided ${new Date(u.occurred_at).toISOString().slice(0, 10)}`, url: null });
+    // 3) + 4) Stalled work + untracked decisions — for a SPACE view these are now read from the
+    //    THREAD LEDGER (Brain P3.2), the single source of truth for work state, instead of recomputed
+    //    heuristics. (Folder/workspace-aggregate views fall back to the heuristics below.)
+    if (space && !folder) {
+      const staleTickets = await query<any>(
+        `SELECT title, evidence FROM brain_thread WHERE space_id=$1 AND kind='ticket' AND state='stale'
+          ORDER BY updated_at DESC LIMIT 15`, [space],
+      ).catch(() => []);
+      for (const s of staleTickets) alerts.push({ type: 'stalled', severity: 'medium', title: s.title, detail: `Stuck in "${s.evidence?.status || 'in progress'}" — no movement in over a week`, url: null });
+      const gaps = await query<any>(
+        `SELECT title, evidence FROM brain_thread WHERE space_id=$1 AND kind='gap' AND state IN ('open','stale')
+          ORDER BY (state='stale') DESC, updated_at DESC LIMIT 15`, [space],
+      ).catch(() => []);
+      for (const g of gaps) alerts.push({ type: 'untracked', severity: 'medium', title: g.title, detail: `Had ${g.evidence?.actionCount || 0} action item(s) / ${g.evidence?.decisionCount || 0} decision(s) but no Jira task exists`, url: null });
+    } else {
+      const stalled = await query<any>(
+        `SELECT title, status, occurred_at, links->>'url' url FROM knowledge_item
+          WHERE user_id=$1 AND workspace_id=$2 AND source='jira' AND status ~* 'progress|review|doing'
+            AND occurred_at < NOW() - INTERVAL '7 days'
+            AND ($3::uuid IS NULL OR ${sc}=$3) ORDER BY occurred_at ASC LIMIT 15`,
+        [userId, ws, scopeId],
+      ).catch(() => []);
+      for (const s of stalled) alerts.push({ type: 'stalled', severity: 'medium', title: s.title, detail: `Stuck in "${s.status}" since ${new Date(s.occurred_at).toISOString().slice(0, 10)}`, url: s.url ?? null });
+      const untracked = await query<any>(
+        `SELECT ki.title, ki.occurred_at,
+                jsonb_array_length(COALESCE(kg.action_items, '[]'::jsonb)) ai,
+                jsonb_array_length(COALESCE(kg.decisions, '[]'::jsonb)) dec
+           FROM knowledge_item ki
+           JOIN knowledge_graph kg ON kg.task_id::text = ki.source_id AND kg.user_id = ki.user_id
+          WHERE ki.user_id=$1 AND ki.workspace_id=$2 AND ki.source='meeting'
+            AND ki.occurred_at < NOW() - INTERVAL '7 days'
+            AND ($3::uuid IS NULL OR ki.${sc}=$3)
+            AND (jsonb_array_length(COALESCE(kg.action_items, '[]'::jsonb)) > 0 OR jsonb_array_length(COALESCE(kg.decisions, '[]'::jsonb)) > 0)
+            AND NOT EXISTS (
+              SELECT 1 FROM brain_edge e JOIN knowledge_item ji ON ji.id::text = e.dst_id
+               WHERE e.user_id=ki.user_id AND e.workspace_id=ki.workspace_id AND e.src_id = ki.id::text AND ji.source='jira')
+          ORDER BY ki.occurred_at DESC LIMIT 15`,
+        [userId, ws, scopeId],
+      ).catch(() => []);
+      for (const u of untracked) alerts.push({ type: 'untracked', severity: 'medium', title: u.title, detail: `Had ${u.ai} action item(s) / ${u.dec} decision(s) but no Jira task exists — decided ${new Date(u.occurred_at).toISOString().slice(0, 10)}`, url: null });
+    }
     return ok({ enabled: true, alerts });
   }
 
@@ -1547,12 +1994,16 @@ async function handleBrain(method: string, segments: string[], userId: string, e
     if (!ws || !rawId || !/^\d+$/.test(rawId)) return badRequest('workspace + numeric id required');
     // STRICTLY (workspace + space)-scoped: the node, its timeline and its connections all belong
     // to the same space the brain map is showing.
+    // SPACE view (Brain P0): the node + its timeline + connections scope by space_id (shared brain;
+    // membership gated above). Root view stays owner-scoped.
+    const bySpace = !!nodeSpace && nodeSpace !== ACCOUNT_SCOPE;
+    const STATUS_SUB = `(SELECT k2.status FROM knowledge_item k2 WHERE k2.user_id=ki.user_id AND k2.source=ki.source AND k2.source_id=ki.source_id AND k2.status IS NOT NULL ORDER BY k2.synced_at DESC NULLS LAST LIMIT 1)`;
+    const NODE_COLS = `ki.id, ki.source, ki.type, ki.title, ki.body, ki.enriched_summary, ki.fingerprint, ki.people, ki.links, ki.source_id, ki.occurred_at, ${STATUS_SUB} AS status, ki.advisory_assessment, ki.advisory_note`;
     const node = await queryOne<any>(
-      `SELECT ki.id, ki.source, ki.type, ki.title, ki.body, ki.enriched_summary, ki.fingerprint, ki.people, ki.links, ki.source_id, ki.occurred_at,
-              (SELECT k2.status FROM knowledge_item k2 WHERE k2.user_id=ki.user_id AND k2.source=ki.source AND k2.source_id=ki.source_id AND k2.status IS NOT NULL ORDER BY k2.synced_at DESC NULLS LAST LIMIT 1) AS status,
-              ki.advisory_assessment, ki.advisory_note
-         FROM knowledge_item ki WHERE ki.user_id=$1 AND ki.workspace_id=$2 AND ($4::uuid IS NULL OR ki.space_id=$4) AND ki.id=$3`,
-      [userId, ws, rawId, nodeSpace],
+      bySpace
+        ? `SELECT ${NODE_COLS} FROM knowledge_item ki WHERE ki.space_id=$1 AND ki.id=$2`
+        : `SELECT ${NODE_COLS} FROM knowledge_item ki WHERE ki.user_id=$1 AND ki.workspace_id=$2 AND ($4::uuid IS NULL OR ki.space_id=$4) AND ki.id=$3`,
+      bySpace ? [nodeSpace, rawId] : [userId, ws, rawId, nodeSpace],
     ).catch(() => null);
     if (!node) return notFound();
     // On-demand enrichment: if you OPEN a commit that has no diff-summary yet, generate it now
@@ -1572,18 +2023,19 @@ async function handleBrain(method: string, segments: string[], userId: string, e
       `SELECT d.kind, d.actor, d.from_state, d.to_state, d.occurred_at FROM (
          SELECT DISTINCT ON (e.kind, e.to_state, e.occurred_at) e.kind, e.actor, e.from_state, e.to_state, e.occurred_at, e.created_at
            FROM brain_event e
-          WHERE e.user_id=$1 AND e.source=$2 AND e.source_id=$3
+          WHERE ${bySpace ? 'e.space_id=$1' : 'e.user_id=$1'} AND e.source=$2 AND e.source_id=$3
           ORDER BY e.kind, e.to_state, e.occurred_at, e.created_at DESC
        ) d ORDER BY d.occurred_at DESC NULLS LAST LIMIT 12`,
-      [userId, node.source, node.source_id],
+      [bySpace ? nodeSpace : userId, node.source, node.source_id],
     ).catch(() => []);
     const edges = await neighboursOf(userId, ws, 'item', rawId, 40, nodeSpace).catch(() => []);
     // Resolve the OTHER end of each edge to a real item (title/source/url), keep the reasoning.
     const otherIds = Array.from(new Set(edges.map((e) => (e.src_id === rawId ? e.dst_id : e.src_id)).filter((x) => /^\d+$/.test(x))));
     const others = otherIds.length ? await query<any>(
-      `SELECT id, source, type, title, source_id, links FROM knowledge_item
-         WHERE user_id=$1 AND workspace_id=$2 AND ($4::uuid IS NULL OR space_id=$4) AND id = ANY($3::bigint[])`,
-      [userId, ws, otherIds, nodeSpace],
+      bySpace
+        ? `SELECT id, source, type, title, source_id, links FROM knowledge_item WHERE space_id=$1 AND id = ANY($2::bigint[])`
+        : `SELECT id, source, type, title, source_id, links FROM knowledge_item WHERE user_id=$1 AND workspace_id=$2 AND ($4::uuid IS NULL OR space_id=$4) AND id = ANY($3::bigint[])`,
+      bySpace ? [nodeSpace, otherIds] : [userId, ws, otherIds, nodeSpace],
     ).catch(() => []) : [];
     const byId = new Map(others.map((o: any) => [String(o.id), o]));
     const connections = edges.map((e) => {
@@ -1634,21 +2086,24 @@ async function handleBrain(method: string, segments: string[], userId: string, e
     // The correlated subquery makes a node show the LIVE status even when the viewed space holds a
     // stale copy — without touching rows or edge ids. (user-scoped → tenant-safe.)
     const FRESH_STATUS = `(SELECT k2.status FROM knowledge_item k2 WHERE k2.user_id=ki.user_id AND k2.source=ki.source AND k2.source_id=ki.source_id AND k2.status IS NOT NULL ORDER BY k2.synced_at DESC NULLS LAST LIMIT 1)`;
+    // SPACE view (Brain P0): scope by space_id ALONE → nodes from ALL members of the space (shared
+    // brain; membership gated above). Root/workspace view stays owner-scoped.
+    const bySpace = !!viewSpace && viewSpace !== ACCOUNT_SCOPE;
     const items = (folder || space)
       ? await query<any>(
-          `SELECT ki.id, ki.source, ki.type, ki.title, ki.source_id, ki.links, ${FRESH_STATUS} AS status FROM knowledge_item ki
-            WHERE ki.user_id=$1 AND ki.workspace_id=$2
-              AND ($3::uuid IS NULL OR ki.space_id=$3)
-              AND ($4::uuid IS NULL OR ki.folder_id=$4)
-            LIMIT 2000`,
-          [userId, ws, viewSpace, folder],
+          bySpace
+            ? `SELECT ki.id, ki.source, ki.type, ki.title, ki.source_id, ki.links, ${FRESH_STATUS} AS status FROM knowledge_item ki
+                WHERE ki.space_id=$1 AND ($2::uuid IS NULL OR ki.folder_id=$2) LIMIT 2000`
+            : `SELECT ki.id, ki.source, ki.type, ki.title, ki.source_id, ki.links, ${FRESH_STATUS} AS status FROM knowledge_item ki
+                WHERE ki.user_id=$1 AND ki.workspace_id=$2 AND ($3::uuid IS NULL OR ki.space_id=$3) AND ($4::uuid IS NULL OR ki.folder_id=$4) LIMIT 2000`,
+          bySpace ? [viewSpace, folder] : [userId, ws, viewSpace, folder],
         ).catch(() => [])
       : await query<any>(
           `SELECT ki.id, ki.source, ki.type, ki.title, ki.source_id, ki.links, ${FRESH_STATUS} AS status FROM knowledge_item ki
             WHERE ki.user_id=$1 AND ki.workspace_id=$2 LIMIT 2000`,
           [userId, ws],
         ).catch(() => []);
-    const nodes: any[] = items.map((i: any) => ({ id: `item:${i.id}`, kind: 'item', source: i.source, type: i.type, title: i.title || i.source_id, url: i.links?.url ?? null, status: i.status ?? null }));
+    const nodes: any[] = items.map((i: any) => ({ id: `item:${i.id}`, kind: 'item', source: i.source, source_id: i.source_id, type: i.type, title: i.title || i.source_id, url: i.links?.url ?? null, status: i.status ?? null }));
     // Edges: strictly scoped to the view's SPACE; the client also drops any edge whose endpoints
     // aren't both visible nodes, so only intra-scope lineage renders.
     const edges = await getBrainEdges(userId, ws, 1500, viewSpace);

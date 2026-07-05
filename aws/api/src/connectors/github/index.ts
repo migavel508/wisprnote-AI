@@ -76,29 +76,43 @@ registerConnector({
             for (const it of (Array.isArray(parsed?.items) ? parsed.items : [])) pushIssue(it, isPr);
           } catch (e: any) { console.error('github_sync_failed', JSON.stringify({ tool, full, message: e?.message })); }
         }
+        // COMMITS — from EVERY branch, not just the default. `list_commits` defaults to the default
+        // branch, so feature-branch work was invisible. List branches, pull each (bounded), dedup by
+        // sha (a commit on multiple branches ingests once).
+        let branches: string[] = [''];   // '' → default branch (list_commits with no sha)
         try {
-          const r = await mcpCallTool(server, token, 'list_commits', { owner, repo, perPage: 20 });
-          const parsed = parseText(r);
-          const commits: any[] = Array.isArray(parsed) ? parsed : Array.isArray(parsed?.commits) ? parsed.commits : Array.isArray(parsed?.items) ? parsed.items : [];
-          for (const c of commits) {
-            const sha = (c.sha || c.oid || '').toString().slice(0, 7);
-            const msg = (c.commit?.message || c.message || '').toString();
-            if (!sha || !msg) continue;
-            // Tier-0 filter: skip MERGE commits (>1 parent) — they carry no own diff, just
-            // noise. The real work lives in the parent commits we already ingest.
-            if (Array.isArray(c.parents) && c.parents.length > 1) continue;
-            const when = c.commit?.author?.date || c.commit?.committer?.date || null;
-            const author = c.author?.login || c.commit?.author?.name || null;
-            items.push({
-              source: 'github', source_id: `${full}@${sha}`, type: 'commit',
-              title: `${repo}@${sha}: ${msg.split('\n')[0].slice(0, 120)}`,
-              body: msg, actor: author, people: { author },
-              links: { url: c.html_url || `https://github.com/${full}/commit/${c.sha || sha}` }, raw: c,
-              occurred_at: when,
-            });
-            if (when && when > maxUpdated) maxUpdated = when;
-          }
-        } catch (e: any) { console.error('github_sync_failed', JSON.stringify({ tool: 'list_commits', full, message: e?.message })); }
+          const rb = await mcpCallTool(server, token, 'list_branches', { owner, repo, perPage: 50 });
+          const pb = parseText(rb);
+          const names = (Array.isArray(pb) ? pb : Array.isArray(pb?.branches) ? pb.branches : Array.isArray(pb?.items) ? pb.items : [])
+            .map((b: any) => b?.name).filter(Boolean);
+          if (names.length) branches = names.slice(0, 6);
+        } catch { /* list_branches unsupported → default branch only */ }
+        const seenSha = new Set<string>();
+        for (const branch of branches) {
+          try {
+            const r = await mcpCallTool(server, token, 'list_commits', { owner, repo, perPage: 30, ...(branch ? { sha: branch } : {}) });
+            const parsed = parseText(r);
+            const commits: any[] = Array.isArray(parsed) ? parsed : Array.isArray(parsed?.commits) ? parsed.commits : Array.isArray(parsed?.items) ? parsed.items : [];
+            for (const c of commits) {
+              const sha = (c.sha || c.oid || '').toString().slice(0, 7);
+              const msg = (c.commit?.message || c.message || '').toString();
+              if (!sha || !msg || seenSha.has(sha)) continue;
+              // Tier-0 filter: skip MERGE commits (>1 parent) — they carry no own diff, just noise.
+              if (Array.isArray(c.parents) && c.parents.length > 1) continue;
+              seenSha.add(sha);
+              const when = c.commit?.author?.date || c.commit?.committer?.date || null;
+              const author = c.author?.login || c.commit?.author?.name || null;
+              items.push({
+                source: 'github', source_id: `${full}@${sha}`, type: 'commit',
+                title: `${repo}@${sha}: ${msg.split('\n')[0].slice(0, 120)}`,
+                body: msg, actor: author, people: { author },
+                links: { url: c.html_url || `https://github.com/${full}/commit/${c.sha || sha}` }, raw: c,
+                occurred_at: when,
+              });
+              if (when && when > maxUpdated) maxUpdated = when;
+            }
+          } catch (e: any) { console.error('github_sync_failed', JSON.stringify({ tool: 'list_commits', full, branch, message: e?.message })); }
+        }
       }
     } else {
       // UNMAPPED MODE: everything the user is involved in across all repos (issues + PRs).

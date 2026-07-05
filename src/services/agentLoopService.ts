@@ -67,9 +67,9 @@ export interface AgentLoopResult {
   pendingApproval?: { name: string; args: any }[]; // tools the model wanted but that need approval
 }
 
-const MAX_STEPS = 8;          // hard ceiling on model turns
-const MAX_TOOL_CALLS = 6;     // total tool-call budget → then a synthesis turn is forced
-const PER_TOOL_CAP = 2;       // max calls to the SAME tool before nudging the model to answer
+const MAX_STEPS = 14;         // hard ceiling on model turns (multi-step "find → act" tasks need room)
+const MAX_TOOL_CALLS = 20;    // total tool-call budget → then a synthesis turn is forced
+const PER_TOOL_CAP = 5;       // max calls to the SAME tool before nudging the model to move on
 
 const DEFAULT_SYSTEM = [
   "You are Wisprnote's assistant. The user runs their work through a connected brain — meetings,",
@@ -117,13 +117,18 @@ export async function runAgentLoop(
   const seen = new Map<string, string>();    // dedup identical tool calls within this run
   const perTool = new Map<string, number>(); // per-tool-name call counter (cap repeats)
   let toolCallCount = 0;                      // hard budget across the whole run
-  let forceSynthesis = false;                 // set when a step made no real progress
+  let forceSynthesis = false;                 // set when the model is genuinely stuck
+  let noProgressStreak = 0;                   // consecutive steps with no NEW info (single ones are fine)
+  let anySuccess = false;                     // did any real tool (read/write) succeed? drives the ending
 
   const finish = (text: string, steps: number): AgentLoopResult => {
     opts.onStep?.({ kind: 'done', text, steps });
     return { text, steps, messages, pendingApproval: pendingApproval.length ? pendingApproval : undefined };
   };
   const FALLBACK = "I couldn't find enough in your connected sources to answer that confidently. Try rephrasing, or point me at a specific meeting, project, or ticket.";
+  // The right ending when the model produces no closing text: if the agent actually DID work
+  // (a tool succeeded — e.g. a Slack message sent), never claim we "couldn't find" anything.
+  const ending = (text?: string) => text || (anySuccess ? 'Done — I completed the requested actions.' : FALLBACK);
 
   for (let step = 0; step < maxSteps; step++) {
     // SYNTHESIS step: the last step, OR once the model is spinning / has spent its tool budget. We
@@ -151,10 +156,10 @@ export async function runAgentLoop(
 
     // HARD STOP: on a synthesis step we take the answer and return, ignoring any tool calls the
     // model may still have emitted. This is the guarantee that the loop cannot dead-end.
-    if (synth) return finish(turn.text || FALLBACK, step + 1);
+    if (synth) return finish(ending(turn.text), step + 1);
 
     // Model answered with no tools → done.
-    if (!turn.toolCalls.length) return finish(turn.text || FALLBACK, step + 1);
+    if (!turn.toolCalls.length) return finish(ending(turn.text), step + 1);
 
     // PASS 1 — run every tool in parallel. Reads/built-ins execute; write/ask come back as
     // requiresApproval (gate). Repeat / over-used / budget-exceeded calls are short-circuited with a
@@ -172,18 +177,22 @@ export async function runAgentLoop(
       if (!isTodo && seen.has(key)) {
         r = { ok: true, content: `(You already ran ${tc.name} with these exact arguments — reuse that result. Do NOT repeat it; answer now if you can.)` };
       } else if (!isTodo && used >= PER_TOOL_CAP) {
-        r = { ok: true, content: `(You've already called ${tc.name} ${used} times — stop searching with it and answer the user from what you have.)` };
+        r = { ok: true, content: `(You've already called ${tc.name} ${used} times — you have enough from it. Do NOT call it again. PROCEED to the next step of the task now: if the user asked you to take an action (e.g. send a Slack message, create a ticket), call that tool with what you found; otherwise give your final answer.)` };
       } else {
         r = await postAI<ExecResult>('agent-exec', { workspaceId: opts.workspaceId, toolName: tc.name, args: tc.args })
           .catch((e): ExecResult => ({ ok: false, isError: true, content: `tool transport error: ${String(e?.message || e)}` }));
-        if (r.ok && !isTodo) { seen.set(key, r.content); progressed = true; }
+        if (r.ok && !isTodo) { seen.set(key, r.content); progressed = true; anySuccess = true; }
       }
       if (!isTodo) { perTool.set(tc.name, used + 1); toolCallCount++; }
       return { tc, uid, progressed, r };
     }));
 
-    // No NEW information this step (all repeats/caps) → force the next turn to synthesize.
-    if (first.every((x) => !x.progressed)) forceSynthesis = true;
+    // Track no-progress steps, but DON'T kill the loop on a single one — the model often makes a
+    // redundant search and then legitimately moves to the ACTION step (e.g. send the message). Only
+    // force synthesis after TWO consecutive no-progress steps (genuinely stuck). A step that made
+    // progress resets the streak.
+    if (first.every((x) => !x.progressed)) { noProgressStreak++; if (noProgressStreak >= 2) forceSynthesis = true; }
+    else noProgressStreak = 0;
 
     // PASS 2 — resolve approvals SERIALLY (the human decides one at a time); the await can span
     // minutes with nothing server-side held open. On approve, re-run via the gated write executor.
@@ -202,6 +211,7 @@ export async function runAgentLoop(
           pendingApproval.push({ name: tc.name, args: tc.args });
         }
       }
+      if (res.ok && tc.name !== 'todo_write') anySuccess = true;   // an approved write that executed counts
       opts.onStep?.({ kind: 'tool_result', id: uid, name: tc.name, ok: res.ok, requiresApproval: res.requiresApproval, content: res.content, step });
       resultBlocks.push({ type: 'tool_result', tool_use_id: tc.id, content: res.content, is_error: res.isError || res.requiresApproval });
     }
@@ -209,5 +219,5 @@ export async function runAgentLoop(
   }
 
   // Unreachable in practice (the synthesis step always returns), but keep a graceful final answer.
-  return finish(FALLBACK, maxSteps);
+  return finish(ending(), maxSteps);
 }

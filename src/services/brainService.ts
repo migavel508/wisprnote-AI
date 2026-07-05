@@ -12,7 +12,7 @@ const baseFetch: typeof globalThis.fetch = isTauri
   ? (tauriFetch as unknown as typeof globalThis.fetch)
   : globalThis.fetch;
 
-export interface BrainNode { id: string; kind: string; source: string; type?: string; title: string; url?: string | null; status?: string | null }
+export interface BrainNode { id: string; kind: string; source: string; source_id?: string; type?: string; title: string; url?: string | null; status?: string | null }
 export interface BrainLink { source: string; target: string; relation: string; origin: string; verdict?: string | null; rationale?: string | null }
 export interface BrainEvent { kind: string; source: string; sourceId?: string | null; actor?: string | null; from?: string | null; to?: string | null; title?: string | null; at?: string | null }
 
@@ -70,6 +70,22 @@ export async function getBrainAlerts(workspaceId: string, folderId?: string | nu
     if (!r.ok) return [];
     const d = await r.json();
     return Array.isArray(d.alerts) ? d.alerts : [];
+  } catch { return []; }
+}
+
+export interface BrainThread { kind: string; anchor_source: string; anchor_source_id: string; title: string | null; state: 'open' | 'advancing' | 'resolved' | 'stale'; opened_at: string | null; last_advanced_at: string | null; evidence: { status?: string; commits?: string[]; meetings?: string[]; actionCount?: number; decisionCount?: number } | null }
+
+/** The THREAD LEDGER (Brain P3): the space's work as open loops with state, most-attention-first. */
+export async function getBrainThreads(workspaceId: string, spaceId?: string | null): Promise<BrainThread[]> {
+  try {
+    const token = await getIdToken();
+    const sq = spaceId ? `&space=${encodeURIComponent(spaceId)}` : '';
+    const r = await baseFetch(`${API_BASE}/brain/threads?workspace=${encodeURIComponent(workspaceId)}${sq}`, {
+      headers: { 'Content-Type': 'application/json', Authorization: token },
+    });
+    if (!r.ok) return [];
+    const d = await r.json();
+    return Array.isArray(d.threads) ? d.threads : [];
   } catch { return []; }
 }
 

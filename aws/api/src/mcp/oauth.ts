@@ -30,7 +30,7 @@ async function getJson(url: string): Promise<any | null> {
   } catch { return null; }
 }
 
-interface AuthMeta { registration_endpoint?: string; authorization_endpoint: string; token_endpoint: string; scopes_supported?: string[] }
+interface AuthMeta { registration_endpoint?: string; authorization_endpoint: string; token_endpoint: string; scopes_supported?: string[]; resource_scopes?: string[] }
 
 /**
  * Discover the authorization server + its endpoints for an MCP server.
@@ -66,6 +66,9 @@ export async function discoverMcpAuth(mcpUrl: string): Promise<AuthMeta> {
     authorization_endpoint: meta.authorization_endpoint,
     token_endpoint: meta.token_endpoint,
     scopes_supported: meta.scopes_supported,
+    // RFC 9728: the scopes THIS resource requires. When present (e.g. Slack), these are the exact,
+    // valid scopes to request — authoritative over our hardcoded guesses.
+    resource_scopes: Array.isArray(prm?.scopes_supported) ? prm.scopes_supported : undefined,
   };
 }
 
@@ -96,7 +99,17 @@ export async function beginMcpOAuth(server: McpServer, redirectUri: string, prov
   if (!server.url) throw new Error(`MCP server ${server.id} has no endpoint`);
   const meta = await discoverMcpAuth(server.url);
 
-  const scope = [...new Set([...(server.scopes ?? []), 'offline_access'])].join(' ');
+  // SCOPES — prefer what the SERVER advertises via discovery (the reference / MCP-spec behavior):
+  //   1. the resource's required scopes (RFC 9728 protected-resource metadata), else
+  //   2. the authorization server's scopes_supported (RFC 8414), else
+  //   3. our registry scopes + offline_access (the Jira/GitHub fallback — unchanged).
+  // This fixes providers that reject unknown scopes: e.g. Slack has no `offline_access`, so blindly
+  // appending it caused "Invalid permissions requested". When the server tells us the exact scopes,
+  // we request precisely those and add offline_access ONLY if the server itself lists it.
+  const discovered = (meta.resource_scopes?.length ? meta.resource_scopes
+    : (meta.scopes_supported?.length ? meta.scopes_supported : null));
+  const scopeList = discovered ?? [...(server.scopes ?? []), 'offline_access'];
+  const scope = [...new Set(scopeList)].join(' ');
   let client_id: string; let client_secret: string | null;
   if (providedClient?.clientId) {
     client_id = providedClient.clientId;

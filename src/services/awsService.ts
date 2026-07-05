@@ -200,11 +200,21 @@ export interface ModelTokenUsage {
   calls: number;
 }
 
+/** Per-product-function usage (this calendar month) — drives the Analytics breakdown. */
+export interface FeatureTokenUsage {
+  feature: string;
+  input_tokens: number;
+  output_tokens: number;
+  total_tokens: number;
+  audio_seconds: number;
+  calls: number;
+}
+
 /** Detailed usage for the billing screen (this calendar month). */
 export interface UsageSummary {
   plan: string;
   planLabel: string;
-  tokens: { totalTokens: number; totalAudioSeconds?: number; calls: number; byModel: ModelTokenUsage[] };
+  tokens: { totalTokens: number; totalAudioSeconds?: number; calls: number; byModel: ModelTokenUsage[]; byFeature?: FeatureTokenUsage[] };
   meetings: { used: number; limit: number | null; period: 'total' | 'month'; remaining: number | null };
   batchHours: { usedHours: number; limitHours: number | null; remainingHours: number | null };
 }

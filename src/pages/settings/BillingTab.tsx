@@ -366,9 +366,8 @@ export default function BillingTab({ session }: { session: AuthSession | null })
       </div>
       <p className="text-[13px] text-app-fg-subtle tracking-[-0.01em] mb-6">
         Choose the plan that fits your workflow. Checkout opens securely in your browser, powered by Paddle.
+        {' '}Your token &amp; audio usage now lives in <span className="font-medium text-app-fg-muted">Settings → Analytics</span>.
       </p>
-
-      <UsagePanel usage={usage} loading={usageLoading} />
 
       {!configured && (
         <div className="mb-6 rounded-xl border border-dashed border-app-divider bg-app-canvas px-4 py-3 text-[12px] text-app-fg-subtle tracking-[-0.01em]">

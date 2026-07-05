@@ -33,6 +33,10 @@ export function ensureUsageSchema(): Promise<void> {
       // seconds of audio processed alongside token columns so one usage_events
       // table covers every model (Deepgram, Gemini, Claude) uniformly.
       await query('ALTER TABLE usage_events ADD COLUMN IF NOT EXISTS audio_seconds NUMERIC NOT NULL DEFAULT 0');
+      // FEATURE dimension — which product function spent the tokens (transcription, meeting,
+      // chat, brain, knowledge-graph, assets, dictionary, …). Lets the Analytics panel break
+      // usage down by function, not just by model. Rows written before this default to 'other'.
+      await query("ALTER TABLE usage_events ADD COLUMN IF NOT EXISTS feature TEXT NOT NULL DEFAULT 'other'");
       // Distinguish uploaded ("batch") meetings from realtime recordings so the
       // batch-hour caps can be enforced without counting live transcription.
       await query("ALTER TABLE task_history ADD COLUMN IF NOT EXISTS source TEXT NOT NULL DEFAULT 'realtime'");
@@ -47,25 +51,69 @@ export interface TokenMetrics {
   total_tokens?: number;
 }
 
-/** Persist one AI call's token usage. Never throws (billing must not break calls). */
+/** Product function that spent the tokens (drives the Analytics breakdown). */
+export type UsageFeature =
+  | 'transcription' | 'meeting' | 'chat' | 'brain' | 'knowledge-graph' | 'assets' | 'dictionary' | 'other';
+
+/** Normalize an arbitrary feature string (e.g. from a client header) to a known bucket. */
+export function normalizeFeature(f?: string | null): UsageFeature {
+  const v = String(f || '').toLowerCase().trim();
+  const known: UsageFeature[] = ['transcription', 'meeting', 'chat', 'brain', 'knowledge-graph', 'assets', 'dictionary', 'other'];
+  return (known as string[]).includes(v) ? (v as UsageFeature) : 'other';
+}
+
+/** Persist one AI call's token usage, tagged by FEATURE. Never throws (billing must not break calls). */
 export async function recordTokenUsage(
   userId: string,
   provider: string,
   model: string | undefined,
   m: TokenMetrics,
+  feature: UsageFeature | string = 'other',
 ): Promise<void> {
   const total = m.total_tokens || ((m.input_tokens || 0) + (m.output_tokens || 0));
   if (!userId || total <= 0) return;
   try {
     await ensureUsageSchema();
     await query(
-      `INSERT INTO usage_events (user_id, provider, model, input_tokens, output_tokens, total_tokens)
-       VALUES ($1,$2,$3,$4,$5,$6)`,
-      [userId, provider, model || null, m.input_tokens || 0, m.output_tokens || 0, total],
+      `INSERT INTO usage_events (user_id, provider, model, input_tokens, output_tokens, total_tokens, feature)
+       VALUES ($1,$2,$3,$4,$5,$6,$7)`,
+      [userId, provider, model || null, m.input_tokens || 0, m.output_tokens || 0, total, normalizeFeature(feature)],
     );
   } catch (e) {
     console.error('recordTokenUsage failed:', e);
   }
+}
+
+/**
+ * Parse a raw provider response's usage block and record it, tagged by feature. Handles the
+ * three response shapes (Anthropic `usage`, Gemini `usageMetadata`, OpenAI/OpenRouter `usage`).
+ * Best-effort — used to meter the server-side direct calls (brain verdict, KG extract/link)
+ * that don't go through the proxy. Never throws.
+ */
+export async function recordProviderUsage(
+  userId: string,
+  feature: UsageFeature | string,
+  provider: string,
+  model: string | undefined,
+  apiJson: any,
+): Promise<void> {
+  try {
+    let input = 0, output = 0;
+    if (provider === 'anthropic') {
+      input = Number(apiJson?.usage?.input_tokens) || 0;
+      output = Number(apiJson?.usage?.output_tokens) || 0;
+    } else if (provider === 'gemini' || provider === 'google') {
+      const u = apiJson?.usageMetadata || {};
+      input = Number(u.promptTokenCount) || 0;
+      output = (Number(u.candidatesTokenCount) || 0) + (Number(u.thoughtsTokenCount) || 0);
+      if (!input && !output) output = Number(u.totalTokenCount) || 0;
+    } else {
+      const u = apiJson?.usage || {};
+      input = Number(u.prompt_tokens) || 0;
+      output = Number(u.completion_tokens) || 0;
+    }
+    if (input || output) await recordTokenUsage(userId, provider, model, { input_tokens: input, output_tokens: output }, feature);
+  } catch { /* best-effort — metering must never break a call */ }
 }
 
 /**
@@ -79,14 +127,15 @@ export async function recordAudioUsage(
   provider: string,
   model: string | undefined,
   audioSeconds: number,
+  feature: UsageFeature | string = 'transcription',
 ): Promise<void> {
   if (!userId || !(audioSeconds > 0)) return;
   try {
     await ensureUsageSchema();
     await query(
-      `INSERT INTO usage_events (user_id, provider, model, audio_seconds)
-       VALUES ($1,$2,$3,$4)`,
-      [userId, provider, model || null, audioSeconds],
+      `INSERT INTO usage_events (user_id, provider, model, audio_seconds, feature)
+       VALUES ($1,$2,$3,$4,$5)`,
+      [userId, provider, model || null, audioSeconds, normalizeFeature(feature)],
     );
   } catch (e) {
     console.error('recordAudioUsage failed:', e);
@@ -123,6 +172,33 @@ export async function getMonthlyTokenUsage(userId: string): Promise<{ totalToken
   const totalAudioSeconds = byModel.reduce((s, r) => s + (Number(r.audio_seconds) || 0), 0);
   const calls = byModel.reduce((s, r) => s + (r.calls || 0), 0);
   return { totalTokens, totalAudioSeconds, calls, byModel };
+}
+
+export interface FeatureUsageRow {
+  feature: string;
+  input_tokens: number;
+  output_tokens: number;
+  total_tokens: number;
+  audio_seconds: number;
+  calls: number;
+}
+
+/** Token + audio usage for the current calendar month, grouped by FEATURE (the Analytics breakdown). */
+export async function getMonthlyUsageByFeature(userId: string): Promise<FeatureUsageRow[]> {
+  await ensureUsageSchema();
+  return query<FeatureUsageRow>(
+    `SELECT COALESCE(feature,'other') AS feature,
+            SUM(input_tokens)::int    AS input_tokens,
+            SUM(output_tokens)::int   AS output_tokens,
+            SUM(total_tokens)::int    AS total_tokens,
+            SUM(audio_seconds)::float AS audio_seconds,
+            COUNT(*)::int             AS calls
+     FROM usage_events
+     WHERE user_id=$1 AND created_at >= date_trunc('month', now())
+     GROUP BY COALESCE(feature,'other')
+     ORDER BY total_tokens DESC, audio_seconds DESC`,
+    [userId],
+  );
 }
 
 /** Meeting count used vs the plan's cap (lifetime total for free, else this month). */

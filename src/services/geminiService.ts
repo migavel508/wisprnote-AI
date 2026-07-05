@@ -64,7 +64,7 @@ async function geminiGenerateContentRest(requestOptions: any, timeoutMs = 120000
     // through the authed Lambda proxy, which injects the Gemini key server-side.
     resp = await aiProxyFetch(url, {
       method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
+      headers: { 'Content-Type': 'application/json', 'X-Usage-Feature': requestOptions.__feature || 'other' },
       body: JSON.stringify(body),
       signal: controller.signal,
     });
@@ -281,6 +281,7 @@ async function callOpenRouter(requestOptions: any): Promise<GenerateContentRespo
       'Content-Type': 'application/json',
       'HTTP-Referer': typeof window !== 'undefined' ? window.location.origin : 'https://wisprnote.app',
       'X-Title': 'WisprNote AI',
+      'X-Usage-Feature': requestOptions.__feature || 'other',   // usage analytics attribution
     },
     body: JSON.stringify(body),
   }, 90000);
@@ -538,6 +539,7 @@ Now transcribe the spoken audio verbatim. If no speech is present, return empty 
 
   const response = await generateWithFallback(
     {
+      __feature: 'transcription',
       model: MODELS.transcription.primary,
       contents: [
         {
@@ -725,6 +727,7 @@ ${prompt ? `Additional context (domain vocabulary to look out for): ${prompt}` :
 Now transcribe the complete audio verbatim. If no speech is present, return empty text. Do not apologize or explain — just output the transcript:`;
 
   const response = await generateWithFallback({
+    __feature: 'transcription',
     model: MODELS.transcription.primary,
     contents: [{
       parts: [
@@ -774,6 +777,7 @@ ${sample}`;
 
   try {
     const response = await generateContent({
+      __feature: 'meeting',
       model: MODELS.summary.primary,
       contents: instruction,
       config: {
@@ -913,6 +917,7 @@ ${sample}`;
 
   try {
     const response = await generateContent({
+      __feature: 'meeting',
       model: MODELS.summary.primary,
       contents: instruction,
       config: {
@@ -964,6 +969,7 @@ ${sample}`;
 
 export async function generateSummary(text: string): Promise<string> {
   const response = await generateWithFallback({
+    __feature: 'meeting',
     model: MODELS.summary.primary,
     contents: `You are a professional meeting summarizer. Create a comprehensive summary of the following transcription.
 
@@ -1005,6 +1011,7 @@ export async function generateMeetingTitle(transcription: string): Promise<strin
   const context = buildTitleContext(transcription);
 
   const response = await generateWithFallback({
+    __feature: 'meeting',
     model: MODELS.title.primary,
     contents: `Title this meeting in 3-6 words based on the OVERALL discussion (not just the opening). Output the title only — no quotes, no trailing punctuation, no explanation.
 
@@ -1029,6 +1036,7 @@ ${context}`,
 
 export async function generateNotes(text: string): Promise<string> {
   const response = await generateWithFallback({
+    __feature: 'meeting',
     model: MODELS.notes.primary,
     contents: `You are a professional note-taker. Transform the following transcription into structured, comprehensive notes.
 
@@ -1421,7 +1429,7 @@ async function generateAnswerWithAnthropic(opts: {
 
   const resp = await aiProxyFetch('https://api.anthropic.com/v1/messages', {
     method: 'POST',
-    headers: { 'Content-Type': 'application/json' },
+    headers: { 'Content-Type': 'application/json', 'X-Usage-Feature': 'chat' },
     body: JSON.stringify(body),
   });
   if (!resp.ok) {
@@ -1465,7 +1473,7 @@ async function generateAnswerWithGemini(opts: {
   const url = `https://generativelanguage.googleapis.com/v1alpha/models/${encodeURIComponent(opts.model)}:generateContent`;
   const resp = await aiProxyFetch(url, {
     method: 'POST',
-    headers: { 'Content-Type': 'application/json' },
+    headers: { 'Content-Type': 'application/json', 'X-Usage-Feature': 'chat' },
     body: JSON.stringify(body),
   });
   if (!resp.ok) {
@@ -1569,6 +1577,7 @@ ${fullContext}`;
 
   const runGemini = async (): Promise<string> => {
     const response = await generateWithFallback({
+      __feature: 'chat',
       model: MODELS.singleMeetingChat.primary,
       contents: [
         ...recentHistory,
@@ -3159,6 +3168,7 @@ ${notes}`;
     }
 
     const response = await generateWithFallback({
+      __feature: 'assets',
       model: MODELS.notesVisualization.primary,
       contents: prompt,
     }, [...MODELS.notesVisualization.fallbacks!]);
@@ -3182,6 +3192,7 @@ ${notes}`;
 
 export async function generateEmailContent(text: string): Promise<any> {
   const response: GenerateContentResponse = await generateContent({
+    __feature: 'assets',
     model: MODELS.email.primary,
     contents: `You are an expert executive assistant. Based on the following meeting transcription, generate a highly detailed, professional follow-up email.
     DO NOT MISS ANY DETAILS. Capture every single decision, discussion point, and task mentioned in the meeting.
@@ -3571,6 +3582,7 @@ export async function generateWikiContent(text: string, style: 'MECE' | 'PRD'): 
     : `Generate a comprehensive Product Requirements Document (PRD). Include detailed sections for UI/UX Requirements, User Stories, Developer Team Tasks, and Competitor Analysis.`;
 
   const response: GenerateContentResponse = await generateContent({
+    __feature: 'assets',
     model: MODELS.wiki.primary,
     contents: `Based on the following meeting transcription, ${prompt}
     
@@ -3616,6 +3628,7 @@ export async function generateWikiContent(text: string, style: 'MECE' | 'PRD'): 
 
 export async function generatePodcastScript(text: string): Promise<any> {
   const response: GenerateContentResponse = await generateContent({
+    __feature: 'assets',
     model: MODELS.podcastScript.primary,
     contents: `You are two engaging podcast hosts, Alex and Sarah. Based on the following meeting transcription or notes, create an engaging, dynamic podcast script.
     - Alex is the lead host, energetic and curious.
@@ -3661,6 +3674,7 @@ export async function chatWithPodcast(context: string, currentDialogue: any[], u
   const dialogueHistory = currentDialogue.map(d => `${d.speaker}: ${d.text}`).join('\n');
   
   const response: GenerateContentResponse = await generateContent({
+    __feature: 'assets',
     model: MODELS.podcastChat.primary,
     contents: `You are two engaging podcast hosts, Alex and Sarah, currently mid-recording. 
     A special guest (the User) has just joined the studio live and said something.

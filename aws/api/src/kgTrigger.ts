@@ -18,6 +18,20 @@ function client(): LambdaClient {
   return _client;
 }
 
+/** Fire-and-forget: rebuild a space's brain map end-to-end in a background self-invoke (the reset
+ *  already ran synchronously in the request, so the UI shows a cleared map immediately). */
+export async function kickBrainRebuild(spaceId: string): Promise<void> {
+  try {
+    await client().send(new InvokeCommand({
+      FunctionName: FUNCTION_NAME,
+      InvocationType: 'Event',
+      Payload: Buffer.from(JSON.stringify({ __job: 'brain-rebuild', spaceId, commit: true, rebuild: true })),
+    }));
+  } catch (err: any) {
+    console.error('brain_rebuild_kick_failed', JSON.stringify({ spaceId, message: err?.message }));
+  }
+}
+
 export async function kickMeetingPipeline(userId: string, taskId: string): Promise<void> {
   try {
     await client().send(new InvokeCommand({

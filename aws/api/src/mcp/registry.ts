@@ -65,31 +65,38 @@ export const MCP_SERVERS: Record<string, McpServer> = {
     notes: 'Official Slack MCP server (Salesforce/Slack + Anthropic), OAuth, admin-approved. Endpoint not pinned here — confirm from docs. Community alt: korotovsky/slack-mcp-server (stdio).',
   },
   gmail: {
-    id: 'gmail', label: 'Gmail (Google Workspace MCP)',
+    id: 'gmail', label: 'Gmail (Google Workspace)',
     transport: 'streamable-http', url: null,
     auth: 'oauth2.0', official: true,
-    scopes: ['https://www.googleapis.com/auth/gmail.readonly', 'https://www.googleapis.com/auth/gmail.send'],
-    docs: 'https://developers.google.com/workspace/guides/configure-mcp-servers',
+    // gmail.modify is the single scope covering the full hosted-connector tool surface: read/search
+    // threads + labels + drafts (read), and create draft, create/add/remove labels, trash (write).
+    // It does NOT grant permanent delete or send (we expose neither). Direct-REST, no MCP endpoint.
+    scopes: ['https://www.googleapis.com/auth/gmail.modify'],
+    docs: 'https://developers.google.com/workspace/gmail/api/auth/scopes',
     status: 'beta',
-    notes: 'Google Workspace remote MCP (per-service, OAuth 2.0, configured via an OAuth client). Community all-in-one alt: taylorwilsdon/google_workspace_mcp (OAuth 2.1, self-host).',
+    notes: 'Direct-REST Google connector (no MCP endpoint). Replicates the hosted Claude-for-Gmail tool set (4 read + 8 write) via connectors/google/tools.ts. gmail.modify is a RESTRICTED scope → production GA needs Google app verification + CASA; testing/unverified works for up to 100 consenting users.',
   },
   gcal: {
-    id: 'gcal', label: 'Google Calendar (Google Workspace MCP)',
+    id: 'gcal', label: 'Google Calendar (Google Workspace)',
     transport: 'streamable-http', url: null,
     auth: 'oauth2.0', official: true,
-    scopes: ['https://www.googleapis.com/auth/calendar.readonly', 'https://www.googleapis.com/auth/calendar.events'],
-    docs: 'https://developers.google.com/workspace/calendar/api/guides/configure-mcp-server',
+    // Full `calendar` scope covers all 8 hosted-connector tools: list/get events, list calendars,
+    // free/busy (read) + create/update/respond/delete (write). RESTRICTED scope → GA needs verification.
+    scopes: ['https://www.googleapis.com/auth/calendar'],
+    docs: 'https://developers.google.com/workspace/calendar/api/auth',
     status: 'beta',
-    notes: 'Google Calendar remote MCP, OAuth 2.0. Same Google Workspace MCP family as gmail/gdrive.',
+    notes: 'Direct-REST Google connector. 4 read (events, get, calendar list, free/busy) + 4 write (create, update, respond, delete) via connectors/google/tools.ts.',
   },
   gdrive: {
-    id: 'gdrive', label: 'Google Drive (Google Workspace MCP)',
+    id: 'gdrive', label: 'Google Drive (Google Workspace)',
     transport: 'streamable-http', url: null,
     auth: 'oauth2.0', official: true,
-    scopes: ['https://www.googleapis.com/auth/drive.readonly'],
-    docs: 'https://developers.google.com/workspace/guides/configure-mcp-servers',
+    // Full `drive` scope covers all 8 hosted-connector tools: search/list/metadata/permissions/read/
+    // download (read) + copy/create (write). RESTRICTED scope → GA needs verification + CASA.
+    scopes: ['https://www.googleapis.com/auth/drive'],
+    docs: 'https://developers.google.com/workspace/drive/api/guides/api-specific-auth',
     status: 'beta',
-    notes: 'Google Drive remote MCP (read), OAuth 2.0.',
+    notes: 'Direct-REST Google connector. 6 read + 2 write (copy, create) via connectors/google/tools.ts.',
   },
   'claude-code': {
     id: 'claude-code', label: 'Claude Code sessions',

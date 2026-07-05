@@ -92,6 +92,28 @@ export async function mcpListTools(server: McpServer, token: string): Promise<an
   return body.result?.tools ?? [];
 }
 
+/**
+ * Resolve a requested tool name against a server's LIVE tool list — CONNECTOR-AGNOSTIC.
+ * Catalogs (connector_tool) go stale when a provider renames tools, and model-issued names can vary
+ * in case/prefix. One tolerant resolver used by EVERY call path (agent exec, HITL writes, sweeps):
+ *   1. exact  2. case-insensitive  3. requested has a `<connector>_` prefix the server doesn't
+ *   4. server has a prefix the requested name doesn't  5. normalized (strip all non-alphanumerics).
+ * Returns the LIVE tool def (call it by def.name) or null. No per-connector rules — the connector
+ * id is just an optional prefix hint that works for any provider.
+ */
+export function resolveLiveTool(tools: any[], requested: string, connector?: string): any | null {
+  if (!Array.isArray(tools) || !tools.length || !requested) return null;
+  const lc = requested.toLowerCase();
+  const norm = (s: string) => s.toLowerCase().replace(/[^a-z0-9]+/g, '');
+  const pfx = connector ? `${connector.toLowerCase()}_` : null;
+  return tools.find((t: any) => t?.name === requested)
+    ?? tools.find((t: any) => String(t?.name || '').toLowerCase() === lc)
+    ?? (pfx && lc.startsWith(pfx) ? tools.find((t: any) => String(t?.name || '').toLowerCase() === lc.slice(pfx.length)) : null)
+    ?? (pfx ? tools.find((t: any) => String(t?.name || '').toLowerCase() === pfx + lc) : null)
+    ?? tools.find((t: any) => norm(String(t?.name || '')) === norm(requested))
+    ?? null;
+}
+
 /** Call one tool and return its result. */
 export async function mcpCallTool(server: McpServer, token: string, name: string, args: Record<string, unknown>): Promise<any> {
   if (!server.url) throw new Error(`MCP server ${server.id} has no endpoint configured`);

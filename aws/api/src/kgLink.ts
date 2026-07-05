@@ -1,5 +1,6 @@
 import { query, queryOne } from './db';
 import { getSecrets } from './secrets';
+import { recordProviderUsage } from './usage';
 import { ensureKgGraphSchema } from './kgEmbed';
 import { queryNearestMeetings } from './kgVector';
 import { MODELS, chain } from './models/registry';
@@ -100,7 +101,7 @@ No markdown, no prose. If no relationships are found, return [].`;
 const REASONER_TIMEOUT_MS = 24_000;
 
 /** POST one generateContent call to `model`, hard-bounded. Returns raw text, or null to try the next model / retry. */
-async function reasonerCall(model: string, prompt: string, apiKey: string): Promise<{ text: string } | { fail: 'next' | 'stop' }> {
+async function reasonerCall(model: string, prompt: string, apiKey: string, userId?: string): Promise<{ text: string } | { fail: 'next' | 'stop' }> {
   const ctrl = new AbortController();
   const timer = setTimeout(() => ctrl.abort(), REASONER_TIMEOUT_MS);
   let resp: Response;
@@ -137,16 +138,17 @@ async function reasonerCall(model: string, prompt: string, apiKey: string): Prom
     return { fail: resp.status === 404 ? 'next' : 'stop' }; // 404 → try fallback model
   }
   const data: any = await resp.json();
+  if (userId) void recordProviderUsage(userId, 'knowledge-graph', 'gemini', model, data).catch(() => {});
   return { text: String(data.candidates?.[0]?.content?.parts?.[0]?.text || '[]') };
 }
 
-async function callReasoner(prompt: string): Promise<Relationship[] | null> {
+async function callReasoner(prompt: string, userId?: string): Promise<Relationship[] | null> {
   const { GEMINI_API_KEY } = await getSecrets();
   if (!GEMINI_API_KEY) return null;
 
   let rawText: string | null = null;
   for (const model of LINK_MODELS) {
-    const r = await reasonerCall(model, prompt, GEMINI_API_KEY);
+    const r = await reasonerCall(model, prompt, GEMINI_API_KEY, userId);
     if ('text' in r) { rawText = r.text; break; }
     if (r.fail === 'next') continue;  // model unavailable — try fallback
     return null;                       // transient — retry whole meeting next tick
@@ -202,7 +204,10 @@ async function linkOne(userId: string, taskId: string): Promise<'done' | 'retry'
     // Postgres brute-force over the most-recent CANDIDATE_CAP, so a transient
     // Turbopuffer outage degrades gracefully instead of breaking.
     let ranked: Array<{ task_id: string; sim: number }>;
-    const ann = await queryNearestMeetings(userId, taskId, selfVec, TOP_K);
+    // ONE-INDEX (2026-07-04): the `lumina-kg-meetings` turbopuffer namespace is RETIRED — the brain's
+    // single index is `lumina-knowledge-items`. kgLink now uses the Postgres brute-force over
+    // kg_embeddings directly (meeting counts are small → fine). Set KG_USE_TURBOPUFFER=1 to restore ANN.
+    const ann = process.env.KG_USE_TURBOPUFFER === '1' ? await queryNearestMeetings(userId, taskId, selfVec, TOP_K) : null;
     if (ann != null) {
       ranked = ann.map((n) => ({ task_id: n.taskId, sim: n.similarity }));
     } else {
@@ -247,7 +252,7 @@ async function linkOne(userId: string, taskId: string): Promise<'done' | 'retry'
 
     // Relationship edges (the reasoning node) — only if we have KG context.
     if (selfKg && neighbourKg.length > 0) {
-      const rels = await callReasoner(buildPrompt(selfKg, neighbourKg));
+      const rels = await callReasoner(buildPrompt(selfKg, neighbourKg), userId);
       if (rels == null) return 'retry'; // transient model failure — retry next sweep (edges already partial; DELETE on retry fixes it)
       const validIds = new Set(ids);
       for (const rel of rels) {

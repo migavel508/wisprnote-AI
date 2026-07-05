@@ -204,32 +204,25 @@ function toMs(iso: string | null): number {
 
 async function embedOne(r: KGRow): Promise<'done' | 'retry'> {
   try {
-    const topics = (r.topics || []).filter((t) => t && typeof t.name === 'string' && t.name.trim().length > 0);
-    // Index 0 = the whole-meeting text; the rest are per-topic, in order.
-    const texts = [buildMeetingEmbedText(r), ...topics.map(buildTopicEmbedText)];
+    // D-4 fold (cost): embed ONLY the whole-meeting text. Per-topic vectors (kind='topic') were
+    // written here but EVERY reader (kgLink Stage C, reindex, kg-stats) filters kind='meeting' — the
+    // topic vectors were never read, so embedding them was pure recurring Gemini spend. Removed.
+    const texts = [buildMeetingEmbedText(r)];
     const vectors = await embedTexts(texts);
     if (vectors == null) return 'retry'; // transient — next sweep
-
-    const rows: Array<{ kind: string; key: string; vec: number[] }> = [
-      { kind: 'meeting', key: '__meeting__', vec: vectors[0] },
-      ...topics.map((t, i) => ({ kind: 'topic', key: topicKey(t.name), vec: vectors[i + 1] })),
-    ];
-    for (const row of rows) {
-      if (!Array.isArray(row.vec) || row.vec.length === 0) continue;
+    const vec = vectors[0];
+    if (Array.isArray(vec) && vec.length > 0) {
       await queryOne(
         `INSERT INTO kg_embeddings (user_id, task_id, kind, item_key, vector, model, dim)
-         VALUES ($1,$2,$3,$4,$5,$6,$7)
+         VALUES ($1,$2,'meeting','__meeting__',$3,$4,$5)
          ON CONFLICT (user_id, task_id, kind, item_key)
          DO UPDATE SET vector=EXCLUDED.vector, model=EXCLUDED.model, dim=EXCLUDED.dim, created_at=NOW()`,
-        [r.user_id, r.task_id, row.kind, row.key, JSON.stringify(row.vec), EMBED_MODELS[0], row.vec.length],
+        [r.user_id, r.task_id, JSON.stringify(vec), EMBED_MODELS[0], vec.length],
       );
-    }
-
-    // Mirror the meeting-level vector into Turbopuffer for indexed ANN neighbour
-    // search (Stage C). Best-effort — Postgres is the source of truth, and the
-    // reindex job repairs any gaps; a mirror failure must not re-trigger embedding.
-    if (Array.isArray(vectors[0]) && vectors[0].length > 0) {
-      await upsertMeetingVector(r.user_id, r.task_id, vectors[0], toMs(r.created_at)).catch(() => false);
+      // ONE-INDEX (2026-07-04): no longer mirror into the retired `lumina-kg-meetings` turbopuffer
+      // namespace — kgLink reads the meeting vector from kg_embeddings (Postgres) directly, and the
+      // brain reuses this same vector into the single `lumina-knowledge-items` index (embed-once).
+      if (process.env.KG_USE_TURBOPUFFER === '1') await upsertMeetingVector(r.user_id, r.task_id, vec, toMs(r.created_at)).catch(() => false);
     }
     return 'done';
   } catch (err: any) {
@@ -264,6 +257,20 @@ export async function reindexMeetingVectors(): Promise<{ indexed: number }> {
     if (await upsertMeetingVectors(batch)) indexed += batch.length;
   }
   return { indexed };
+}
+
+/** Read the MEETING vectors the KG pipeline already computed (kg_embeddings, kind='meeting'), keyed by
+ *  task_id. Lets the brain REUSE them instead of embedding the same meeting a second time (embed-once).
+ *  Returns a map task_id → vector; only meetings that have been kg-embedded appear. */
+export async function getMeetingVectors(userId: string, taskIds: string[]): Promise<Map<string, number[]>> {
+  const out = new Map<string, number[]>();
+  if (!userId || !taskIds.length) return out;
+  const rows = await query<{ task_id: string; vector: number[] }>(
+    `SELECT task_id, vector FROM kg_embeddings WHERE user_id=$1 AND kind='meeting' AND task_id = ANY($2)`,
+    [userId, taskIds],
+  ).catch(() => []);
+  for (const r of rows) if (Array.isArray(r.vector) && r.vector.length) out.set(String(r.task_id), r.vector as unknown as number[]);
+  return out;
 }
 
 /** Embed a single meeting by id (fast-path). No-op if already embedded. */

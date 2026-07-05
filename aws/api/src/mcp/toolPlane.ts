@@ -79,11 +79,46 @@ export interface DiscoverResult { connector: string; discovered: number; error?:
 /** Discover + classify + upsert one connector's tools for a workspace. Idempotent. */
 export async function discoverConnectorTools(userId: string, workspaceId: string, connector: string): Promise<DiscoverResult> {
   await ensureToolPlaneSchema();
+  // DIRECT-REST connectors (Google) have no MCP `tools/list` — populate their STATIC catalog so the
+  // Tools/Permissions UI shows them the moment the user connects (and the agent can call them).
+  try {
+    const { isGoogleConnector, GOOGLE_TOOLS } = await import('../connectors/google/tools');
+    if (isGoogleConnector(connector)) {
+      const catalog = GOOGLE_TOOLS[connector] || [];
+      const names = catalog.map((t) => t.name);
+      // Prune tools no longer in the catalog (e.g. an older/renamed Google tool) so the UI stays clean.
+      if (names.length) {
+        await query(`DELETE FROM connector_tool WHERE user_id=$1 AND workspace_id=$2 AND connector=$3 AND tool_name <> ALL($4::text[])`,
+          [userId, workspaceId, connector, names]).catch(() => {});
+      }
+      let n = 0;
+      for (const t of catalog) {
+        const readOnly = t.klass === 'read';
+        const destructive = t.klass === 'destructive';
+        await query(
+          `INSERT INTO connector_tool (user_id, workspace_id, connector, tool_name, description, input_schema, read_only, destructive, open_world, klass, annotations, discovered_at)
+           VALUES ($1,$2,$3,$4,$5,$6,$7,$8,FALSE,$9,NULL, NOW())
+           ON CONFLICT (user_id, workspace_id, connector, tool_name) DO UPDATE SET
+             description=EXCLUDED.description, input_schema=EXCLUDED.input_schema, read_only=EXCLUDED.read_only,
+             destructive=EXCLUDED.destructive, klass=EXCLUDED.klass, discovered_at=NOW()`,
+          [userId, workspaceId, connector, t.name, t.description, JSON.stringify(t.inputSchema), readOnly, destructive, t.klass],
+        ).catch(() => {});
+        n++;
+      }
+      return { connector, discovered: n };
+    }
+  } catch { /* fall through to the MCP path */ }
   const conn = await resolveMcpConnection(userId, workspaceId, connector).catch(() => null);
-  if (!conn?.server?.url || !conn.token) return { connector, discovered: 0, error: 'not connected' };
+  if (!conn?.server?.url || !conn.token) {
+    console.error('tool_discover_no_conn', JSON.stringify({ connector, hasServer: !!conn?.server?.url, hasToken: !!conn?.token }));
+    return { connector, discovered: 0, error: 'not connected' };
+  }
   let tools: any[];
   try { tools = await mcpListTools(conn.server, conn.token); }
-  catch (e: any) { return { connector, discovered: 0, error: String(e?.message || e).slice(0, 160) }; }
+  catch (e: any) {
+    console.error('tool_discover_list_failed', JSON.stringify({ connector, url: conn.server.url, message: String(e?.message || e).slice(0, 300) }));
+    return { connector, discovered: 0, error: String(e?.message || e).slice(0, 160) };
+  }
 
   let n = 0;
   for (const t of tools || []) {

@@ -18,6 +18,7 @@ import {
 import type { AuthSession } from '../services/awsAuthService';
 import PreferencesTab from './settings/PreferencesTab';
 import BillingTab from './settings/BillingTab';
+import AnalyticsTab from './settings/AnalyticsTab';
 import ConnectionsTab from './settings/ConnectionsTab';
 import AudioDevicesPage from './AudioDevicesPage';
 import { formatDisplayName, formatDisplayInitials } from '../lib/displayName';
@@ -211,6 +212,8 @@ export default function SettingsPage({ session, onClose, onSignOut }: SettingsPa
         <div className="flex-1 overflow-y-auto">
           {tab === 'preferences' ? (
             <PreferencesTab />
+          ) : tab === 'analytics' ? (
+            <AnalyticsTab />
           ) : tab === 'billing' ? (
             <BillingTab session={session} />
           ) : tab === 'connectors' ? (

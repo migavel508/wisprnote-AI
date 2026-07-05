@@ -1,7 +1,7 @@
 import { useEffect, useMemo, useRef, useState } from 'react';
 import ForceGraph2D from 'react-force-graph-2d';
-import { X, Loader2, BrainCircuit, ExternalLink, Users, Calendar, GitCommitHorizontal, ArrowRight, ArrowLeft, RefreshCw, Activity, GitCommit, ArrowRightLeft, AlertTriangle, Plus, Minus, Maximize2 } from 'lucide-react';
-import { getBrainGraph, getBrainNode, syncBrain, getBrainPulse, getBrainAlerts, getBrainProgress, type BrainNode, type BrainLink, type BrainNodeDetail, type BrainEvent, type BrainAlert, type BrainProgress } from '../services/brainService';
+import { X, Loader2, BrainCircuit, ExternalLink, Users, Calendar, GitCommitHorizontal, ArrowRight, ArrowLeft, RefreshCw, Activity, GitCommit, ArrowRightLeft, AlertTriangle, Plus, Minus, Maximize2, ListChecks } from 'lucide-react';
+import { getBrainGraph, getBrainNode, getBrainPulse, getBrainAlerts, getBrainProgress, getBrainThreads, type BrainNode, type BrainLink, type BrainNodeDetail, type BrainEvent, type BrainAlert, type BrainProgress, type BrainThread } from '../services/brainService';
 import { useTheme } from '../theme/ThemeProvider';
 
 /**
@@ -80,15 +80,33 @@ export default function BrainMapModal({ workspaceId, workspaceName, folderId = n
   const isDark = themeResolved === 'dark';
   const [hoverId, setHoverId] = useState<string | null>(null);
 
-  const [syncing, setSyncing] = useState(false);
+  // The brain is built entirely SERVER-SIDE (the connector-sync + brain-link crons run
+  // autonomously — the app doesn't need to be open). This modal is READ-ONLY: it renders the
+  // precomputed graph and can re-read it, but never drives any LLM/link work from the client.
+  const [refreshing, setRefreshing] = useState(false);
   const [lastSync, setLastSync] = useState<string | null>(null);
   const [pulse, setPulse] = useState<BrainEvent[]>([]);
   const [pulseOpen, setPulseOpen] = useState(false);
   const [alerts, setAlerts] = useState<BrainAlert[]>([]);
   const [alertsOpen, setAlertsOpen] = useState(false);
+  const [threads, setThreads] = useState<BrainThread[]>([]);
+  const [threadsOpen, setThreadsOpen] = useState(false);
+  // The FOCUS view — the work as open loops. Resolved threads drop out (not "focus"); stale first.
+  const focusThreads = useMemo(() => threads.filter((t) => t.state !== 'resolved')
+    .sort((a, b) => (a.state === 'stale' ? 0 : a.state === 'open' ? 1 : 2) - (b.state === 'stale' ? 0 : b.state === 'open' ? 1 : 2)), [threads]);
+  const focusCount = useMemo(() => threads.filter((t) => t.state === 'stale').length, [threads]);
 
   const srcColor = (source?: string): string => (source && SOURCE_HUE[source]?.[isDark ? 'dark' : 'light']) || (isDark ? '#9aa0aa' : '#9ca3af');
   const verdictColor = (v?: string | null): string | null => (v ? (VERDICT_HUE[v]?.[isDark ? 'dark' : 'light'] || (isDark ? '#e0a64a' : '#c4862a')) : null);
+  // Three deterministic edge CLASSES drive every line's look (not a verdict/else fork):
+  //   structural — provenance/reference: CERTAIN links (meeting→spawned ticket, "fixes ABC-1").
+  //                Solid, confident accent, reads strongest.
+  //   reasoning  — an LLM verdict exists: coloured by verdict (aligned/partial/divergent), curved,
+  //                glows on focus — the "synapses".
+  //   semantic   — everything else (embedding-only): a QUIET, CONSISTENT dashed grey thread.
+  const structuralColor = isDark ? '#8ab4f8' : '#3b6fd4';
+  const linkClass = (l: any): 'structural' | 'reasoning' | 'semantic' =>
+    (l?.origin === 'provenance' || l?.origin === 'reference') ? 'structural' : (l?.verdict ? 'reasoning' : 'semantic');
   const nodeColor = (n: any): string => srcColor(n?.source);
   // Status → a small ring colour. Backend-agnostic (done/closed/merged = complete; etc).
   const statusRing = (s?: string | null): string | null => {
@@ -99,32 +117,30 @@ export default function BrainMapModal({ workspaceId, workspaceName, folderId = n
   };
 
   const reloadView = async (cancelledRef?: { v: boolean }) => {
-    const [g, p, a] = await Promise.all([getBrainGraph(workspaceId, folderId, spaceId), getBrainPulse(workspaceId, folderId, spaceId), getBrainAlerts(workspaceId, folderId, spaceId)]);
+    const [g, p, a, t] = await Promise.all([getBrainGraph(workspaceId, folderId, spaceId), getBrainPulse(workspaceId, folderId, spaceId), getBrainAlerts(workspaceId, folderId, spaceId), getBrainThreads(workspaceId, spaceId)]);
     if (cancelledRef?.v) return;
-    setData(g); setPulse(p); setAlerts(a);
+    setData(g); setPulse(p); setAlerts(a); setThreads(t);
   };
-  const doSync = async (cancelledRef?: { v: boolean }) => {
-    setSyncing(true);
-    const r = await syncBrain(workspaceId, spaceId);
-    if (cancelledRef?.v) return;
-    if (r?.syncedAt) setLastSync(r.syncedAt);
+  // READ-ONLY refresh: re-read the server's precomputed brain. No sync/LLM is triggered.
+  const doRefresh = async (cancelledRef?: { v: boolean }) => {
+    setRefreshing(true);
     await reloadView(cancelledRef);
-    if (!cancelledRef?.v) setSyncing(false);
+    if (!cancelledRef?.v) { setLastSync(new Date().toISOString()); setRefreshing(false); }
   };
 
   useEffect(() => {
     const ref = { v: false };
-    // 1) paint the CURRENT brain instantly, 2) sync-on-open in the background, then refresh.
+    // Paint the CURRENT (server-built) brain. No client sync — the crons keep it fresh.
     getBrainGraph(workspaceId, folderId, spaceId).then((g) => { if (!ref.v) setData(g); }).finally(() => { if (!ref.v) setLoading(false); });
     getBrainPulse(workspaceId, folderId, spaceId).then((p) => { if (!ref.v) setPulse(p); });
     getBrainAlerts(workspaceId, folderId, spaceId).then((a) => { if (!ref.v) setAlerts(a); });
-    doSync(ref);
+    getBrainThreads(workspaceId, spaceId).then((t) => { if (!ref.v) setThreads(t); });
     return () => { ref.v = true; };
   }, [workspaceId, folderId, spaceId]);
 
-  // PROGRESS DRAIN — while the brain is still building (meetings/connector nodes not yet linked),
-  // poll progress, nudge a cheap LINK pass, and refresh the view so the user watches it evolve to
-  // 100%. The background cron drains it even when this is closed; this just makes it visible + fast.
+  // PROGRESS — while the server is still building (meetings/connector nodes not yet linked by the
+  // cron), poll progress READ-ONLY and re-read the view so the user watches it fill to 100%. This
+  // NEVER drives the work (the autonomous cron does that, app open or not) — it only reflects it.
   const [progress, setProgress] = useState<BrainProgress | null>(null);
   useEffect(() => {
     const ref = { v: false };
@@ -133,12 +149,10 @@ export default function BrainMapModal({ workspaceId, workspaceName, folderId = n
       const p = await getBrainProgress(workspaceId, spaceId);
       if (ref.v) return;
       setProgress(p);
-      if (p?.processing) {
-        await syncBrain(workspaceId, spaceId, true).catch(() => {});   // link-only nudge → advances the cursor
-        if (!ref.v) { await reloadView(ref); timer = setTimeout(tick, 4500); }
-      } else {
-        timer = setTimeout(tick, 20000);   // idle re-check (picks up newly-arrived meetings/connector data)
-      }
+      // Poll faster while the server is actively linking, slower when idle. Read-only either way.
+      const delay = p?.processing ? 6000 : 20000;
+      if (p?.processing) await reloadView(ref);
+      if (!ref.v) timer = setTimeout(tick, delay);
     };
     tick();
     return () => { ref.v = true; clearTimeout(timer); };
@@ -157,7 +171,17 @@ export default function BrainMapModal({ workspaceId, workspaceName, folderId = n
     return () => { ro?.disconnect(); window.removeEventListener('resize', measure); };
   }, [loading]);
 
-  const graph = useMemo(() => ({ nodes: data.nodes.map((n) => ({ ...n })), links: data.links.map((l) => ({ ...l })) }), [data]);
+  const graph = useMemo(() => {
+    // Draw ORDER = array order in force-graph. Sort weak→strong so certain/reasoned edges sit
+    // ON TOP of the quiet semantic threads. Drop 'unrelated' judgments entirely (the server
+    // should already, but never render an off-track line). rank: semantic 0 < reasoning 1 < structural 2.
+    const rank = (l: BrainLink) => (l.origin === 'provenance' || l.origin === 'reference') ? 2 : (l.verdict ? 1 : 0);
+    const links = data.links
+      .filter((l) => l.verdict !== 'unrelated')
+      .map((l) => ({ ...l }))
+      .sort((a, b) => rank(a) - rank(b));
+    return { nodes: data.nodes.map((n) => ({ ...n })), links };
+  }, [data]);
   const sources = useMemo(() => Array.from(new Set(data.nodes.map((n) => n.source))), [data.nodes]);
   const hasVerdicts = useMemo(() => data.links.some((l) => l.verdict), [data.links]);
   // 1-hop adjacency (from the ORIGINAL string-id links, before force-graph mutates them into
@@ -297,8 +321,8 @@ export default function BrainMapModal({ workspaceId, workspaceName, folderId = n
               onEngineStop={() => fgRef.current?.zoomToFit?.(500, 70)}
               minZoom={0.12}
               maxZoom={12}
-              linkCurvature={(l: any) => (l.verdict ? 0.06 : 0)}
-              linkDirectionalParticles={(l: any) => (l.verdict && focusSet && (focusSet.has(idOf(l.source)) && focusSet.has(idOf(l.target))) ? 3 : 0)}
+              linkCurvature={(l: any) => (linkClass(l) === 'reasoning' ? 0.07 : 0)}
+              linkDirectionalParticles={(l: any) => (linkClass(l) === 'reasoning' && focusSet && (focusSet.has(idOf(l.source)) && focusSet.has(idOf(l.target))) ? 3 : 0)}
               linkDirectionalParticleWidth={1.8}
               linkDirectionalParticleSpeed={0.006}
               linkDirectionalParticleColor={(l: any) => verdictColor(l.verdict) || '#999'}
@@ -306,16 +330,18 @@ export default function BrainMapModal({ workspaceId, workspaceName, folderId = n
               onNodeClick={onNodeClick}
               onNodeHover={(n: any) => setHoverId(n?.id ?? null)}
               onBackgroundClick={() => { setDetail(null); setSelLink(null); }}
-              // LINKS — calm at rest: reasoning edges are thin coloured lines (glow ONLY when their
-              // lineage is spotlighted); structural threads are a quiet dashed grey. Off-lineage fades.
+              // LINKS — one visual grammar, three classes (see linkClass): STRUCTURAL = solid
+              // confident accent (certain links, read strongest); REASONING = verdict-coloured,
+              // curved, glows on focus; SEMANTIC = quiet, CONSISTENT dashed grey thread. Off-lineage fades.
               linkCanvasObjectMode={() => 'replace'}
               linkCanvasObject={(link: any, ctx: CanvasRenderingContext2D, scale: number) => {
                 const a = link.source, b = link.target;
                 if (!a || !b || !Number.isFinite(a.x) || !Number.isFinite(a.y) || !Number.isFinite(b.x) || !Number.isFinite(b.y)) return;
+                const cls = linkClass(link);
                 const spotlighting = !!focusSet;
                 const onLineage = spotlighting && focusSet.has(idOf(a)) && focusSet.has(idOf(b));
-                const vCol = verdictColor(link.verdict);
-                const curv = link.verdict ? 0.06 : 0;
+                const faded = spotlighting && !onLineage;
+                const curv = cls === 'reasoning' ? 0.07 : 0;
                 const cx = (a.x + b.x) / 2, cy = (a.y + b.y) / 2;
                 const nx = -(b.y - a.y), ny = (b.x - a.x);
                 const mx = cx + nx * curv, my = cy + ny * curv;
@@ -326,19 +352,29 @@ export default function BrainMapModal({ workspaceId, workspaceName, folderId = n
                 };
                 ctx.save();
                 ctx.lineCap = 'round';
-                if (vCol) {
+                if (cls === 'structural') {
+                  // CERTAIN link — solid confident accent, no dash. Reads strongest; subtle glow on focus.
+                  ctx.setLineDash([]);
+                  ctx.strokeStyle = structuralColor;
+                  ctx.globalAlpha = faded ? 0.12 : onLineage ? 1 : 0.85;
+                  if (onLineage) { ctx.shadowColor = structuralColor; ctx.shadowBlur = 6 / scale; }
+                  draw(onLineage ? 1.8 : 1.4);
+                } else if (cls === 'reasoning') {
+                  const vCol = verdictColor(link.verdict) || (isDark ? '#e0a64a' : '#c4862a');
+                  ctx.setLineDash([]);
                   ctx.strokeStyle = vCol;
                   if (onLineage) {
                     ctx.shadowColor = vCol; ctx.shadowBlur = 8 / scale;
-                    ctx.globalAlpha = 0.95; draw(1.8);
+                    ctx.globalAlpha = 0.95; draw(1.9);
                     ctx.shadowBlur = 0; ctx.globalAlpha = 1; draw(0.8);
                   } else {
-                    ctx.globalAlpha = spotlighting ? 0.06 : 0.5; draw(1);
+                    ctx.globalAlpha = faded ? 0.08 : 0.6; draw(1.1);
                   }
                 } else {
+                  // SEMANTIC — consistent quiet dashed grey (fixed dash + alpha per state).
                   ctx.setLineDash([2 / scale, 5 / scale]);
                   ctx.strokeStyle = isDark ? 'rgba(150,156,172,1)' : 'rgba(124,116,104,1)';
-                  ctx.globalAlpha = onLineage ? 0.6 : spotlighting ? 0.05 : 0.3;
+                  ctx.globalAlpha = onLineage ? 0.55 : faded ? 0.05 : 0.28;
                   draw(0.7);
                   ctx.setLineDash([]);
                 }
@@ -416,13 +452,15 @@ export default function BrainMapModal({ workspaceId, workspaceName, folderId = n
                     </span>
                   ))}
                 </div>
-                {hasVerdicts && (
-                  <div className="flex items-center gap-3 pt-1.5 mt-0.5 border-t border-app-divider/70 text-[10.5px] text-app-fg-subtle">
+                <div className="flex flex-wrap items-center gap-x-3 gap-y-1 pt-1.5 mt-0.5 border-t border-app-divider/70 text-[10.5px] text-app-fg-subtle">
+                  <span className="inline-flex items-center gap-1.5"><span className="w-4 h-[2px] rounded-full" style={{ background: structuralColor }} /> structural</span>
+                  {hasVerdicts && (<>
                     <span className="inline-flex items-center gap-1.5"><span className="w-4 h-[2px] rounded-full" style={{ background: verdictColor('aligned')! }} /> aligned</span>
                     <span className="inline-flex items-center gap-1.5"><span className="w-4 h-[2px] rounded-full" style={{ background: verdictColor('partial')! }} /> partial</span>
                     <span className="inline-flex items-center gap-1.5"><span className="w-4 h-[2px] rounded-full" style={{ background: verdictColor('divergent')! }} /> divergent</span>
-                  </div>
-                )}
+                  </>)}
+                  <span className="inline-flex items-center gap-1.5"><span className="w-4 border-t border-dashed" style={{ borderColor: isDark ? 'rgba(150,156,172,1)' : 'rgba(124,116,104,1)' }} /> related</span>
+                </div>
                 <span className="text-[9.5px] text-app-fg-subtle/70 pt-0.5">Hover a node to spotlight its lineage · zoom in for labels</span>
               </div>
             )}
@@ -441,20 +479,24 @@ export default function BrainMapModal({ workspaceId, workspaceName, folderId = n
           {/* Control cluster — live freshness + activity */}
           {!loading && (
             <div className="absolute top-3 right-3 flex items-center gap-1.5">
-              {(syncing || lastSync) && (
+              {(refreshing || lastSync) && (
                 <span className="text-[10px] text-app-fg-subtle/80 px-1.5 select-none">
-                  {syncing ? 'Syncing…' : `updated ${ago(lastSync)}`}
+                  {refreshing ? 'Refreshing…' : `read ${ago(lastSync)}`}
                 </span>
               )}
-              <button onClick={() => doSync()} disabled={syncing} title="Sync the latest backend state now"
+              <button onClick={() => doRefresh()} disabled={refreshing} title="Re-read the latest brain from the server (built automatically in the background)"
                 className="flex items-center gap-1 text-[11px] px-2 py-1 rounded-md bg-app-canvas/90 border border-app-divider text-app-fg-subtle hover:text-app-fg shadow-sm disabled:opacity-60">
-                <RefreshCw size={11} className={syncing ? 'animate-spin' : ''} /> Sync
+                <RefreshCw size={11} className={refreshing ? 'animate-spin' : ''} /> Refresh
               </button>
-              <button onClick={() => { setAlertsOpen((o) => !o); setPulseOpen(false); }} title="Off-track — what needs attention"
+              <button onClick={() => { setThreadsOpen((o) => !o); setAlertsOpen(false); setPulseOpen(false); }} title="Focus — the work as open loops (what's slipping)"
+                className={`flex items-center gap-1 text-[11px] px-2 py-1 rounded-md border shadow-sm ${threadsOpen ? 'bg-app-accent/15 border-app-accent/40 text-app-accent' : focusCount ? 'bg-amber-500/10 border-amber-500/30 text-amber-500' : 'bg-app-canvas/90 border-app-divider text-app-fg-subtle hover:text-app-fg'}`}>
+                <ListChecks size={11} /> Focus{focusCount ? ` · ${focusCount}` : ''}
+              </button>
+              <button onClick={() => { setAlertsOpen((o) => !o); setPulseOpen(false); setThreadsOpen(false); }} title="Off-track — what needs attention"
                 className={`flex items-center gap-1 text-[11px] px-2 py-1 rounded-md border shadow-sm ${alertsOpen ? 'bg-red-500/15 border-red-500/40 text-red-500' : alerts.length ? 'bg-red-500/10 border-red-500/30 text-red-500' : 'bg-app-canvas/90 border-app-divider text-app-fg-subtle hover:text-app-fg'}`}>
                 <AlertTriangle size={11} /> Off-track{alerts.length ? ` · ${alerts.length}` : ''}
               </button>
-              <button onClick={() => { setPulseOpen((o) => !o); setAlertsOpen(false); }} title="Activity — who did what, when"
+              <button onClick={() => { setPulseOpen((o) => !o); setAlertsOpen(false); setThreadsOpen(false); }} title="Activity — who did what, when"
                 className={`flex items-center gap-1 text-[11px] px-2 py-1 rounded-md border shadow-sm ${pulseOpen ? 'bg-app-accent/15 border-app-accent/40 text-app-accent' : 'bg-app-canvas/90 border-app-divider text-app-fg-subtle hover:text-app-fg'}`}>
                 <Activity size={11} /> Activity{pulse.length ? ` · ${pulse.length}` : ''}
               </button>
@@ -515,6 +557,39 @@ export default function BrainMapModal({ workspaceId, workspaceName, folderId = n
                       </div>
                       {a.detail && <div className="text-[10.5px] text-app-fg-muted leading-snug line-clamp-3">{a.detail}</div>}
                     </button>
+                  );
+                })}
+              </div>
+            </div>
+          )}
+
+          {/* Focus — the THREAD LEDGER: the work as open loops, most-attention-first */}
+          {threadsOpen && (
+            <div className="absolute left-0 top-0 bottom-0 w-[340px] max-w-[82%] bg-app-canvas/97 border-r border-app-divider shadow-2xl flex flex-col z-20">
+              <div className="px-4 py-3 border-b border-app-divider flex items-center gap-2 flex-shrink-0">
+                <ListChecks size={14} className="text-app-accent" />
+                <span className="text-[12px] font-semibold text-app-fg">Focus</span>
+                <span className="text-[10px] text-app-fg-subtle">the work, as open loops</span>
+                <button onClick={() => setThreadsOpen(false)} className="ml-auto w-6 h-6 flex items-center justify-center rounded-md text-app-fg-subtle hover:bg-app-nav-hover-bg hover:text-app-fg"><X size={13} /></button>
+              </div>
+              <div className="flex-1 overflow-y-auto px-3 py-2 space-y-1.5">
+                {focusThreads.length === 0 ? (
+                  <p className="text-[11px] text-app-fg-subtle px-1 py-3 text-center">No open loops — every thread is resolved or on track. ✓</p>
+                ) : focusThreads.map((t, i) => {
+                  const sc = t.state === 'stale' ? (isDark ? '#e0635c' : '#c44d47') : t.state === 'open' ? (isDark ? '#e0a64a' : '#c4862a') : (isDark ? '#8ab4f8' : '#3b6fd4');
+                  const label = t.state === 'stale' ? 'Slipping' : t.state === 'open' ? (t.kind === 'gap' ? 'Untracked' : 'Open') : 'Advancing';
+                  const ev = t.evidence || {};
+                  const detail = t.kind === 'gap'
+                    ? `${ev.actionCount || 0} action item(s) / ${ev.decisionCount || 0} decision(s) — no ticket yet`
+                    : `${(ev.commits?.length || 0)} commit(s) · ${(ev.meetings?.length || 0)} meeting(s)${ev.status ? ` · ${ev.status}` : ''}`;
+                  return (
+                    <div key={i} className="w-full text-left p-2.5 rounded-lg border" style={{ borderColor: `${sc}44`, background: `${sc}0f` }}>
+                      <div className="flex items-center gap-1.5 mb-0.5">
+                        <span className="text-[9px] font-semibold uppercase px-1.5 py-px rounded-full flex-shrink-0" style={{ background: `${sc}22`, color: sc }}>{label}</span>
+                        <span className="text-[11.5px] font-medium text-app-fg truncate">{t.title || t.anchor_source_id}</span>
+                      </div>
+                      <div className="text-[10.5px] text-app-fg-muted leading-snug">{detail}</div>
+                    </div>
                   );
                 })}
               </div>
