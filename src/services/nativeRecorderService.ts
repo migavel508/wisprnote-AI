@@ -1,4 +1,3 @@
-export type RecordingMode = 'batch' | 'realtime';
 
 // ─── Tauri Detection ─────────────────────────────────────────────────────────
 

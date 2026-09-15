@@ -13,8 +13,6 @@ import {
   ChevronUp,
   ChevronDown,
   Sparkles,
-  Radio,
-  Layers,
   Languages,
   Globe,
   Paperclip,
@@ -35,7 +33,6 @@ import {
 } from 'lucide-react';
 
 
-import type { RecordingMode } from '../services/nativeRecorderService';
 import PermissionsGate from '../components/PermissionsGate';
 import Markdown from 'react-markdown';
 import remarkGfm from 'remark-gfm';
@@ -66,8 +63,6 @@ interface ProcessPageProps {
   inputMode: 'upload' | 'record';
   setInputMode: (mode: 'upload' | 'record') => void;
   nativeServerAvailable: boolean;
-  desktopRecordingMode: RecordingMode;
-  setDesktopRecordingMode: (mode: RecordingMode) => void;
   transcriptionLanguage: string;
   setTranscriptionLanguage: (lang: string) => void;
   realtimeTranscript: string[];
@@ -149,8 +144,6 @@ export default function ProcessPage({
   inputMode,
   setInputMode,
   nativeServerAvailable,
-  desktopRecordingMode,
-  setDesktopRecordingMode,
   transcriptionLanguage,
   setTranscriptionLanguage,
   realtimeTranscript,
@@ -826,7 +819,7 @@ export default function ProcessPage({
                 </div>
 
                 {/* Batch list — only for batch mode */}
-                {desktopRecordingMode === 'batch' && batches.length > 0 && (
+                {batches.length > 0 && (
                   <div className="max-h-[180px] overflow-y-auto">
                     {batches.map((batch, idx) => (
                       <div key={idx} className="px-5 py-2.5 flex items-center justify-between">
@@ -920,7 +913,7 @@ export default function ProcessPage({
               </div>
 
               {/* Content */}
-              <div className={`flex-1 px-5 pb-5 ${isRecording && desktopRecordingMode === 'realtime' && inputMode === 'record' ? 'overflow-y-auto' : 'overflow-hidden'}`}>
+              <div className={`flex-1 px-5 pb-5 ${isRecording && inputMode === 'record' ? 'overflow-y-auto' : 'overflow-hidden'}`}>
                 {inputMode === 'upload' ? (
                   /* Upload Mode */
                   <motion.div
@@ -972,7 +965,7 @@ export default function ProcessPage({
                   /* Record Mode */
                   <div className="h-full flex flex-col">
                     {isRecording ? (
-                      desktopRecordingMode === 'realtime' ? (
+                      nativeServerAvailable ? (
                       /* Real-time Recording */
                       <div className="flex flex-col h-full">
                         <div className="flex items-center justify-between py-2 flex-shrink-0">
@@ -1130,35 +1123,9 @@ export default function ProcessPage({
                           <PermissionsGate onAllGranted={onPermissionsGranted} />
                         ) : (
                           <motion.div initial={{ opacity: 0, y: 8 }} animate={{ opacity: 1, y: 0 }} className="flex flex-col items-center gap-5">
+                            {/* Transcription language. English pins the English path;
+                                Multilingual adapts to mixed / code-switched speech. */}
                             {nativeServerAvailable && (
-                              <div className="flex flex-col items-center gap-2">
-                                <div className="flex gap-0.5 bg-[#1a1a1a]/[0.04] dark:bg-app-panel rounded-lg p-0.5 ring-1 ring-transparent dark:ring-white/[0.06]">
-                                  <button
-                                    onClick={() => setDesktopRecordingMode('batch')}
-                                    className={`flex items-center gap-1.5 px-3.5 py-[6px] rounded-md text-[12px] font-medium transition-all ${
-                                      desktopRecordingMode === 'batch' ? 'bg-white dark:bg-app-chip text-zinc-900 dark:text-app-fg shadow-sm shadow-black/[0.04] dark:shadow-black/35' : 'text-zinc-500 dark:text-app-fg-subtle hover:text-zinc-800 dark:hover:text-app-fg-muted'
-                                    }`}
-                                  >
-                                    <Layers className="w-3 h-3" /> Batch
-                                  </button>
-                                  <button
-                                    onClick={() => setDesktopRecordingMode('realtime')}
-                                    className={`flex items-center gap-1.5 px-3.5 py-[6px] rounded-md text-[12px] font-medium transition-all ${
-                                      desktopRecordingMode === 'realtime' ? 'bg-white dark:bg-app-chip text-zinc-900 dark:text-app-fg shadow-sm shadow-black/[0.04] dark:shadow-black/35' : 'text-zinc-500 dark:text-app-fg-subtle hover:text-zinc-800 dark:hover:text-app-fg-muted'
-                                    }`}
-                                  >
-                                    <Radio className="w-3 h-3" /> Real-time
-                                  </button>
-                                </div>
-                                <p className="text-[10px] text-zinc-400 dark:text-zinc-500 text-center max-w-[240px]">
-                                  {desktopRecordingMode === 'batch' ? 'Mic + system audio · transcribed after stop' : 'Live transcription via Deepgram'}
-                                </p>
-                              </div>
-                            )}
-
-                            {/* Transcription language — realtime (Deepgram) only. English enables
-                                keyterm biasing + is most accurate; Multilingual adapts to mixed speech. */}
-                            {desktopRecordingMode === 'realtime' && (
                               <div className="flex flex-col items-center gap-2">
                                 <div className="flex gap-0.5 bg-[#1a1a1a]/[0.04] dark:bg-app-panel rounded-lg p-0.5 ring-1 ring-transparent dark:ring-white/[0.06]">
                                   <button

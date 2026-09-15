@@ -2596,7 +2596,10 @@ async function handleStorage(method: string, segments: string[], userId: string,
     const uploadUrl = await getSignedUrl(s3, command, { expiresIn: 600 });
     const publicUrl = `https://${S3_BUCKET}.s3.${S3_REGION}.amazonaws.com/${key}`;
 
-    return ok({ uploadUrl, publicUrl });
+    // `key` lets a caller reference the object WITHOUT it being publicly readable —
+    // meeting audio is handed to the transcription provider as a short-lived
+    // presigned GET (see /ai/soniox-transcribe), never as a public URL.
+    return ok({ uploadUrl, publicUrl, key });
   }
 
   return notFound();

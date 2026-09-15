@@ -16,7 +16,7 @@ pub mod macos {
     const BUFFER_SIZE: usize = 65536;
 
     /// Downsamples an interleaved mic/system pair from the capture (tap) rate to a
-    /// target rate (16 kHz for Deepgram) by box-filter averaging each source window.
+    /// target rate (16 kHz for Soniox) by box-filter averaging each source window.
     ///
     /// Why: nova-3 runs at 16 kHz internally, so sending the tap's native 48 kHz buys
     /// no accuracy — it just triples the websocket bytes (192 KB/s vs 64 KB/s of stereo
@@ -501,18 +501,18 @@ pub mod macos {
         Ok(())
     }
 
-    // ─── Realtime Recording with Deepgram Integration ──────────────────────────
+    // ─── Realtime Recording with Soniox Integration ──────────────────────────
 
     // Samples per send (mono). Smaller = lower interim latency (faded text appears + firms up
     // faster). ~1600 samples ≈ 33 ms at 48 kHz.
     const CHUNK_SIZE: usize = 1600;
 
-    use crate::deepgram_transcriber::DeepgramTranscriber;
+    use crate::soniox_transcriber::SonioxTranscriber;
 
     pub struct RealtimeRecorder {
         is_recording: Arc<AtomicBool>,
         // When set mid-recording, the capture session tears down the CoreAudio devices
-        // (mic released) but the Deepgram WebSocket is kept warm (see record_realtime).
+        // (mic released) but the Soniox WebSocket is kept warm (see record_realtime).
         // Flipping it is instant — no teardown/rebuild of the streaming pipeline.
         paused: Arc<AtomicBool>,
         transcripts: Arc<Mutex<Vec<String>>>,
@@ -615,11 +615,11 @@ pub mod macos {
         }
     }
 
-    /// Drain every transcript currently queued from Deepgram: emit each to the
+    /// Drain every transcript currently queued from Soniox: emit each to the
     /// frontend and accumulate FINALs into the shared list (dedup consecutive dupes).
     /// Returns true if at least one message was received (used to pace the stop drain).
     fn drain_transcripts(
-        transcriber: &mut DeepgramTranscriber,
+        transcriber: &mut SonioxTranscriber,
         transcripts: &Arc<Mutex<Vec<String>>>,
         app_handle: &tauri::AppHandle,
     ) -> bool {
@@ -656,7 +656,7 @@ pub mod macos {
         let (dev_tx, dev_rx) = std::sync::mpsc::channel();
         let _dev_monitor = device_monitor::spawn_monitor(dev_tx);
 
-        // The Deepgram WebSocket lives for the WHOLE recording — created once here and
+        // The Soniox WebSocket lives for the WHOLE recording — created once here and
         // kept warm across pauses. Its task runs on this runtime, so `_rt` (and the enter
         // guard) MUST outlive the recording. Pause tears down only the CoreAudio capture
         // (mic released); the socket stays open via its 5s KeepAlive, so resume just
@@ -666,7 +666,7 @@ pub mod macos {
             .map_err(|e| anyhow::anyhow!("Failed to create tokio runtime: {}", e))?;
         let _rt_guard = _rt.enter();
         let mut transcriber =
-            DeepgramTranscriber::new(api_key.clone(), TARGET_HZ, keyterms.clone(), language.clone());
+            SonioxTranscriber::new(api_key.clone(), TARGET_HZ, keyterms.clone(), language.clone());
 
         const MAX_ERROR_RETRIES: u32 = 3;
         let mut error_count: u32 = 0;
@@ -721,7 +721,7 @@ pub mod macos {
             }
         }
 
-        // Final stop: close the input so Deepgram flushes its trailing FINALs, then drain
+        // Final stop: close the input so Soniox flushes its trailing FINALs, then drain
         // them ADAPTIVELY — exit as soon as ~400ms passes with nothing new, capped at 1.5s.
         // (Replaces the old fixed 3.5s wait that ran in full on every stop AND every pause.)
         transcriber.close_input();
@@ -746,7 +746,7 @@ pub mod macos {
         is_recording: &Arc<AtomicBool>,
         paused: &Arc<AtomicBool>,
         transcripts: &Arc<Mutex<Vec<String>>>,
-        transcriber: &mut DeepgramTranscriber,
+        transcriber: &mut SonioxTranscriber,
         app_handle: &tauri::AppHandle,
         dev_rx: &std::sync::mpsc::Receiver<crate::device_monitor::DeviceChange>,
     ) -> Result<(), anyhow::Error> {
@@ -820,7 +820,7 @@ pub mod macos {
         let session_start = std::time::Instant::now();
         const DEVICE_CHANGE_GRACE_MS: u64 = 700;
 
-        // Stream to Deepgram at 16 kHz, not the tap's native rate (~48 kHz). nova-3 is a
+        // Stream to Soniox at 16 kHz, not the tap's native rate (~48 kHz). nova-3 is a
         // 16 kHz model, so this is no accuracy loss but ~1/3 the upload bytes — the single
         // biggest lever against latency/stutter/drop-outs in long meetings on a shared uplink.
         const TARGET_HZ: u32 = 16_000;
@@ -943,7 +943,7 @@ pub mod macos {
         }
 
         // Flush any partial chunk (interleaved, mic gated by the last hangover state) so the
-        // last words before a pause/stop reach Deepgram. We do NOT close the input here — the
+        // last words before a pause/stop reach Soniox. We do NOT close the input here — the
         // socket stays warm across pauses; only a true stop (record_realtime) closes + drains.
         if !mic_buf.is_empty() {
             let mic_gain = if mic_mute_hangover > 0 { 0.0 } else { 1.0 };

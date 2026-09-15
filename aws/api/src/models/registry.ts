@@ -15,7 +15,7 @@
  * file. Keep cross-runtime choices intentionally aligned.
  */
 
-export type Provider = 'gemini' | 'anthropic' | 'deepgram' | 'openai' | 'openrouter';
+export type Provider = 'gemini' | 'anthropic' | 'deepgram' | 'soniox' | 'openai' | 'openrouter';
 
 export interface ModelSpec {
   provider: Provider;
@@ -42,8 +42,14 @@ export const MODELS = {
    *  DRIFT: still gemini-2.5-flash while the KG pipeline moved to gemini-3 —
    *  left as-is by the registry migration; change here to unify. */
   chatGemini: { provider: 'gemini', primary: 'gemini-2.5-flash' },
-  /** Audio transcription — Deepgram (ai.ts: /ai/transcribe, deepgram-token, metering). */
+  /** Chat voice-input clips — Deepgram prerecorded (ai.ts: /ai/transcribe).
+   *  NOT the notetaker; meeting audio goes to Soniox (below). */
   transcription: { provider: 'deepgram', primary: 'nova-3' },
+  /** MEETING transcription, live — Soniox over WebSocket. The desktop client
+   *  streams directly using a temporary key from ai.ts: /ai/soniox-token. */
+  meetingLive: { provider: 'soniox', primary: 'stt-rt-v5' },
+  /** MEETING transcription, uploaded files — Soniox async (ai.ts: /ai/soniox-transcribe). */
+  meetingAsync: { provider: 'soniox', primary: 'stt-async-v5' },
   /** AGENTIC CHAT loop — the default tool-use model. Claude via DIRECT Anthropic API
    *  (NOT OpenRouter). The loop is model-agnostic via the agentTurn provider abstraction;
    *  this is just the default when the user hasn't picked a model. Strong tool-use +
