@@ -39,3 +39,11 @@ objc2-foundation = { version = "0.3", features = ["NSProcessInfo", "NSString"] }
 # buttons act on the first click and they never steal focus from the app the
 # user is in (the behavior anarlog/Hyprnote gets from native NSPanels).
 tauri-nspanel = { git = "https://github.com/ahkohd/tauri-nspanel", branch = "v2" }
+# Accessibility (AXUIElement) — reads the meeting app's own participant tiles to
+# learn WHO is speaking. Meeting apps publish no roster API; the accessibility
+# tree is the only surface Zoom/Meet/Teams/Slack all expose to another process.
+core-foundation = "0.9"
+core-foundation-sys = "0.8"
+# NSRunningApplication — resolves a meeting app's bundle id to the process id the
+# accessibility tree is addressed by.
+objc2-app-kit = { version = "0.3", features = ["NSRunningApplication", "NSWorkspace"] }

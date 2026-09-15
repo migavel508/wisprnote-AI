@@ -1,5 +1,5 @@
 import React, { useState, useEffect, useCallback } from 'react';
-import { Mic, Monitor, CheckCircle2, ArrowRight, Loader2, ShieldAlert } from 'lucide-react';
+import { Mic, Monitor, CheckCircle2, ArrowRight, Loader2, ShieldAlert, Users } from 'lucide-react';
 import {
   checkPermissions,
   requestMicrophonePermission,
@@ -7,6 +7,11 @@ import {
   openMicrophoneSettings,
   PermissionStatus,
 } from '../services/permissionService';
+import {
+  isAccessibilityTrusted,
+  requestAccessibilityTrust,
+  openAccessibilitySettings,
+} from '../services/speakerCaptureService';
 
 interface PermissionsGateProps {
   onAllGranted: () => void;
@@ -14,7 +19,36 @@ interface PermissionsGateProps {
 
 export default function PermissionsGate({ onAllGranted }: PermissionsGateProps) {
   const [permissions, setPermissions] = useState<PermissionStatus | null>(null);
-  const [requesting, setRequesting] = useState<'mic' | 'screen' | null>(null);
+  const [requesting, setRequesting] = useState<'mic' | 'screen' | 'ax' | null>(null);
+  // Accessibility is OPTIONAL: without it recording works exactly as before, you
+  // just don't get participant names. It must never gate the record button.
+  const [axTrusted, setAxTrusted] = useState<boolean | null>(null);
+
+  useEffect(() => {
+    let alive = true;
+    const poll = async () => {
+      const ok = await isAccessibilityTrusted();
+      if (alive) setAxTrusted(ok);
+    };
+    void poll();
+    // macOS grants take effect without an app restart, so re-check while the
+    // user is in System Settings rather than making them relaunch.
+    const t = setInterval(poll, 2000);
+    return () => { alive = false; clearInterval(t); };
+  }, []);
+
+  const handleAxAction = async () => {
+    setRequesting('ax');
+    try {
+      const granted = await requestAccessibilityTrust();
+      // macOS shows its prompt only once per app; after a prior denial the call
+      // returns false silently, so send the user somewhere that can actually help.
+      if (!granted) await openAccessibilitySettings();
+      setAxTrusted(await isAccessibilityTrusted());
+    } finally {
+      setRequesting(null);
+    }
+  };
 
   const refresh = useCallback(async () => {
     const status = await checkPermissions();
@@ -168,6 +202,39 @@ export default function PermissionsGate({ onAllGranted }: PermissionsGateProps) 
           )}
         </button>
       </div>
+
+      {/* Optional: participant names. Deliberately OUTSIDE the required row and
+          never part of the auto-continue check — a user who declines this still
+          gets a full recording, just with "Speaker 1/2" instead of names. */}
+      <button
+        type="button"
+        onClick={handleAxAction}
+        disabled={axTrusted === true || requesting === 'ax'}
+        className={`w-full max-w-md flex items-center gap-3 rounded-xl px-4 py-3 text-left transition-all border ${
+          axTrusted
+            ? 'border-green-200 bg-green-50/50 cursor-default'
+            : 'border-[#141414]/15 bg-white hover:bg-[#141414]/[0.03] active:scale-[0.99] cursor-pointer'
+        } ${requesting === 'ax' ? 'opacity-60 cursor-wait' : ''}`}
+      >
+        <div className={`flex size-8 shrink-0 items-center justify-center rounded-lg ${
+          axTrusted ? 'bg-green-100 text-green-600' : 'bg-[#141414]/5 text-[#141414]/60'
+        }`}>
+          {axTrusted ? <CheckCircle2 className="w-4 h-4" />
+            : requesting === 'ax' ? <Loader2 className="w-4 h-4 animate-spin" />
+            : <Users className="w-4 h-4" />}
+        </div>
+        <div className="min-w-0 flex-1">
+          <span className={`text-[13px] font-medium ${axTrusted ? 'text-green-700' : 'text-[#141414]'}`}>
+            {axTrusted ? 'Participant names enabled' : 'Allow participant names'}
+          </span>
+          <p className={`text-[11px] ${axTrusted ? 'text-green-600/70' : 'text-[#141414]/45'}`}>
+            {axTrusted
+              ? 'Speakers are named from your meeting app'
+              : 'Optional — reads names from Zoom, Meet, Teams or Slack'}
+          </p>
+        </div>
+        {!axTrusted && <ArrowRight className="w-4 h-4 text-[#141414]/30 shrink-0" />}
+      </button>
 
       {!screenAuthorized && (
         <p className="text-[11px] text-[#141414]/40 text-center max-w-[340px]">

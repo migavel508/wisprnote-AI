@@ -68,7 +68,19 @@ import {
   correctTranscriptWithDictionary,
 } from './services/geminiService';
 import { EXTRACT_DIRECTIVE } from './services/gemsService';
-import { reconcileLeadingSpeaker, type AudioSourceKind } from './services/speakerLabeling';
+import {
+  reconcileLeadingSpeaker,
+  foldTokensToTranscript,
+  emptySpeakerMap,
+  type AudioSourceKind,
+  type SpeakerRef,
+} from './services/speakerLabeling';
+import { SpeakerObservationLog, applyObservedName } from './services/speakerObservations';
+import {
+  startSpeakerCapture,
+  stopSpeakerCapture,
+  listenForSpeakerChanges,
+} from './services/speakerCaptureService';
 import {
   retrieveForSingleMeeting,
   scoreMeetingCandidate,
@@ -115,6 +127,7 @@ import {
   deleteManualNote,
   updateTaskSummary,
   updateTaskNotes,
+  uploadMeetingAudio,
 } from './services/awsService';
 import { buildMeetingCard, type KGLite } from './services/meetingEvidence';
 import { cacheGet, cacheSet, cacheClearUser, type CachedHistoryPayload } from './services/appCache';
@@ -141,9 +154,8 @@ import {
   resumeRealtimeRecording,
   isRealtimeRecording,
   listenForTranscripts,
-  RecordingMode,
 } from './services/nativeRecorderService';
-import { getDeepgramToken, reportTranscriptionUsage } from './services/aiProxyService';
+import { getSonioxToken, reportTranscriptionUsage, transcribeUploadedAudio } from './services/aiProxyService';
 import { checkPermissions } from './services/permissionService';
 import {
   listenForDeviceChanges,
@@ -205,6 +217,12 @@ declare global {
 type View = 'process' | 'history' | 'notes' | 'chat' | 'knowledge' | 'notebooks' | 'audio-devices' | 'shared' | 'workspace' | 'people' | 'settings' | 'spaces' | 'dictionary';
 type Status = 'idle' | 'splitting' | 'processing' | 'finalizing' | 'completed' | 'error';
 type NoteTab = 'transcription' | 'summary' | 'notes';
+
+// Speaker capture retries while a recording is live: people join calls after
+// hitting record, and Teams builds its meeting window late. 10s × 90 ≈ 15 min,
+// then it gives up rather than walking accessibility trees for the whole meeting.
+const SPEAKER_RETRY_INTERVAL_MS = 10_000;
+const SPEAKER_RETRY_LIMIT = 90;
 
 interface AgentStep {
   id: string;
@@ -520,9 +538,8 @@ export default function App() {
 
   // Native Desktop Recording
   const [nativeServerAvailable, setNativeServerAvailable] = useState(false);
-  const [desktopRecordingMode, setDesktopRecordingMode] = useState<RecordingMode>('batch');
-  // Transcription language for realtime (Deepgram): 'en' (best accuracy, enables keyterm
-  // biasing) or 'multi' (multilingual/code-switching). Persisted so it survives reloads and
+  // Transcription language hint for Soniox: 'en' (pins English) or 'multi'
+  // (multilingual / code-switching). Persisted so it survives reloads and
   // is read by the native recorder. A ref mirrors it so the record-start closure (and the
   // ref-based tray/detection triggers) always pass the current value.
   const [transcriptionLanguage, setTranscriptionLanguageState] = useState<string>(() => {
@@ -555,7 +572,6 @@ export default function App() {
   // dropping it if the user stops before Deepgram promotes it to a final.
   const interimTranscriptRef = useRef('');
   const isRealtimePausedRef = useRef(false);
-  const pausedBatchSegmentsRef = useRef<File[]>([]);
   const pausedRealtimeTranscriptRef = useRef<string[]>([]);
   // Recording-control concurrency: pause/resume/stop all mutate the SAME native
   // recorder, so they must never overlap. recordingOpLockRef is a promise-chain
@@ -568,6 +584,20 @@ export default function App() {
   const isStartingRef = useRef(false);
   const isPausedRef = useRef(false);
   const realtimeEngineActiveRef = useRef(false);
+
+  // ─── Speaker-name capture ───────────────────────────────────────────────────
+  // Diarisation separates VOICES; it cannot know a voice belongs to Ada. The only
+  // source of real names is the meeting app's own participant tiles, read over the
+  // accessibility API by the native poller. Observations land here and are joined
+  // to transcript turns by time (see speakerObservations.ts).
+  const speakerLogRef = useRef(new SpeakerObservationLog());
+  const speakerUnlistenRef = useRef<(() => void) | null>(null);
+  const speakerMapRef = useRef(emptySpeakerMap());
+  const speakerRetryTimerRef = useRef<NodeJS.Timeout | null>(null);
+  const speakerRetryRef = useRef(0);
+  // A recording-scoped mirror of isRecording, so the retry timer can stop itself
+  // without being re-created on every render.
+  const isRecordingRef = useRef(false);
   const [permissionsGranted, setPermissionsGranted] = useState(false);
   const [currentInputDevice, setCurrentInputDevice] = useState<string | null>(null);
   const [deviceRestartNotice, setDeviceRestartNotice] = useState(false);
@@ -620,19 +650,19 @@ export default function App() {
   const [isLoadingTaskDetails, setIsLoadingTaskDetails] = useState(false);
   const [isLoadingHistory, setIsLoadingHistory] = useState(true);
 
-  // Keep the custom-vocabulary (Dictionary) cache warm so realtime keyterms + batch
-  // prompts + finalize corrections always see the latest terms. Refresh on edits.
+  // Keep the custom-vocabulary (Dictionary) cache warm so the Soniox context terms
+  // + finalize corrections always see the latest terms. Refresh on edits.
   useEffect(() => {
     void loadDictionary();
     return onVaultEvent('dictionary:changed', () => { void loadDictionary(true); });
   }, []);
 
-  // Pre-warm the Deepgram streaming token the moment the user is signed in, so the FIRST
-  // realtime record doesn't pay a token network round-trip at click time (this was the
-  // "very 1st time it's slow" latency — the token is then cached ~1h). Best-effort/silent.
+  // Pre-warm the Soniox temporary key the moment the user is signed in, so the FIRST
+  // record doesn't pay a token network round-trip at click time (this was the
+  // "very 1st time it's slow" latency — the key is then cached ~1h). Best-effort/silent.
   useEffect(() => {
     if (!session) return;
-    void getDeepgramToken().catch(() => { /* falls back to lazy mint at record time */ });
+    void getSonioxToken().catch(() => { /* falls back to lazy mint at record time */ });
   }, [session]);
 
   // Extract task ID from URL and select it immediately (full details load via effect below)
@@ -1201,7 +1231,7 @@ export default function App() {
     
     const handleOffline = () => {
       setIsOnline(false);
-      if (isRecording && desktopRecordingMode === 'realtime') {
+      if (isRecording) {
         setRealtimeNetworkInterrupted(true);
       }
       if (status === 'processing' || status === 'splitting' || status === 'finalizing') {
@@ -1216,7 +1246,7 @@ export default function App() {
       window.removeEventListener('online', handleOnline);
       window.removeEventListener('offline', handleOffline);
     };
-  }, [wasOffline, awaitingNetworkResume, status, isRecording, desktopRecordingMode]);
+  }, [wasOffline, awaitingNetworkResume, status, isRecording]);
 
   // Check for recoverable progress on mount (only if not currently processing)
   useEffect(() => {
@@ -1381,25 +1411,13 @@ export default function App() {
   // set, it seeds the saved meeting's title instead of the auto-generated one.
   // Consumed (and cleared) when processing computes the title.
   const pendingMeetingLabelRef = useRef<string | null>(null);
-  // Forces the recording mode for a detection-triggered start, so startRecording
-  // doesn't have to wait for setState to propagate (see its use site).
-  const forcedRecordingModeRef = useRef<RecordingMode | null>(null);
-  // The ACTUAL mode of the in-flight recording. pause/resume/stop read THIS (not
-  // the `desktopRecordingMode` state, which can be stale/throttled for a
-  // detection-triggered start) so they always take the correct branch.
-  const activeRecordingModeRef = useRef<RecordingMode>('batch');
-
-  // Triggered when the user accepts the meeting-detection prompt. Meetings need
-  // both sides of the conversation, so prefer native system-audio (batch)
-  // capture; fall back to realtime transcription when native isn't available.
+  // Triggered when the user accepts the meeting-detection prompt. There is only
+  // one recording path now, so this just starts it.
   const startMeetingFromDetection = (label: string | null) => {
     pendingMeetingLabelRef.current = label;
-    const mode: RecordingMode = nativeServerAvailable ? 'batch' : 'realtime';
-    forcedRecordingModeRef.current = mode;
     setInputMode('record');
-    setDesktopRecordingMode(mode);
-    // Start immediately — the forced-mode ref means we don't need to wait a tick
-    // for state to settle (which the backgrounded main window would throttle).
+    // Start immediately — no mode state has to settle first (which the
+    // backgrounded main window would throttle anyway).
     void startRecordingRef.current?.();
   };
 
@@ -1418,14 +1436,11 @@ export default function App() {
       const { listen } = await import('@tauri-apps/api/event');
       unlistenTray = await listen<string>('tray-record', (event) => {
         const payload = event.payload;
-        if (payload === 'start-realtime') {
+        // 'start-realtime' / 'start-batch' are accepted as legacy aliases so an
+        // older tray binary still works against this build.
+        if (payload === 'start' || payload === 'start-realtime' || payload === 'start-batch') {
           setInputMode('record');
-          setDesktopRecordingMode('realtime');
-          // Small delay so state updates propagate before startRecording reads them
-          setTimeout(() => startRecordingRef.current?.(), 100);
-        } else if (payload === 'start-batch') {
-          setInputMode('record');
-          setDesktopRecordingMode('batch');
+          // Small delay so setInputMode propagates before startRecording reads it.
           setTimeout(() => startRecordingRef.current?.(), 100);
         } else if (payload === 'stop') {
           stopRecordingRef.current?.();
@@ -1476,7 +1491,7 @@ export default function App() {
       unlistenError = await listen<string>('recording-error', (event) => {
         log.error('recording_fatal_error', { message: event.payload });
         setError(event.payload || 'Recording failed. Please try again.');
-        setIsRecording(false);
+        setIsRecording(false); isRecordingRef.current = false;
         setIsPaused(false);
         if (timerRef.current) clearInterval(timerRef.current);
         realtimeEngineActiveRef.current = false;
@@ -1781,6 +1796,54 @@ export default function App() {
     realtimeTranscriptRef.current = [...arr, trimmed];
     setRealtimeTranscript(prev => [...prev, trimmed]);
     setInterimTranscript('');
+    attributeCommittedLine(trimmed);
+  };
+
+  /**
+   * Join a just-committed turn to whoever the meeting app showed as speaking.
+   *
+   * Runs at COMMIT time, not at save time, because the observation log is a
+   * time series: the name must be resolved against the moment the words were
+   * spoken, not against whoever happens to be talking when the meeting ends.
+   *
+   * Only the remote ("Speaker N") channel is attributed — the microphone channel
+   * is already known to be the local user, and stamping a scraped tile name onto
+   * it is how you end up calling yourself by someone else's name.
+   */
+  const attributeCommittedLine = (line: string) => {
+    const m = line.match(/^Speaker\s+(\d+)\s*:/);
+    if (!m) return;
+    const ref: SpeakerRef = { source: 'system', id: Number(m[1]) };
+    const { name } = speakerLogRef.current.attributionFor(Date.now());
+    if (!name) return;
+    // A single sighting never names anyone: the denoiser requires repeated
+    // agreement before a name becomes canonical.
+    const settled = speakerLogRef.current.observeForSpeaker(ref, name);
+    if (settled) {
+      speakerMapRef.current = applyObservedName(speakerMapRef.current, ref, settled);
+    }
+  };
+
+  /**
+   * Rewrite "Speaker N:" labels to the names captured from the meeting app.
+   *
+   * Applied once, to the finished transcript, so the text that reaches the
+   * summariser, the search index and the share view all carry real names.
+   */
+  const applyCapturedSpeakerNames = (transcript: string): string => {
+    const map = speakerMapRef.current;
+    const entries = Object.entries(map.assignments);
+    if (entries.length === 0) return transcript;
+    let out = transcript;
+    for (const [key, personKey] of entries) {
+      if (!personKey) continue;
+      const person = map.people[personKey];
+      if (!person?.name) continue;
+      const id = key.split(':')[1];
+      if (!id) continue;
+      out = out.replace(new RegExp(`\\bSpeaker\\s+${id}\\b(?!\\d)`, 'g'), person.name);
+    }
+    return out;
   };
 
   // Persist the current faded/interim text as a committed line so it NEVER vanishes when the
@@ -1789,6 +1852,76 @@ export default function App() {
     const pending = interimTranscriptRef.current.trim();
     interimTranscriptRef.current = '';
     if (pending) commitTranscriptLine(pending);
+  };
+
+  /**
+   * Begin reading the meeting app's participant tiles for this recording.
+   *
+   * Best-effort by design: an unsupported app (FaceTime, Webex, Discord), a
+   * missing Accessibility grant, or no meeting app at all must never stop a
+   * recording — the meeting is still captured and diarised, the speakers just
+   * stay "Speaker N" until renamed.
+   */
+  const attachSpeakerCapture = async () => {
+    speakerLogRef.current = new SpeakerObservationLog();
+    speakerMapRef.current = emptySpeakerMap();
+    speakerRetryRef.current = 0;
+
+    const tryAttach = async (): Promise<boolean> => {
+      try {
+        // The native side detects the meeting app itself — see startSpeakerCapture.
+        const platform = await startSpeakerCapture();
+        if (platform === 'unsupported') return false;
+        speakerUnlistenRef.current = await listenForSpeakerChanges((obs) => {
+          speakerLogRef.current.record(obs);
+        });
+        log.info('speaker_capture_active', { platform });
+        return true;
+      } catch (e) {
+        log.warn('speaker_capture_attach_failed', { error: e instanceof Error ? e : undefined });
+        return false;
+      }
+    };
+
+    if (await tryAttach()) return;
+
+    // People join calls AFTER hitting record, and Teams in particular builds its
+    // meeting window late — so a single attempt at record time finds nothing and
+    // the whole feature silently no-ops. Retry on a timer, then give up for this
+    // recording rather than walking accessibility trees for two hours.
+    log.info('speaker_capture_deferred', {});
+    speakerRetryTimerRef.current = setInterval(() => {
+      void (async () => {
+        if (!isRecordingRef.current) { clearSpeakerRetry(); return; }
+        speakerRetryRef.current += 1;
+        if (speakerRetryRef.current > SPEAKER_RETRY_LIMIT) {
+          log.info('speaker_capture_gave_up', { attempts: speakerRetryRef.current });
+          clearSpeakerRetry();
+          return;
+        }
+        if (await tryAttach()) clearSpeakerRetry();
+      })();
+    }, SPEAKER_RETRY_INTERVAL_MS);
+  };
+
+  const clearSpeakerRetry = () => {
+    if (speakerRetryTimerRef.current) {
+      clearInterval(speakerRetryTimerRef.current);
+      speakerRetryTimerRef.current = null;
+    }
+  };
+
+  const detachSpeakerCapture = async () => {
+    clearSpeakerRetry();
+    try {
+      if (speakerUnlistenRef.current) {
+        speakerUnlistenRef.current();
+        speakerUnlistenRef.current = null;
+      }
+      await stopSpeakerCapture();
+    } catch {
+      /* teardown is best-effort */
+    }
   };
 
   const attachRealtimeTranscriptListener = async () => {
@@ -1843,62 +1976,31 @@ export default function App() {
     isStartingRef.current = true;
     // Free-tier gate: block before recording if the meeting quota is exhausted.
     if (!requireMeetingQuota()) { isStartingRef.current = false; return; }
-    // When started from the meeting-detection prompt the mode is forced via a
-    // ref, so we don't depend on setDesktopRecordingMode having propagated yet
-    // (the main window may be backgrounded and its state updates throttled).
-    const activeMode: RecordingMode = forcedRecordingModeRef.current ?? desktopRecordingMode;
-    forcedRecordingModeRef.current = null;
-    activeRecordingModeRef.current = activeMode; // single source of truth for pause/resume/stop
     // Fresh recording → reset the control-concurrency latches from any prior session.
     isStoppingRef.current = false;
     controlBusyRef.current = false;
     isPausedRef.current = false;
     recordingOpLockRef.current = Promise.resolve();
     setIsControlBusy(false);
-    if (nativeServerAvailable && activeMode === 'batch') {
-      // ── Native Batch Recording (mic + system audio via Tauri) ──
-      // Optimistic UI: flip to "recording" instantly; start the native capture
-      // in the background and roll back if it fails.
-      isRealtimePausedRef.current = false;
-      pausedBatchSegmentsRef.current = [];
-      pausedRealtimeTranscriptRef.current = [];
-      setIsRecording(true);
-      setIsPaused(false);
-      setRecordingTime(0);
-      setFile(null);
-      setRealtimeTranscript([]);
-      realtimeTranscriptRef.current = [];
-      interimTranscriptRef.current = '';
-      setInterimTranscript('');
-      if (timerRef.current) clearInterval(timerRef.current);
-      timerRef.current = setInterval(() => {
-        setRecordingTime(prev => prev + 1);
-      }, 1000);
-
-      try {
-        await startSystemAudioRecording();
-      } catch (err: any) {
-        log.error('native_recording_error', { error: err instanceof Error ? err : undefined });
-        if (timerRef.current) clearInterval(timerRef.current);
-        setIsRecording(false);
-        setIsPaused(false);
-        setError(err.message || 'Failed to start system audio recording.');
-      }
-    } else if (activeMode === 'realtime') {
-      // ── Real-time mode: integrated Deepgram transcription via Tauri ──
+    if (nativeServerAvailable) {
+      // ── Live recording: native mic + system capture, streamed to Soniox ──
+      // There is exactly ONE recording path now. The old batch/realtime fork made
+      // the user choose between "accurate later" and "live now" before they knew
+      // which they wanted; live transcription with server-side diarisation gives
+      // both, so the choice is gone.
+      //
       // Optimistic UI: flip to "recording" INSTANTLY so the button feels
-      // immediate; the Deepgram engine spins up in the background and we roll
-      // back if it fails. (Previously the UI only updated after ~1–2s of engine
-      // startup, which is what made Record feel slow / unresponsive.)
+      // immediate; the engine spins up in the background and we roll back if it
+      // fails. (Previously the UI only updated after ~1–2s of engine startup,
+      // which is what made Record feel slow / unresponsive.)
       isRealtimePausedRef.current = false;
       setRealtimeNetworkInterrupted(false);
-      pausedBatchSegmentsRef.current = [];
       pausedRealtimeTranscriptRef.current = [];
       setRealtimeTranscript([]);
       realtimeTranscriptRef.current = [];
       interimTranscriptRef.current = '';
       setInterimTranscript('');
-      setIsRecording(true);
+      setIsRecording(true); isRecordingRef.current = true;
       setIsPaused(false);
       setRecordingTime(0);
       setFile(null);
@@ -1918,16 +2020,17 @@ export default function App() {
             try { await safeStopRealtimeRecording(); } catch { /* clear any half-open session */ }
             await new Promise((r) => setTimeout(r, 400));
           }
-          // Mint a short-lived Deepgram token (cached) — the real key lives in
+          // Mint a short-lived Soniox key (cached) — the permanent key lives in
           // Secrets Manager, never in the client bundle.
-          const apiKey = await getDeepgramToken();
+          const apiKey = await getSonioxToken();
           await attachRealtimeTranscriptListener();
+          await attachSpeakerCapture();
           await startRealtimeRecording(apiKey, buildKeyterms(prompt), transcriptionLanguageRef.current);
           realtimeEngineActiveRef.current = true;
           started = true;
         } catch (err: any) {
           // Tauri invoke rejections are often plain strings/objects, not Error — capture the
-          // raw reason so failures like a rejected Deepgram handshake are diagnosable.
+          // raw reason so failures like a rejected Soniox handshake are diagnosable.
           const reason = String(err?.message ?? err);
           if (attempt === 0) {
             log.warn('realtime_recording_retry', { reason });
@@ -1938,11 +2041,11 @@ export default function App() {
           realtimeEngineActiveRef.current = false;
           // Roll back the optimistic UI.
           if (timerRef.current) clearInterval(timerRef.current);
-          setIsRecording(false);
+          setIsRecording(false); isRecordingRef.current = false;
           setIsPaused(false);
           // Surface the ACTUAL reason in the panel (not a generic message) so a persistent
-          // failure (e.g. a rejected Deepgram handshake) is visible without the console.
-          setError(reason && reason !== 'undefined' ? `Recording couldn't start: ${reason}` : 'Failed to start integrated real-time recording.');
+          // failure (e.g. a rejected Soniox handshake) is visible without the console.
+          setError(reason && reason !== 'undefined' ? `Recording couldn't start: ${reason}` : 'Failed to start live recording.');
         }
       }
     } else {
@@ -1968,7 +2071,7 @@ export default function App() {
         };
 
         mediaRecorder.start();
-        setIsRecording(true);
+        setIsRecording(true); isRecordingRef.current = true;
         setIsPaused(false);
         setRecordingTime(0);
         setFile(null);
@@ -2008,21 +2111,13 @@ export default function App() {
     setInterimTranscript('');
     if (timerRef.current) clearInterval(timerRef.current);
 
-    const mode = activeRecordingModeRef.current;
     try {
       await runRecordingOp(async () => {
-        if (nativeServerAvailable && mode === 'batch') {
-          // Checkpoint a native segment — but only if the recorder is genuinely
-          // running, so a desync can't trigger a "not recording" error.
-          if (await isSystemAudioRecording()) {
-            const segment = await stopSystemAudioRecording();
-            if (segment) pausedBatchSegmentsRef.current.push(segment);
-          }
-        } else if (mode === 'realtime') {
+        if (nativeServerAvailable) {
           isRealtimePausedRef.current = true;
           // Commit the faded interim so the last words before the pause are kept.
           commitPendingInterim();
-          // Warm pause: release the mic but keep the Deepgram socket alive — near-instant,
+          // Warm pause: release the mic but keep the Soniox socket alive — near-instant,
           // no teardown. The continuous transcript keeps accumulating via events, so there's
           // no per-pause partial to stash. Fall back to the old stop/start emulation on a
           // binary that predates the command.
@@ -2062,15 +2157,9 @@ export default function App() {
     isPausedRef.current = false;
     setIsPaused(false);
 
-    const mode = activeRecordingModeRef.current;
     try {
       await runRecordingOp(async () => {
-        if (nativeServerAvailable && mode === 'batch') {
-          // Resume only if the recorder isn't somehow already running.
-          if (!(await isSystemAudioRecording())) {
-            await startSystemAudioRecording();
-          }
-        } else if (mode === 'realtime') {
+        if (nativeServerAvailable) {
           // Warm resume: rebuild only the mic capture; the socket is still open — no token
           // re-fetch, no handshake, no reconnect gap. Fall back to a full re-start on a
           // binary without the command.
@@ -2078,8 +2167,8 @@ export default function App() {
             await resumeRealtimeRecording();
           } catch (cmdErr) {
             log.warn('realtime_warm_resume_unavailable', { error: cmdErr instanceof Error ? cmdErr : undefined });
-            // Short-lived token from the authed backend; real key never bundled.
-            const apiKey = await getDeepgramToken();
+            // Short-lived key from the authed backend; permanent key never bundled.
+            const apiKey = await getSonioxToken();
             if (!unlistenRef.current) {
               await attachRealtimeTranscriptListener();
             }
@@ -2114,51 +2203,8 @@ export default function App() {
   // pause/resume). Reads the recorder's REAL state rather than the (possibly stale
   // or paused) isPaused flag, which is what makes stop reliable after rapid clicks.
   const stopRecordingImpl = async () => {
-    const mode = activeRecordingModeRef.current;
-
-    if (nativeServerAvailable && mode === 'batch' && isRecording) {
-      // ── Stop Native Batch Recording (Tauri) ──
-      try {
-        let finalSegment: File | null = null;
-        // Authoritative: ask the recorder itself instead of trusting isPaused.
-        if (await isSystemAudioRecording()) {
-          finalSegment = await stopSystemAudioRecording();
-        }
-        const allSegments = [...pausedBatchSegmentsRef.current, ...(finalSegment ? [finalSegment] : [])];
-        // Each native segment is ALREADY compressed in Rust at finalize (16 kHz
-        // mono + silence cut), so we just merge them — no second JS compression
-        // pass needed (that would re-decode the file for no benefit).
-        const audioFile = allSegments.length > 0 ? await mergeAudioFilesToWav(allSegments) : null;
-        if (audioFile) {
-          log.info('recording_ready', { sizeMB: +(audioFile.size / 1048576).toFixed(1) });
-        }
-        // The compressed copy is now in memory (and gets persisted for the
-        // batch); the raw on-disk temp recordings are no longer needed → delete
-        // them immediately so they don't linger on the machine.
-        for (const seg of allSegments) {
-          const p = (seg as any).diskPath as string | undefined;
-          if (p) void deleteRecordingFile(p);
-        }
-        setIsRecording(false);
-        setIsPaused(false);
-        isPausedRef.current = false;
-        pausedBatchSegmentsRef.current = [];
-        if (audioFile) {
-          fileSourceRef.current = 'native-batch';
-          setFile(audioFile);
-        } else {
-          setError('No audio captured.');
-        }
-      } catch (err: any) {
-        log.error('stop_recording_error', { error: err instanceof Error ? err : undefined });
-        setError(err.message || 'Failed to stop recording.');
-        setIsRecording(false);
-        setIsPaused(false);
-        isPausedRef.current = false;
-        pausedBatchSegmentsRef.current = [];
-      }
-    } else if (mode === 'realtime' && isRecording) {
-      // ── Stop Real-time mode: stop integrated Tauri recording ──
+    if (nativeServerAvailable && isRecording) {
+      // ── Stop live recording: stop integrated Tauri capture + Soniox stream ──
       const backupAudioFile = await stopRealtimeBackupCapture();
       try {
         // Persist the faded text INSTANTLY so it never vanishes when stopping mid-utterance.
@@ -2170,23 +2216,38 @@ export default function App() {
         const fullTranscript = await safeStopRealtimeRecording();
 
         if (unlistenRef.current) { unlistenRef.current(); unlistenRef.current = null; }
-        setIsRecording(false);
+        await detachSpeakerCapture();
+        setIsRecording(false); isRecordingRef.current = false;
         setIsPaused(false);
         isPausedRef.current = false;
         const pausedTranscript = pausedRealtimeTranscriptRef.current.join(' ').trim();
         // refTranscript now includes the committed interim (commitPendingInterim above), so the
         // last words are part of the saved transcript even when stopping mid-utterance.
         const refTranscript = realtimeTranscriptRef.current.join(' ').trim();
-        const transcriptToUse = [pausedTranscript, fullTranscript.trim(), refTranscript].filter(Boolean).join(' ').trim();
 
-        // Observability: the realtime stream goes client→Deepgram directly (not
+        // `fullTranscript` (returned by the Rust recorder on stop) and
+        // `refTranscript` (accumulated in the renderer from the SAME emitted
+        // lines) are two views of one stream, so concatenating both duplicated
+        // every meeting verbatim. Prefer whichever is more complete and use it
+        // ALONE. `pausedTranscript` is different — it holds segments from before
+        // a cold pause, which the live refs no longer carry — so it still leads.
+        const live = refTranscript.length >= fullTranscript.trim().length
+          ? refTranscript
+          : fullTranscript.trim();
+        // Swap "Speaker N" for the names read off the meeting app's tiles, so the
+        // summariser, the search index and the share view all see real people.
+        const transcriptToUse = applyCapturedSpeakerNames(
+          [pausedTranscript, live].filter(Boolean).join(' ').trim()
+        );
+
+        // Observability: the live stream goes client→Soniox directly (not
         // through the traced proxy), so report this session's audio duration to
         // Braintrust + usage metering. Best-effort, fire-and-forget.
         if (transcriptToUse) {
           void reportTranscriptionUsage({
-            mode: 'realtime',
+            mode: 'live',
             durationSeconds: recordingTime,
-            model: MODELS.deepgram.primary,
+            model: MODELS.meetingLive.primary,
             language: 'multi',
             words: transcriptToUse.split(/\s+/).filter(Boolean).length,
           });
@@ -2209,7 +2270,7 @@ export default function App() {
         log.error('stop_realtime_error', { error: err instanceof Error ? err : undefined });
         isRealtimePausedRef.current = false;
         if (unlistenRef.current) { unlistenRef.current(); unlistenRef.current = null; }
-        setIsRecording(false);
+        setIsRecording(false); isRecordingRef.current = false;
         setIsPaused(false);
         isPausedRef.current = false;
         // If network drops while stopping the realtime stream, salvage any finalized transcript.
@@ -2228,7 +2289,7 @@ export default function App() {
     } else if (mediaRecorderRef.current && (mediaRecorderRef.current.state === 'recording' || mediaRecorderRef.current.state === 'paused')) {
       // ── Stop Browser Recording ──
       mediaRecorderRef.current.stop();
-      setIsRecording(false);
+      setIsRecording(false); isRecordingRef.current = false;
       setIsPaused(false);
       isPausedRef.current = false;
     }
@@ -2365,6 +2426,10 @@ export default function App() {
         status: 'completed',
         duration: resumeFromProgress?.duration ?? recordingTime,
         source: 'realtime', // live recording — not counted against batch hours
+        // Everyone the meeting window showed, whether or not a turn could be
+        // pinned to them. The roster is most of the value of reading the meeting
+        // app: it names the voices even when no single moment is attributable.
+        attendees: speakerLogRef.current.participants(),
       };
 
       const savedTask = await persistTaskWithOfflineQueue(newTask);
@@ -5095,11 +5160,54 @@ export default function App() {
       }
 
       let fullTranscription: string = '';
-      
+
+      // ─── Uploaded audio: Soniox async, diarised in one pass ─────────────────
+      // Soniox handles a full-length meeting in a single job, so there is no
+      // chunking and no cross-chunk speaker reconciliation to get wrong — the
+      // diarisation is computed over the whole recording at once, which is
+      // strictly better than stitching per-chunk numbering back together.
+      //
+      // The audio goes to S3 and only its KEY is sent onward; the bucket stays
+      // private and the server signs a short-lived GET for the provider.
+      //
+      // On ANY failure we fall through to the Gemini path below rather than
+      // failing the upload — that path still has the resume/chunking machinery,
+      // so a Soniox outage degrades quality instead of losing the meeting.
+      if (!resumeFromProgress) {
+        setStatus('processing');
+        setError(null);
+        setProcessingHeadline('Sending audio upstairs ☁️');
+        setProcessingSubtext('Quick trip, be right back 🛫');
+        try {
+          const audioKey = await uploadMeetingAudio(currentFile);
+          setProcessingHeadline('Listening closely 👂');
+          setProcessingSubtext('Working out who said what');
+          const tokens = await transcribeUploadedAudio({
+            audioKey,
+            language: transcriptionLanguageRef.current,
+            terms: buildKeyterms(prompt),
+          });
+          const folded = foldTokensToTranscript(tokens, emptySpeakerMap());
+          if (folded.text.trim()) {
+            fullTranscription = folded.text;
+            const seconds = tokens.length ? (tokens[tokens.length - 1].end_ms || 0) / 1000 : 0;
+            void reportTranscriptionUsage({
+              mode: 'upload',
+              durationSeconds: seconds,
+              words: folded.text.split(/\s+/).length,
+              language: transcriptionLanguageRef.current,
+            });
+          }
+        } catch (err) {
+          log.warn('soniox_upload_transcription_failed', { error: err instanceof Error ? err : undefined });
+          // fall through to the Gemini path
+        }
+      }
+
       // ─── Large File Path: Use Gemini File API ───────────────────────────────
       // Skip if the File API has failed multiple times in this session — avoids
       // wasting time and creating WebKit memory pressure from repeated large uploads.
-      if (shouldUseFileAPI(currentFile) && !resumeFromProgress && !isFileApiDisabledByFailures()) {
+      if (!fullTranscription && shouldUseFileAPI(currentFile) && !resumeFromProgress && !isFileApiDisabledByFailures()) {
         setStatus('processing');
         setError(null);
         setProcessingHeadline('Sending audio upstairs ☁️');
@@ -5860,8 +5968,6 @@ export default function App() {
                   inputMode={inputMode}
                   setInputMode={setInputMode}
                   nativeServerAvailable={nativeServerAvailable}
-                  desktopRecordingMode={desktopRecordingMode}
-                  setDesktopRecordingMode={setDesktopRecordingMode}
                   transcriptionLanguage={transcriptionLanguage}
                   setTranscriptionLanguage={setTranscriptionLanguage}
                   realtimeTranscript={realtimeTranscript}

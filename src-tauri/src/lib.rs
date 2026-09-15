@@ -5,7 +5,9 @@ use tauri::menu::{MenuBuilder, MenuItemBuilder};
 use std::sync::Mutex;
 
 mod audio_device;
-mod deepgram_transcriber;
+mod accessibility;
+mod speaker_ax;
+mod soniox_transcriber;
 mod dev_sessions;
 mod device_monitor;
 mod logger;
@@ -203,7 +205,7 @@ fn get_system_audio_size(state: tauri::State<AppState>) -> usize {
     }
 }
 
-/// Start realtime recording with integrated Deepgram transcription
+/// Start realtime recording with integrated Soniox transcription
 #[tauri::command]
 fn start_realtime_audio(
     api_key: String,
@@ -282,6 +284,128 @@ fn set_default_input_device(device_id: String) -> Result<(), String> {
 #[tauri::command]
 fn set_default_output_device(device_id: String) -> Result<(), String> {
     audio_device::set_default_output_device(&device_id)
+}
+
+// ─── Speaker-name capture (Accessibility) ────────────────────────────────────
+//
+// Diarisation says "voice #2"; only the meeting application knows that voice #2 is
+// Ada. These commands drive the accessibility read of its participant tiles.
+
+/// Is Accessibility permission already granted?
+#[tauri::command]
+fn accessibility_is_trusted() -> bool {
+    #[cfg(target_os = "macos")]
+    { accessibility::is_trusted() }
+    #[cfg(not(target_os = "macos"))]
+    { false }
+}
+
+/// Show the system Accessibility prompt. macOS presents it only ONCE per app, so a
+/// false return after a previous denial means "send the user to System Settings",
+/// not "ask again".
+#[tauri::command]
+fn accessibility_request_trust() -> bool {
+    #[cfg(target_os = "macos")]
+    { accessibility::request_trust() }
+    #[cfg(not(target_os = "macos"))]
+    { false }
+}
+
+/// Open System Settings at the Accessibility pane (for the already-denied case).
+#[tauri::command]
+fn open_accessibility_settings() -> Result<(), String> {
+    #[cfg(target_os = "macos")]
+    {
+        std::process::Command::new("open")
+            .arg("x-apple.systempreferences:com.apple.preference.security?Privacy_Accessibility")
+            .spawn()
+            .map(|_| ())
+            .map_err(|e| e.to_string())
+    }
+    #[cfg(not(target_os = "macos"))]
+    { Ok(()) }
+}
+
+/// Begin watching whichever meeting app is actually in a call.
+///
+/// Detection happens HERE rather than being handed a bundle id, because the
+/// microphone-holder signal that drives the meeting prompt is about deciding
+/// whether to prompt — it is unset when the user starts recording by hand, or once
+/// the prompt for that app has been dismissed. Depending on it made capture
+/// silently do nothing for exactly the cases that matter.
+///
+/// Returns the platform bound. `"unsupported"` means no app is in a readable call
+/// (or the one in the call is FaceTime/Webex/Discord, which publish no participant
+/// grid) — the meeting is still recorded and diarised, speakers just stay
+/// "Speaker N" until renamed.
+#[tauri::command]
+fn start_speaker_capture(
+    app: tauri::AppHandle,
+    marker_classes: Option<Vec<String>>,
+    tile_root_classes: Option<Vec<String>>,
+    state: tauri::State<speaker_ax::SpeakerPollState>,
+) -> Result<String, String> {
+    #[cfg(target_os = "macos")]
+    {
+        if !accessibility::is_trusted() {
+            return Err("accessibility_permission_required".into());
+        }
+        let Some((platform, pid)) = speaker_ax::detect_platform() else {
+            return Ok("unsupported".into());
+        };
+
+        // Remote-overridable selectors: Meet keys on obfuscated build classes that
+        // Google renames without notice, so a breakage has to be fixable by config
+        // rather than by shipping a new app.
+        let mut cfg = speaker_ax::SpeakerPollConfig::defaults_for(platform);
+        if let Some(m) = marker_classes { if !m.is_empty() { cfg.marker_classes = m; } }
+        if let Some(t) = tile_root_classes { if !t.is_empty() { cfg.tile_root_classes = t; } }
+
+        state.start(app, pid, platform, cfg);
+        Ok(serde_json::to_value(platform).ok()
+            .and_then(|v| v.as_str().map(|s| s.to_string()))
+            .unwrap_or_else(|| "unsupported".into()))
+    }
+    #[cfg(not(target_os = "macos"))]
+    { let _ = (app, marker_classes, tile_root_classes, state); Ok("unsupported".into()) }
+}
+
+/// What the accessibility read currently sees — for diagnosing a live meeting.
+#[tauri::command]
+fn speaker_capture_probe() -> serde_json::Value {
+    #[cfg(target_os = "macos")]
+    {
+        let trusted = accessibility::is_trusted();
+        let detected = speaker_ax::detect_platform();
+        let (platform, pid) = match detected {
+            Some((p, pid)) => (serde_json::to_value(p).unwrap_or_default(), Some(pid)),
+            None => (serde_json::Value::String("unsupported".into()), None),
+        };
+        let reading = pid.and_then(|pid| {
+            let p = detected.map(|(p, _)| p)?;
+            speaker_ax::read_once(pid, p, &speaker_ax::SpeakerPollConfig::defaults_for(p))
+        });
+        serde_json::json!({
+            "accessibility_trusted": trusted,
+            "platform": platform,
+            "pid": pid,
+            "reading": reading.map(|r| serde_json::json!({
+                "speaker_name": r.speaker_name,
+                "visible_names": r.visible_names,
+                "attribution_state": r.attribution_state,
+            })),
+        })
+    }
+    #[cfg(not(target_os = "macos"))]
+    { serde_json::json!({ "accessibility_trusted": false, "platform": "unsupported" }) }
+}
+
+#[tauri::command]
+fn stop_speaker_capture(state: tauri::State<speaker_ax::SpeakerPollState>) {
+    #[cfg(target_os = "macos")]
+    { state.stop(); }
+    #[cfg(not(target_os = "macos"))]
+    { let _ = state; }
 }
 
 // ─── Permission Commands ─────────────────────────────────────────────────────
@@ -751,6 +875,7 @@ pub fn run() {
             realtime_recorder: Mutex::new(RealtimeRecorder::new()),
         })
         .manage(mic_detect::MicDetectState::default())
+        .manage(speaker_ax::SpeakerPollState::default())
         // Show the window only AFTER the webview finishes loading its content.
         // The window starts hidden (visible:false in tauri.conf.json); revealing
         // it post-paint means the user never sees a blank/black unpainted frame
@@ -801,8 +926,10 @@ pub fn run() {
             });
 
             // Build tray context menu
-            let record_standard = MenuItemBuilder::with_id("record_standard", "Record (Standard)").build(app)?;
-            let record_multilingual = MenuItemBuilder::with_id("record_multilingual", "Record (Multi-lingual)").build(app)?;
+            // ONE record action. The Standard/Multi-lingual split mirrored the old
+            // batch/realtime recording modes, which no longer exist — language is a
+            // preference in the app, not a different way to record.
+            let record_item = MenuItemBuilder::with_id("record", "Record").build(app)?;
             let stop_record_item = MenuItemBuilder::with_id("stop_record", "Stop Record").build(app)?;
             let sep1 = tauri::menu::PredefinedMenuItem::separator(app)?;
             let open_item = MenuItemBuilder::with_id("open", "Open Wisprnote").build(app)?;
@@ -810,8 +937,7 @@ pub fn run() {
             let quit_item = MenuItemBuilder::with_id("quit", "Quit").build(app)?;
 
             let menu = MenuBuilder::new(app)
-                .item(&record_standard)
-                .item(&record_multilingual)
+                .item(&record_item)
                 .item(&stop_record_item)
                 .item(&sep1)
                 .item(&open_item)
@@ -854,15 +980,10 @@ pub fn run() {
                             let _ = win2.show();
                             let _ = win2.set_focus();
                         }
-                        "record_standard" => {
+                        "record" => {
                             let _ = win2.show();
                             let _ = win2.set_focus();
-                            let _ = win2.emit("tray-record", "start-realtime");
-                        }
-                        "record_multilingual" => {
-                            let _ = win2.show();
-                            let _ = win2.set_focus();
-                            let _ = win2.emit("tray-record", "start-batch");
+                            let _ = win2.emit("tray-record", "start");
                         }
                         "stop_record" => {
                             let _ = win2.emit("tray-record", "stop");
@@ -878,6 +999,12 @@ pub fn run() {
             Ok(())
         })
         .invoke_handler(tauri::generate_handler![
+            accessibility_is_trusted,
+            accessibility_request_trust,
+            open_accessibility_settings,
+            start_speaker_capture,
+            speaker_capture_probe,
+            stop_speaker_capture,
             is_system_audio_available,
             start_system_audio,
             stop_system_audio,
