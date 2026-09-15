@@ -141,14 +141,14 @@ export async function serverChat(opts: {
 
 /**
  * Report a finished transcription session's audio duration to the backend so it
- * lands in Braintrust + usage metering. The realtime meeting stream goes
- * client → Deepgram directly (over a WebSocket), so unlike the proxied
- * intelligence calls it can't be traced server-side — this is how realtime
- * (and batch) transcription gets full observability coverage. Best-effort:
- * never throws, never blocks the recording flow.
+ * lands in Braintrust + usage metering. The live meeting stream goes
+ * client → Soniox directly (over a WebSocket), so unlike the proxied
+ * intelligence calls it can't be traced server-side — this is how live
+ * transcription gets full observability coverage. Best-effort: never throws,
+ * never blocks the recording flow.
  */
 export async function reportTranscriptionUsage(opts: {
-  mode: 'realtime' | 'batch';
+  mode: 'live' | 'upload';
   durationSeconds: number;
   model?: string;
   words?: number;
@@ -163,9 +163,9 @@ export async function reportTranscriptionUsage(opts: {
       body: JSON.stringify({
         mode: opts.mode,
         duration_seconds: Math.round(opts.durationSeconds),
-        model: opts.model || MODELS.deepgram.primary,
+        model: opts.model || (opts.mode === 'live' ? MODELS.meetingLive.primary : MODELS.meetingAsync.primary),
         words: opts.words ?? 0,
-        language: opts.language || (opts.mode === 'realtime' ? 'multi' : 'en'),
+        language: opts.language || 'multi',
       }),
     });
   } catch {
@@ -173,59 +173,110 @@ export async function reportTranscriptionUsage(opts: {
   }
 }
 
-// Cache the Deepgram streaming token so Record/Resume don't pay a network
-// round-trip (client → Lambda → Deepgram) on every action — that round-trip is
-// the main reason the buttons felt slow / "had to be clicked many times".
-let _dgToken: string | null = null;
-let _dgTokenExp = 0; // epoch ms
-let _dgInFlight: Promise<string> | null = null;
+// Cache the Soniox temporary key so Record/Resume don't pay a network round-trip
+// (client → Lambda → Soniox) on every action — that round-trip is the main reason
+// the buttons used to feel slow / "had to be clicked many times".
+let _snxKey: string | null = null;
+let _snxKeyExp = 0; // epoch ms
+let _snxInFlight: Promise<string> | null = null;
 
-/** Mint (or reuse) a short-lived Deepgram streaming token via the authed proxy. */
-export async function getDeepgramToken(ttlSeconds = 3600): Promise<string> {
-  // Reuse the cached token until 60s before expiry.
-  if (_dgToken && Date.now() < _dgTokenExp - 60_000) return _dgToken;
+/**
+ * Mint (or reuse) a short-lived Soniox key for the live meeting WebSocket.
+ *
+ * The desktop client streams straight to Soniox for latency, so it needs a
+ * credential — but never the permanent one, which stays in Secrets Manager. These
+ * keys expire on their own and are scoped to websocket transcription, which is
+ * what makes shipping this client's source publicly safe.
+ */
+export async function getSonioxToken(expiresInSeconds = 3600): Promise<string> {
+  // Reuse the cached key until 60s before expiry.
+  if (_snxKey && Date.now() < _snxKeyExp - 60_000) return _snxKey;
   // Coalesce concurrent requests so a burst of Record/Resume mints just one.
-  if (_dgInFlight) return _dgInFlight;
+  if (_snxInFlight) return _snxInFlight;
 
-  _dgInFlight = (async () => {
+  _snxInFlight = (async () => {
     const token = await getIdToken();
-    const resp = await baseFetch(`${API_BASE}/ai/deepgram-token`, {
+    const resp = await baseFetch(`${API_BASE}/ai/soniox-token`, {
       method: 'POST',
       headers: { 'Content-Type': 'application/json', Authorization: token },
-      body: JSON.stringify({ ttl_seconds: ttlSeconds }),
+      body: JSON.stringify({
+        expires_in_seconds: expiresInSeconds,
+        // A meeting can outlive the key's mint window; cap the session, not the key.
+        max_session_duration_seconds: 18000,
+      }),
     });
     if (!resp.ok) {
-      // 403 = the server's Deepgram key lacks the Member+ role needed to mint
-      // streaming tokens. Surface an actionable message, not a bare status code.
-      if (resp.status === 403) {
-        throw new Error(
-          'Live transcription unavailable: the Deepgram key needs "Member" role to issue streaming tokens. Update the key in Deepgram, then retry.'
-        );
-      }
-      throw new Error(`Deepgram token request failed: ${resp.status}`);
+      throw new Error(
+        resp.status === 500
+          ? 'Live transcription unavailable: the Soniox key is not configured on the server.'
+          : `Soniox token request failed: ${resp.status}`
+      );
     }
     const data = await resp.json();
-    const access = data.access_token || data.accessToken;
-    if (!access) throw new Error('Deepgram token response missing access_token');
-    const expiresIn = Number(data.expires_in) || ttlSeconds;
-    _dgToken = access as string;
-    _dgTokenExp = Date.now() + expiresIn * 1000;
-    return _dgToken;
+    const key = data.api_key;
+    if (!key) throw new Error('Soniox token response missing api_key');
+    // expires_at is an ISO timestamp; fall back to the requested TTL if absent.
+    const expMs = data.expires_at ? Date.parse(data.expires_at) : NaN;
+    _snxKey = key as string;
+    _snxKeyExp = Number.isFinite(expMs) ? expMs : Date.now() + expiresInSeconds * 1000;
+    return _snxKey;
   })();
   try {
-    return await _dgInFlight;
+    return await _snxInFlight;
   } catch (e) {
-    _dgToken = null;
-    _dgTokenExp = 0;
+    _snxKey = null;
+    _snxKeyExp = 0;
     throw e;
   } finally {
-    _dgInFlight = null;
+    _snxInFlight = null;
   }
 }
 
-/** Drop the cached Deepgram token (call on sign-out / account switch). */
-export function clearDeepgramTokenCache(): void {
-  _dgToken = null;
-  _dgTokenExp = 0;
-  _dgInFlight = null;
+/** Drop the cached Soniox key (call on sign-out / account switch). */
+export function clearSonioxTokenCache(): void {
+  _snxKey = null;
+  _snxKeyExp = 0;
+  _snxInFlight = null;
+}
+
+/** One diarised token from Soniox, live or async — the shared transcript unit. */
+export interface SonioxToken {
+  text: string;
+  start_ms: number;
+  end_ms: number;
+  is_final?: boolean;
+  speaker?: string;
+  confidence?: number;
+}
+
+/**
+ * Transcribe an UPLOADED meeting file via Soniox async (stt-async-v5).
+ *
+ * The audio is already in our S3 bucket (PUT through /storage/presign), so we hand
+ * the server the object key rather than relaying bytes — a meeting recording would
+ * blow past Lambda's 6 MB request ceiling instantly. The bucket stays private; the
+ * server signs a short-lived GET for the provider. Returns raw diarised tokens so the
+ * caller can fold them through the SAME speaker map as the live path.
+ */
+export async function transcribeUploadedAudio(opts: {
+  /** S3 object key from /storage/presign — NOT a public URL. */
+  audioKey: string;
+  language?: string;
+  terms?: string[];
+}): Promise<SonioxToken[]> {
+  const token = await getIdToken();
+  const resp = await baseFetch(`${API_BASE}/ai/soniox-transcribe`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json', Authorization: token },
+    body: JSON.stringify({
+      audio_key: opts.audioKey,
+      ...(opts.language && opts.language !== 'multi' ? { language_hints: [opts.language] } : {}),
+      ...(opts.terms?.length ? { terms: opts.terms.slice(0, 500) } : {}),
+    }),
+  });
+  if (!resp.ok) {
+    const detail = await resp.json().catch(() => ({}));
+    throw new Error(`Transcription failed: ${detail?.error || resp.status}`);
+  }
+  return (await resp.json()).tokens ?? [];
 }
