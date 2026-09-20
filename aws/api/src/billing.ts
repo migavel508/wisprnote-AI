@@ -90,15 +90,22 @@ export const FREE_MEETING_LIMIT = 5;
 /**
  * Pricing-exempt accounts — TEMPORARY, for testing only.
  *
- * Any email here resolves to the unlimited `enterprise` plan regardless of
+ * Any email listed resolves to the unlimited `enterprise` plan regardless of
  * billing state, so the account is free from every plan limit while we finish
- * the consumption/cost-control work. Remove the email to re-tie the account to
- * normal pricing. Matching is case-insensitive. Everyone NOT listed is
- * completely unaffected.
+ * the consumption/cost-control work. Matching is case-insensitive. Everyone NOT
+ * listed is completely unaffected.
+ *
+ * Configured via the PRICING_EXEMPT_EMAILS environment variable as a
+ * comma-separated list, e.g. `PRICING_EXEMPT_EMAILS=a@example.com,b@example.com`.
+ * Deliberately NOT hardcoded: this is an allowlist that bypasses billing, and it
+ * has no business sitting in a public repository. Unset means nobody is exempt.
  */
-const PRICING_EXEMPT_EMAILS = new Set<string>([
-  'owner@example.com',
-]);
+const PRICING_EXEMPT_EMAILS = new Set<string>(
+  (process.env.PRICING_EXEMPT_EMAILS || '')
+    .split(',')
+    .map((email) => email.trim().toLowerCase())
+    .filter(Boolean),
+);
 
 /** Is this account temporarily exempt from all plan limits? */
 export function isPricingExempt(email: string | null | undefined): boolean {

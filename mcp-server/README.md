@@ -1,5 +1,11 @@
 # Wisprnote MCP Server
 
+> **⚠️ Outdated — Supabase era.** This copy of the MCP server talks to Supabase, which
+> Wisprnote no longer uses; the backend moved to AWS (Cognito + API Gateway + DynamoDB).
+> The setup instructions below will not work against a current deployment. It is kept for
+> reference until the AWS-based server is merged in. If you want MCP access to a running
+> Wisprnote instance, use the AWS-based server instead.
+
 Connect your Wisprnote meeting data to Claude Desktop, Cursor, Windsurf, and any other MCP-compatible AI tool.
 
 ## What it exposes

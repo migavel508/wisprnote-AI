@@ -1,0 +1,30 @@
+Wisprnote
+Copyright (C) 2026 Wisprbee
+
+This program is free software: you can redistribute it and/or modify it under
+the terms of the GNU Affero General Public License as published by the Free
+Software Foundation, either version 3 of the License, or (at your option) any
+later version.
+
+This program is distributed in the hope that it will be useful, but WITHOUT ANY
+WARRANTY; without even the implied warranty of MERCHANTABILITY or FITNESS FOR A
+PARTICULAR PURPOSE. See the GNU Affero General Public License for more details.
+
+You should have received a copy of the GNU Affero General Public License along
+with this program. If not, see <https://www.gnu.org/licenses/>.
+
+---
+
+Wisprnote is also available under a separate commercial licence for uses that
+cannot comply with the AGPL. See LICENSING.md, or contact hello@wisprbee.com.
+
+The names "Wisprnote" and "Wisprbee", and the Wisprnote logos and visual
+identity, are trademarks of the copyright holder and are NOT licensed under the
+AGPL. See the Trademarks section of LICENSING.md.
+
+---
+
+This product bundles third-party open-source components, each under its own
+licence. Their licence texts are distributed with the corresponding packages;
+run `npm ls --all` (JavaScript) and `cargo tree` (Rust, in src-tauri/ and
+record_system_audio/) to enumerate them.
