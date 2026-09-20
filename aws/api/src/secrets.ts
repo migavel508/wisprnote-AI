@@ -20,7 +20,13 @@ export interface ApiSecrets {
   ANTHROPIC_API_KEY: string;
   // OpenAI (GPT) — DIRECT API key for the agentic chat loop. Empty until provisioned.
   OPENAI_API_KEY: string;
+  // Deepgram — still used by /ai/transcribe for the chat box's voice input.
+  // NOT used by the notetaker any more (see SONIOX_API_KEY).
   DEEPGRAM_API_KEY: string;
+  // Soniox — meeting transcription (live stt-rt-v5 + async stt-async-v5). The
+  // permanent key never leaves the server: the desktop client streams using a
+  // short-lived temporary key minted by POST /ai/soniox-token.
+  SONIOX_API_KEY: string;
   OPENROUTER_API_KEY: string;
   TURBOPUFFER_API_KEY: string;
   // MCP connector endpoints + OAuth clients for connectors whose remote endpoint isn't a fixed
@@ -65,6 +71,7 @@ export function getSecrets(): Promise<ApiSecrets> {
         ANTHROPIC_API_KEY: process.env.ANTHROPIC_API_KEY || '',
         OPENAI_API_KEY: process.env.OPENAI_API_KEY || '',
         DEEPGRAM_API_KEY: process.env.DEEPGRAM_API_KEY || '',
+        SONIOX_API_KEY: process.env.SONIOX_API_KEY || '',
         OPENROUTER_API_KEY: process.env.OPENROUTER_API_KEY || '',
         TURBOPUFFER_API_KEY: process.env.TURBOPUFFER_API_KEY || '',
         MCP_GOOGLE_URL: process.env.MCP_GOOGLE_URL || '',
@@ -89,6 +96,7 @@ export function getSecrets(): Promise<ApiSecrets> {
             ANTHROPIC_API_KEY: parsed.ANTHROPIC_API_KEY || fallback.ANTHROPIC_API_KEY,
             OPENAI_API_KEY: parsed.OPENAI_API_KEY || fallback.OPENAI_API_KEY,
             DEEPGRAM_API_KEY: parsed.DEEPGRAM_API_KEY || fallback.DEEPGRAM_API_KEY,
+            SONIOX_API_KEY: parsed.SONIOX_API_KEY || fallback.SONIOX_API_KEY,
             OPENROUTER_API_KEY: parsed.OPENROUTER_API_KEY || fallback.OPENROUTER_API_KEY,
             TURBOPUFFER_API_KEY: parsed.TURBOPUFFER_API_KEY || fallback.TURBOPUFFER_API_KEY,
             MCP_GOOGLE_URL: parsed.MCP_GOOGLE_URL || fallback.MCP_GOOGLE_URL,

@@ -13,6 +13,7 @@ import { recordTokenUsage, recordAudioUsage, normalizeFeature } from './usage';
 import { handleChatAgent } from './chatAgent';
 import { MODELS } from './models/registry';
 import { runAgentTurn, providerFor } from './chat/agentTurn';
+import { presignUserAudio } from './storage';
 
 /**
  * Authenticated AI proxy. Every route sits BEHIND verifyToken (see the router in
@@ -32,11 +33,15 @@ import { runAgentTurn, providerFor } from './chat/agentTurn';
  *                             provider auth header and forward verbatim. Handles
  *                             Gemini, Anthropic, OpenRouter, Turbopuffer
  *                             uniformly (any endpoint/shape) with no per-shape code.
- *   POST /ai/transcribe     → Deepgram prerecorded transcription (voice input).
- *   POST /ai/deepgram-token → mint a short-lived Deepgram streaming token.
- *   POST /ai/transcription-usage → client reports a finished realtime streaming
- *                             session's audio duration (the realtime stream goes
- *                             client→Deepgram directly, so this is how it gets
+ *   POST /ai/transcribe     → Deepgram prerecorded transcription (chat voice input
+ *                             ONLY — the notetaker does not use Deepgram).
+ *   POST /ai/soniox-token   → mint a short-lived Soniox key for the desktop
+ *                             client's live meeting WebSocket.
+ *   POST /ai/soniox-transcribe → async transcription of an UPLOADED meeting file
+ *                             already in S3 (passed to Soniox as a presigned URL).
+ *   POST /ai/transcription-usage → client reports a finished live streaming
+ *                             session's audio duration (the stream goes
+ *                             client→Soniox directly, so this is how it gets
  *                             traced to Braintrust + metered).
  */
 export async function handleAI(
@@ -72,22 +77,96 @@ async function routeAI(
 
   const secrets = await getSecrets();
 
-  if (sub === 'deepgram-token') {
-    if (!secrets.DEEPGRAM_API_KEY) return serverError('Deepgram key not configured');
-    const ttl = Math.min(Math.max(Number(body.ttl_seconds) || 60, 10), 3600);
+  if (sub === 'soniox-token') {
+    // Mint a SHORT-LIVED Soniox key for the desktop client's live meeting stream.
+    // The client opens the WebSocket to Soniox directly (lowest latency), so it
+    // needs *a* credential — but never the permanent one, which stays in Secrets
+    // Manager. Temporary keys expire on their own and are scoped to websocket use,
+    // which is what makes shipping an open-source client safe.
+    if (!secrets.SONIOX_API_KEY) return serverError('Soniox key not configured');
+    const ttl = Math.min(Math.max(Number(body.expires_in_seconds) || 300, 60), 3600);
+    // A meeting can run long; cap the session rather than the key lifetime.
+    const maxSession = Math.min(Math.max(Number(body.max_session_duration_seconds) || 18000, 60), 18000);
     const out = await traceAI(
-      { name: 'deepgram.token', kind: 'function', provider: 'deepgram', userId, metadata: { ttl } },
+      { name: 'soniox.token', kind: 'function', provider: 'soniox', userId, metadata: { ttl, maxSession } },
       async () => {
-        const r = await fetch('https://api.deepgram.com/v1/auth/grant', {
+        const r = await fetch('https://api.soniox.com/v1/auth/temporary-api-key', {
           method: 'POST',
-          headers: { Authorization: `Token ${secrets.DEEPGRAM_API_KEY}`, 'Content-Type': 'application/json' },
-          body: JSON.stringify({ ttl_seconds: ttl }),
+          headers: { Authorization: `Bearer ${secrets.SONIOX_API_KEY}`, 'Content-Type': 'application/json' },
+          body: JSON.stringify({
+            usage_type: 'transcribe_websocket',
+            expires_in_seconds: ttl,
+            max_session_duration_seconds: maxSession,
+            client_reference_id: userId,
+          }),
         });
         const text = await r.text();
-        // Don't log the token itself.
-        return { status: r.ok ? 200 : r.status, output: '[streaming token issued]', body: text };
+        // Never log the minted key itself.
+        return { status: r.ok ? 200 : r.status, output: '[temporary key issued]', body: text };
       }
     );
+    return { statusCode: out.status, headers: jsonHeaders(), body: out.body };
+  }
+
+  if (sub === 'soniox-transcribe') {
+    // Uploaded-file meeting transcription (Soniox async). The audio is ALREADY in
+    // our S3 bucket — the client PUTs it via /storage/presign — so we hand Soniox a
+    // presigned GET URL instead of relaying bytes through Lambda, which has a 6 MB
+    // payload ceiling a meeting recording would blow past immediately.
+    //
+    // We take the object KEY, not a URL: the bucket stays private (this is meeting
+    // audio), the signed URL expires, and presignUserAudio refuses any key outside
+    // the caller's own prefix so one user can never transcribe another's recording.
+    if (!secrets.SONIOX_API_KEY) return serverError('Soniox key not configured');
+    const audioKey = String(body.audio_key || '');
+    if (!audioKey) return badRequest('audio_key required');
+    const audioUrl = await presignUserAudio(userId, audioKey);
+    if (!audioUrl) return badRequest('audio_key does not belong to this user');
+    const model = String(body.model || MODELS.meetingAsync.primary);
+    const languageHints = Array.isArray(body.language_hints) ? body.language_hints.slice(0, 10) : undefined;
+    // Dictionary terms bias the recogniser toward the user's own vocabulary.
+    const terms = Array.isArray(body.terms) ? body.terms.slice(0, 500) : undefined;
+
+    const out = await traceAI(
+      { name: 'soniox.transcribe', kind: 'function', provider: 'soniox', model, userId, input: '[uploaded meeting audio]', metadata: { hasTerms: Boolean(terms?.length) } },
+      async () => {
+        const created = await sonioxFetch('/v1/transcriptions', secrets.SONIOX_API_KEY, {
+          method: 'POST',
+          body: JSON.stringify({
+            audio_url: audioUrl,
+            model,
+            enable_speaker_diarization: true,
+            ...(languageHints ? { language_hints: languageHints } : {}),
+            ...(terms ? { context: { terms } } : {}),
+            client_reference_id: userId,
+          }),
+        });
+        if (!created.ok) return { status: created.status, output: '[create failed]', body: created.text };
+
+        const jobId = String(JSON.parse(created.text)?.id || '');
+        if (!jobId) return { status: 502, output: '[no job id]', body: JSON.stringify({ error: 'No transcription id returned' }) };
+
+        const done = await pollSonioxJob(jobId, secrets.SONIOX_API_KEY);
+        if (done.error) return { status: 502, output: `[${done.error}]`, body: JSON.stringify({ error: done.error, id: jobId }) };
+
+        const tr = await sonioxFetch(`/v1/transcriptions/${jobId}/transcript`, secrets.SONIOX_API_KEY, { method: 'GET' });
+        if (!tr.ok) return { status: tr.status, output: '[transcript fetch failed]', body: tr.text };
+
+        const tokens = JSON.parse(tr.text)?.tokens ?? [];
+        const seconds = tokens.length ? Math.max(...tokens.map((t: any) => Number(t.end_ms) || 0)) / 1000 : 0;
+        return {
+          status: 200,
+          output: `[${tokens.length} tokens, ${seconds.toFixed(1)}s]`,
+          metrics: audioMetrics(seconds),
+          // Hand the raw tokens back; the client folds them through the SAME
+          // speaker map as the live path so both sources label identically.
+          body: JSON.stringify({ id: jobId, tokens }),
+        };
+      }
+    );
+    if (out.status === 200) {
+      await recordAudioUsage(userId, 'soniox', model, Number(out.metrics?.audio_seconds) || 0, 'transcription');
+    }
     return { statusCode: out.status, headers: jsonHeaders(), body: out.body };
   }
 
@@ -142,16 +221,16 @@ async function routeAI(
     // like the proxy. The client reports the finished session's audio duration
     // here so realtime transcription still shows up in Braintrust + usage metering
     // — giving the whole app (every model) complete observability.
-    const mode = String(body.mode || 'realtime');
-    const model = String(body.model || MODELS.transcription.primary);
+    const mode = String(body.mode || 'live');
+    const model = String(body.model || MODELS.meetingLive.primary);
     const seconds = Math.max(0, Number(body.duration_seconds) || 0);
     const words = Math.max(0, Number(body.words) || 0);
     if (seconds <= 0) return badRequest('duration_seconds required');
     await traceAI(
       {
-        name: 'deepgram.streaming',
+        name: 'soniox.streaming',
         kind: 'function',
-        provider: 'deepgram',
+        provider: 'soniox',
         model,
         userId,
         input: `[realtime ${mode} session]`,
@@ -159,7 +238,7 @@ async function routeAI(
       },
       async () => ({ status: 200, output: `[${seconds.toFixed(1)}s transcribed]`, metrics: audioMetrics(seconds, words) }),
     );
-    await recordAudioUsage(userId, 'deepgram', model, seconds, 'transcription');
+    await recordAudioUsage(userId, 'soniox', model, seconds, 'transcription');
     return { statusCode: 200, headers: jsonHeaders(), body: JSON.stringify({ ok: true }) };
   }
 
@@ -389,6 +468,47 @@ async function fetchWithRetry(url: string, init: any, maxRetries = 2): Promise<R
     await new Promise((res) => setTimeout(res, waitMs));
     attempt++;
   }
+}
+
+/** One-shot call to the Soniox REST API with the server-side permanent key. */
+async function sonioxFetch(
+  path: string,
+  apiKey: string,
+  init: { method: string; body?: string }
+): Promise<{ ok: boolean; status: number; text: string }> {
+  const r = await fetch(`https://api.soniox.com${path}`, {
+    method: init.method,
+    headers: { Authorization: `Bearer ${apiKey}`, 'Content-Type': 'application/json' },
+    ...(init.body ? { body: init.body } : {}),
+  });
+  return { ok: r.ok, status: r.status, text: await r.text() };
+}
+
+/**
+ * Poll an async transcription to completion.
+ *
+ * Bounded by the Lambda's own timeout, not by patience: we stop well before the
+ * function is killed so the caller gets a real error instead of a 502 from the
+ * runtime. A job that outlives the budget is not lost — it keeps running at
+ * Soniox and the client can re-poll by id.
+ */
+async function pollSonioxJob(
+  jobId: string,
+  apiKey: string,
+  budgetMs = 12 * 60 * 1000
+): Promise<{ error?: string }> {
+  const deadline = Date.now() + budgetMs;
+  let waitMs = 1000;
+  while (Date.now() < deadline) {
+    await new Promise((r) => setTimeout(r, waitMs));
+    waitMs = Math.min(waitMs * 1.5, 10000); // back off; most jobs finish early
+    const s = await sonioxFetch(`/v1/transcriptions/${jobId}`, apiKey, { method: 'GET' });
+    if (!s.ok) return { error: `status_${s.status}` };
+    const status = String(JSON.parse(s.text)?.status || '');
+    if (status === 'completed') return {};
+    if (status === 'error') return { error: 'transcription_failed' };
+  }
+  return { error: 'timeout' };
 }
 
 function jsonHeaders() {
