@@ -149,7 +149,7 @@ threads instead of re-scanning meetings.
 ## 3. Migration path (each phase shippable, non-breaking)
 
 - **P0 — Space keying + membership reads.** Add space-first keys/indexes; reads resolve via
-  `space_members`; backfill current data (Pilot etc.). *Unlocks: shared team brain.*
+  `space_members`; backfill current data (the pilot space etc.). *Unlocks: shared team brain.*
 - **P1 — Claims → edges (bind at ingestion).** Wire `knowledge_graph` output into edge
   creation (people/references/action-item claims); connector entities (ticket keys in commit
   messages already parsed) same path. Kill semantic-as-backbone; keep it as capped prior.

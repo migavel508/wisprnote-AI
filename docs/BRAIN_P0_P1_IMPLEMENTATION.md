@@ -141,7 +141,7 @@ Pair with the existing `brain-edge-cleanup allEdges` to rebuild a space cleanly 
 
 ## Sequencing, risk, and rollout
 - **Build order:** P0.1→P0.2→P0.3 (deploy, verify shared read) → P0.5 indexes → then P1.1→P1.2
-  (deploy) → P1.4 backfill one space (Pilot) → verify composition → roll to all.
+  (deploy) → P1.4 backfill one space (the pilot space) → verify composition → roll to all.
 - **Risk — cross-user exposure:** re-scoping reads to `space_id` is safe *only* if the membership
   gate (P0.2) is strict; the space-isolation guards we built (broker no-fallback, `insertEdge`
   same-space, per-space credentials) are the write-side backstop. Add a test: member of A cannot

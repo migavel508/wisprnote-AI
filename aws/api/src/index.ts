@@ -946,7 +946,7 @@ export const handler = async (event: APIGatewayProxyEvent): Promise<APIGatewayPr
             WHERE c.user_id=ap.user_id AND c.workspace_id=ap.workspace_id
               AND c.space_id=ap.space_id AND c.source='jira')`, [SENT]);
     // 7) Space NAME map + per-space connector picture: for each space, which sources are CONNECTED
-    //    (have a credential) vs. which sources have ITEMS sitting in it. Lets us map Pilot/Personal.
+    //    (have a credential) vs. which sources have ITEMS sitting in it. Lets us map Team/Personal.
     const spaceMap = await safe(
       `SELECT s.id::text AS space_id, s.name, s.is_default,
               (SELECT array_agg(DISTINCT c.source) FROM connector_credentials c
