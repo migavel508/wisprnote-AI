@@ -118,7 +118,7 @@ account, but without re-auth.
 2. **Per-user default workspace = the user's name + photo.** On migration, for every user:
    create a default workspace named after the user (avatar = profile photo, `is_default=true`,
    undeletable). The old "My notes" becomes the default **Space** inside it (not a workspace).
-   Any *other* existing workspaces the user already has (e.g. "poz") are kept as additional
+   Any *other* existing workspaces the user already has (e.g. "Pilot") are kept as additional
    workspaces. New users get this default at signup. Additional workspaces are fully
    free-form (any name/icon/color), capped at 5.
 3. **Backfill assignment:** every existing `task_history` row → the user's default workspace.
@@ -154,7 +154,7 @@ idempotent and safe to re-run.
 
 1. **One home workspace per recording** (true partition) vs keep optional cross-posting
    (`task_workspaces`)? — recommend true partition for v1.
-2. **Existing multi-workspace users** (e.g. "Migavel D", "poz"): keep both as master
+2. **Existing multi-workspace users** (e.g. "Personal", "Pilot"): keep both as master
    workspaces; pick the default = the one matching their name, else first. OK?
 3. **Folder nesting inside a Space** (mockup shows "AI" under "My notes") — v1 flat spaces,
    or build nesting now?

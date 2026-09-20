@@ -26,7 +26,7 @@ does not exist yet. That's the headline of this plan.
 A chief of staff who *confidently tells you wrong things* is worse than none. Right now the brain
 does exactly that, and it's structural, not cosmetic:
 
-- **94% of edges are unverified similarity.** POZ = 293 edges, only 18 are claim/verdict; 275 are
+- **94% of edges are unverified similarity.** Pilot = 293 edges, only 18 are claim/verdict; 275 are
   `semantic` (embedding-nearest). A commit "linked" to a meeting at 0.4 cosine is usually NOT a
   real relationship — but the map draws it identically to a confirmed one.
 - **Guesses are counted as evidence.** A thread's "7 linked commits" counts *any* edge, including
@@ -59,7 +59,7 @@ dedup any workspace-level ledger read by `(kind, anchor_source, anchor_source_id
 best-evidenced row.
 
 ### CF-2 · Re-tier edges by TRUTH, not just de-dup — precision model 🔴
-POZ is back to **293 edges: 275 semantic (94%) vs 18 claim/verdict**. This isn't only bloat, it's
+Pilot is back to **293 edges: 275 semantic (94%) vs 18 claim/verdict**. This isn't only bloat, it's
 *inaccuracy*. Root causes: (a) edges are **directional**, so A→B and B→A both insert — reciprocal
 duplicates double-count; (b) per-run caps (`GH_XSRC_CAP=2`, connectivity `fb<2`) reset every relink
 cycle, so cycles accumulate; (c) consolidation only supersedes semantic on the *same pair* — no
@@ -94,7 +94,7 @@ rather than propose into the wrong project.
 
 ### CF-3 · Chat is workspace-scoped, not space-scoped 🟠
 `agent-exec`/`buildAgentToolset`/`brain_threads` all key on `workspaceId` only. A user chatting
-"in" POZ actually queries the whole workspace — blending spaces (against the isolation model we
+"in" Pilot actually queries the whole workspace — blending spaces (against the isolation model we
 enforced everywhere else) and producing cross-space noise like CF-1. Fix: thread the **active
 space** through the chat request → toolset + every built-in tool filters by space (with workspace
 as the explicit "all projects" mode, not the accidental default).
@@ -122,7 +122,7 @@ maintains.
   an **LLM polish** (budgeted, when credits exist) that turns the skeleton into 6–10 sentences of
   actual narrative with the "why".
 - **Refreshed** by the hourly threads cron + after every on-demand sync (event-first, like bind).
-- **Consumed everywhere:** brain-map header ("This week in POZ…"), the space home, a `brain_brief`
+- **Consumed everywhere:** brain-map header ("This week in Pilot…"), the space home, a `brain_brief`
   chat tool (the answer to "what's going on?"), and the Slack digest the user already wants to post.
 - This single artifact is what converts the graph from *inspectable* to *useful*.
 
@@ -176,7 +176,7 @@ instead of the model reassembling raw search hits. (Space-scoping of these tools
 
 1. ✅ **DONE (deployed 2026-07-03) — ACCURACY FIRST — CF-1 + CF-2 + CF-5** — swept sentinel dups +
    ghost threads; re-tiered edges (confirmed vs possible, canonical direction, higher floor, degree
-   cap); confidence propagates so threads/UI/chat count only confirmed evidence. POZ verified: 293
+   cap); confidence propagates so threads/UI/chat count only confirmed evidence. Pilot verified: 293
    edges/94% semantic → 33 edges/55% confirmed; no dup threads; `dupAcrossSpaces` empty.
 2. **CF-3 + CF-6** — space-scoped chat (CF-3 needs a client rebuild to send `spaceId` — DEFERRED);
    ✅ **CF-6 DONE (deployed 2026-07-03)**: multi-project gap guard + entity/name normalization
@@ -186,11 +186,11 @@ instead of the model reassembling raw search hits. (Space-scoping of these tools
    strips same-source semantic (meeting↔meeting is now TOPIC-thread territory, not map noise).
 3. ✅ **DONE (deployed 2026-07-03) — D-1 skeleton + D-7** — `space_brief` table + deterministic tier
    generated from confirmed evidence, `brain_brief` chat tool, `brain-brief` job, auto-refresh on the
-   threads cron. POZ narrative verified grounded. Brain-map-header surfacing needs the client rebuild.
+   threads cron. Pilot narrative verified grounded. Brain-map-header surfacing needs the client rebuild.
 4. ✅ **DONE (deployed 2026-07-03) — D-2** — topic threads from existing kg topics (`buildSpaceTopics`,
    deterministic $0, no new tokens): recurring topics (≥2 meetings) → `topic` threads with derived
    state; brief gained a `conversations` section + narrative; `brain_threads` renders `OPEN LOOP`.
-   POZ verified: "Web Validation Layer Prototype (2 meetings, latest revisited)".
+   Pilot verified: "Web Validation Layer Prototype (2 meetings, latest revisited)".
 5. ✅ **DONE (deployed 2026-07-03) — CF-4 + D-5** — `budget.ts`: `llm_health` table + `checkBrainBudget`
    (per-user daily, env `BRAIN_DAILY_TOKEN_BUDGET`, default 3M); runBrainLink gates the premium verdict
    pass → over-budget = deterministic-only + visible `brain_budget_deferred`; `/brain/progress` returns

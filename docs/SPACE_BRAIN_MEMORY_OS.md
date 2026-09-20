@@ -161,7 +161,7 @@ Nothing here is a big-bang; each phase is shippable and the deterministic spine 
    `connectors/memscore.ts` + `mem-score` job: `mem_benchmark` + `mem_score_run` tables, deterministic
    `seedGoldenSet` (golden Q&A from the space's own tickets/decisions/topics, $0), `runMemScore`
    (retrieval scored deterministically = recall@k + MRR; `useGraph` A/Bs brain_edge expansion;
-   `withAnswer` adds a Flash answer+judge layer, metered). **POZ baseline (37 Qs): vector-only recall
+   `withAnswer` adds a Flash answer+judge layer, metered). **Pilot baseline (37 Qs): vector-only recall
    0.78 / MemScore 75; graph-aware recall 0.87 / MemScore 81** — graph expansion proven +8pts recall /
    +6 MemScore for ~20ms. This is the number every phase below must beat.
 2. ◐ **content-hash + synced_at root fix SHIPPED (deployed 2026-07-03)** *(cost)* — `sync.ts` now bumps
@@ -180,7 +180,7 @@ Nothing here is a big-bang; each phase is shippable and the deterministic spine 
 3. ◐ **Derived-atom indexing SHIPPED (deployed 2026-07-03)** *(quality)* — `memunits.ts` + `mem_unit`
    table + `mem-units` job: every knowledge_graph decision/action-item/topic indexed as its own memory
    unit (`id=${'${parentItemId}'}~d0`, `unit_type`+`parent_id`), hash-gated; `semanticSearchItems` resolves
-   atom hits to their parent item. **MemScore jumped 81 → 99 on POZ (recall 0.865→1.00, MRR 0.67→0.97,
+   atom hits to their parent item. **MemScore jumped 81 → 99 on Pilot (recall 0.865→1.00, MRR 0.67→0.97,
    latency flat).** Biggest lever by far. STILL TODO: item CHUNKING (split long transcripts) — the other
    half of multi-granularity. (Caveat: the golden set is auto-generated from the same decisions/topics,
    so 99 proves "extracted knowledge is now directly retrievable" — the goal — but a held-out /
@@ -202,7 +202,7 @@ work benefits from LLM credits (available now); phase 6 needs a client rebuild.
 
 **HELD-OUT BASELINE (deployed 2026-07-03) — the honest number.** The auto golden set reuses indexed
 atom text, so its 99 was inflated. A paraphrased set (LLM-reworded, no ticket keys, same expected
-source) is the held-out test. POZ, 33 paraphrased Qs: **recall 0.91, MRR 0.62, MemScore 82** (graph ==
+source) is the held-out test. Pilot, 33 paraphrased Qs: **recall 0.91, MRR 0.62, MemScore 82** (graph ==
 vector — graph didn't recover the misses). Reading: atom indexing GENERALIZES (0.91 recall on reworded
 queries — not just lexical overlap), but RANKING is the measured weakness (MRR 0.97→0.62). So the next
 lever is RERANKING (confidence · centrality · recency), not more recall. **82 is the trustworthy
