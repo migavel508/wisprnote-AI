@@ -2,7 +2,7 @@
  * Derives a clean human display name from an email address.
  *
  * Strips digits, dots, underscores, hyphens, and plus-tags from the local part,
- * then capitalises the first letter. `migaveld589@gmail.com` → `Migaveld`,
+ * then capitalises the first letter. `alex.kim42@example.com` → `Alex`,
  * `jane.doe+work@x.com` → `Jane`.
  *
  * If a Cognito `name` attribute is provided and it is not just an email
