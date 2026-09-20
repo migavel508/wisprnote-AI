@@ -13,21 +13,18 @@
   [![License: AGPL v3](https://img.shields.io/badge/License-AGPL_v3-blue.svg)](LICENSE)
   [![Commercial licence available](https://img.shields.io/badge/commercial-licence_available-green.svg)](LICENSING.md)
 
-  [Demo](#demo) • [What it does](#what-it-does) • [Install](docs/INSTALL.md) • [Architecture](#architecture) • [Licence](#licence)
+  [Demo](docs/demo/wisprnote-demo.mp4) • [What it does](#what-it-does) • [Install](docs/INSTALL.md) • [Architecture](#architecture) • [Licence](#licence)
 </div>
 
 <div align="center">
-  <img src="./wisprnoteai.png" alt="The Wisprnote interface" width="100%" />
+  <a href="docs/demo/wisprnote-demo.mp4">
+    <img src="docs/demo/demo-poster.jpg" alt="Watch the Wisprnote demo — 4 minutes" width="100%" />
+  </a>
+  <br />
+  <em><a href="docs/demo/wisprnote-demo.mp4">▶ Watch the demo</a> — 4 minutes</em>
 </div>
 
 ---
-
-## Demo
-
-**[▶ Watch the demo](docs/demo/wisprnote-demo.mp4)** (26 MB, MP4)
-
-GitHub won't play a repo-hosted video inline — click through, or download the file, to
-watch it.
 
 ## What it does
 
