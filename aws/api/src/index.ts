@@ -108,7 +108,7 @@ const FROM_EMAIL = process.env.SES_FROM_EMAIL || 'noreply@wisprnote.com';
 const SITE_URL = (process.env.WISPRNOTE_PUBLIC_URL || 'https://www.wisprnote.com').replace(/\/$/, '');
 /** This API's own public base URL, used to build OAuth callback URLs. Set
     WISPRNOTE_API_URL per deployment so a fork never points at someone else's API. */
-const API_SELF_URL = (process.env.WISPRNOTE_API_URL || 'https://hxjaupkwql.execute-api.us-east-1.amazonaws.com/prod').replace(/\/$/, '');
+const API_SELF_URL = (process.env.WISPRNOTE_API_URL || '').replace(/\/$/, '');
 
 const COGNITO_USER_POOL_ID = process.env.COGNITO_USER_POOL_ID || '';
 const COGNITO_CLIENT_ID = process.env.COGNITO_CLIENT_ID || '';

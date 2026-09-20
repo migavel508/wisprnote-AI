@@ -279,7 +279,7 @@ function kgExtractableFacet(text: string): 'action_items' | 'decisions' | null {
 
 /**
  * Does a broad-extraction request also name an explicit TOPIC (e.g. "…about the
- * Helix project", "…regarding the website")? Conservative on purpose — only an
+ * billing project", "…regarding the website")? Conservative on purpose — only an
  * explicit topic marker counts — so a pure global request ("everything I committed
  * to across all meetings") is NOT mistaken for a topical one and keeps reading by
  * KG-priority + recency. When a topic IS named, the extract route retrieves the

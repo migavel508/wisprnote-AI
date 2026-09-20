@@ -51,7 +51,7 @@ const GENERIC_TITLE_WORDS = new Set([
 function isDistinctiveTitle(title: string): boolean {
   const toks = norm(title).split(' ').filter(Boolean);
   const distinctive = toks.filter((t) => t.length >= 3 && !GENERIC_TITLE_WORDS.has(t));
-  // ≥2 distinctive tokens, OR a single long rare token (e.g. a codename like "Helix", "Firmwhite").
+  // ≥2 distinctive tokens, OR a single long rare token (e.g. a codename like "Nimbus", "Firmwhite").
   return distinctive.length >= 2 || distinctive.some((t) => t.length >= 8);
 }
 
@@ -90,7 +90,7 @@ export async function bindMeetingFromClaims(
     insertEdge({ userId, workspaceId, spaceId, srcKind: 'item', srcId: meetingItemId, dstKind: 'item', dstId, relation, origin, confidence, evidence });
 
   // 0) PROVENANCE (back-reference) — a connector item auto-created FROM this meeting quotes it in its
-  //    body ("… from the meeting 'Helix AI Project Scope Planning'"). This is the strongest signal for
+  //    body ("… from the meeting 'Q3 Roadmap Planning'"). This is the strongest signal for
   //    the tool-of-record a meeting spawned, and it survives resets (it lives on the item itself).
   const title = (meetingTitle || '').trim();
   // CF-6a: only trust the back-reference when the title is DISTINCTIVE — a generic title

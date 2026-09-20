@@ -93,7 +93,7 @@ touched only for the small relevant subset, on demand.
 **Router (first, cheap, deterministic + model-assisted):** classify the prompt →
 - `global-extraction` ("all my action items / commitments / recap across everything") →
   **KG-index path** (read pre-extracted `action_items`/`decisions`; covers all 10k; no live reads).
-- `topical / specific` ("what did we decide about X", "the Helix plan") →
+- `topical / specific` ("what did we decide about X", "the rollout plan") →
   **retrieval path** (turbopuffer top-K → read those few in full).
 - `broad-but-needs-reading` (nuanced synthesis the KG can't answer) →
   **fan-out path** (coordinator shards the *retrieved relevant* set, not all meetings).

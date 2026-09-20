@@ -190,7 +190,7 @@ instead of the model reassembling raw search hits. (Space-scoping of these tools
 4. ✅ **DONE (deployed 2026-07-03) — D-2** — topic threads from existing kg topics (`buildSpaceTopics`,
    deterministic $0, no new tokens): recurring topics (≥2 meetings) → `topic` threads with derived
    state; brief gained a `conversations` section + narrative; `brain_threads` renders `OPEN LOOP`.
-   Pilot verified: "Web Validation Layer Prototype (2 meetings, latest revisited)".
+   Pilot verified: "Onboarding Revamp (2 meetings, latest revisited)".
 5. ✅ **DONE (deployed 2026-07-03) — CF-4 + D-5** — `budget.ts`: `llm_health` table + `checkBrainBudget`
    (per-user daily, env `BRAIN_DAILY_TOKEN_BUDGET`, default 3M); runBrainLink gates the premium verdict
    pass → over-budget = deterministic-only + visible `brain_budget_deferred`; `/brain/progress` returns

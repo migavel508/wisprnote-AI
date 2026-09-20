@@ -130,7 +130,7 @@ expensive semantic re-link for the initial build — it's $0 and fast (no embedd
 Pair with the existing `brain-edge-cleanup allEdges` to rebuild a space cleanly from claims.
 
 ### P1 acceptance (measured with `brain-map-debug`)
-- The auto-suggested-ticket case (SCRUM-13 ← "Helix AI Project Scope Planning") links with
+- The auto-suggested-ticket case (PROJ-13 ← "Q3 Roadmap Planning") links with
   origin `provenance`/`claim` **at ingest**, not "no links yet".
 - Edge composition flips from **semantic-dominated → claim-dominated** (`brain-map-debug` shows
   provenance/reference/entity ≫ semantic).
