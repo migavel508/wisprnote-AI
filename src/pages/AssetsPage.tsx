@@ -146,7 +146,7 @@ export default function AssetsPage({
                   <div className="flex-1 overflow-y-auto">
                     <div className="flex items-center justify-between mb-6 border-b border-[#141414]/10 pb-4">
                       <div className="flex items-center gap-3">
-                        {selectedAsset.type === 'ppt' ? <Presentation className="w-5 h-5 text-orange-600" /> : <FileText className="w-5 h-5 text-blue-600" />}
+                        <FileText className="w-5 h-5 text-blue-600" />
                         <h3 className="font-bold text-sm">{selectedAsset.filename}</h3>
                       </div>
                       <button 
@@ -159,60 +159,17 @@ export default function AssetsPage({
                     </div>
 
                     <div className="bg-white p-6 sm:p-8 border border-[#141414]/5 shadow-sm rounded-xl">
-                      {selectedAsset.type === 'ppt' ? (
-                        selectedAsset.content.slides ? (
-                          // Old format: JSON structure with slides array
-                          <div className="space-y-8">
-                            <div className="text-center py-12 border-b border-[#141414]/5">
-                              <h2 className="text-3xl font-bold tracking-tight mb-2">{selectedAsset.content.title}</h2>
-                              <p className="text-xs font-mono opacity-40 uppercase tracking-widest">Title Slide</p>
-                            </div>
-                            {selectedAsset.content.slides.map((slide: any, idx: number) => (
-                              <div key={idx} className="space-y-4">
-                                <div className="flex items-center gap-4">
-                                  <span className="text-[10px] font-mono opacity-30 uppercase">Slide {idx + 1}</span>
-                                  <h4 className="font-bold text-lg">{slide.title}</h4>
-                                </div>
-                                <ul className="space-y-2 pl-4 border-l-2 border-[#141414]/5">
-                                  {slide.content.map((bullet: string, bidx: number) => (
-                                    <li key={bidx} className="text-sm opacity-70 flex items-start gap-2">
-                                      <span className="mt-1.5 w-1.5 h-1.5 rounded-full bg-[#141414]/20 flex-shrink-0" />
-                                      {bullet}
-                                    </li>
-                                  ))}
-                                </ul>
-                              </div>
-                            ))}
-                          </div>
-                        ) : (
-                          // New E2B format: no preview available
-                          <div className="text-center py-24 space-y-4">
-                            <Presentation className="w-16 h-16 mx-auto opacity-20" />
-                            <div>
-                              <h3 className="text-lg font-semibold mb-2">E2B-Generated Presentation</h3>
-                              <p className="text-sm opacity-60 max-w-md mx-auto">
-                                This presentation was generated using E2B sandbox execution. 
-                                {selectedAsset.content.slideCount && ` Contains ${selectedAsset.content.slideCount} slides.`}
-                              </p>
-                              <p className="text-xs opacity-40 mt-4">
-                                Preview not available. Click "Download" above to view the presentation.
-                              </p>
-                            </div>
-                          </div>
-                        )
-                      ) : (
-                        <div className="space-y-8">
-                          <div className="border-b border-[#141414]/5 pb-6">
-                            <h2 className="text-3xl font-bold tracking-tight">{selectedAsset.content?.title || selectedAsset.filename}</h2>
-                          </div>
-                          {(selectedAsset.content?.sections || []).map((section: any, idx: number) => (
-                            <div key={idx} className="space-y-3">
-                              <h4 className="font-bold text-lg uppercase tracking-tight">{section.heading}</h4>
-                              <p className="text-sm leading-relaxed opacity-70">{section.body}</p>
-                            </div>
-                          ))}
+                      <div className="space-y-8">
+                        <div className="border-b border-[#141414]/5 pb-6">
+                          <h2 className="text-3xl font-bold tracking-tight">{selectedAsset.content?.title || selectedAsset.filename}</h2>
                         </div>
-                      )}
+                        {(selectedAsset.content?.sections || []).map((section: any, idx: number) => (
+                          <div key={idx} className="space-y-3">
+                            <h4 className="font-bold text-lg uppercase tracking-tight">{section.heading}</h4>
+                            <p className="text-sm leading-relaxed opacity-70">{section.body}</p>
+                          </div>
+                        ))}
+                      </div>
                     </div>
                   </div>
                 )}
@@ -235,7 +192,7 @@ export default function AssetsPage({
                     className={`p-4 border border-[#141414] shadow-[2px_2px_0px_0px_rgba(20,20,20,1)] flex items-center justify-between group cursor-pointer transition-all ${selectedAsset?.id === asset.id ? 'bg-[#141414] text-white shadow-none translate-x-[2px] translate-y-[2px]' : 'bg-white hover:bg-[#F5F5F5]'}`}
                   >
                     <div className="flex items-center gap-3 overflow-hidden">
-                      {asset.type === 'ppt' ? <Presentation className={`w-4 h-4 ${selectedAsset?.id === asset.id ? 'text-orange-400' : 'text-orange-600'}`} /> : <FileIcon className={`w-4 h-4 ${selectedAsset?.id === asset.id ? 'text-blue-400' : 'text-blue-600'}`} />}
+                      <FileIcon className={`w-4 h-4 ${selectedAsset?.id === asset.id ? 'text-blue-400' : 'text-blue-600'}`} />
                       <div className="overflow-hidden">
                         <p className="text-xs font-bold truncate">{asset.filename}</p>
                         <p className={`text-[8px] font-mono uppercase ${selectedAsset?.id === asset.id ? 'opacity-60' : 'opacity-40'}`}>{new Date(asset.created_at!).toLocaleDateString()}</p>
