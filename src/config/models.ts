@@ -29,10 +29,17 @@ const FLASH: ModelSpec = { primary: 'gemini-3-flash-preview', fallbacks: ['gemin
 
 export const MODELS = {
   // ── Transcription ──
-  /** Uploaded-file transcription (Gemini File API / batch chunks). */
+  /** Gemini File API transcription. Retained for the non-meeting callers in
+   *  geminiService.ts; meeting audio (live AND uploaded) goes to Soniox below. */
   transcription: { ...FLASH },
-  /** Live + clip transcription (Deepgram). Used as the metering label client-side;
-   *  the actual Deepgram model is also pinned server-side in the API registry. */
+  /** MEETING transcription, live — Soniox stt-rt-v5, streamed client→Soniox over a
+   *  WebSocket using a short-lived key from /ai/soniox-token. Metering label
+   *  client-side; the model is also pinned server-side in the API registry. */
+  meetingLive: { primary: 'stt-rt-v5' },
+  /** MEETING transcription, uploaded files — Soniox stt-async-v5, run server-side
+   *  via /ai/soniox-transcribe. */
+  meetingAsync: { primary: 'stt-async-v5' },
+  /** Chat voice-input clips (Deepgram prerecorded, via /ai/transcribe). NOT the notetaker. */
   deepgram: { primary: 'nova-3' },
 
   // ── Per-meeting artifacts ──

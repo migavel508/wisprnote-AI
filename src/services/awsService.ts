@@ -319,7 +319,7 @@ export async function deleteManualNote(noteId: string): Promise<void> {
 // =====================================================
 
 export async function uploadNoteImage(file: File): Promise<string> {
-  const { uploadUrl, publicUrl } = await apiRequest<{ uploadUrl: string; publicUrl: string }>(
+  const { uploadUrl, publicUrl } = await apiRequest<{ uploadUrl: string; publicUrl: string; key: string }>(
     'POST',
     '/storage/presign',
     { filename: file.name, contentType: file.type }
@@ -650,4 +650,29 @@ export async function flushPendingTasks(): Promise<TaskHistory[]> {
     }
   }
   return syncedTasks;
+}
+
+/**
+ * Upload meeting audio to S3 and return its object KEY (not a URL).
+ *
+ * Transcription is handed the key, never a public link: the server signs a
+ * short-lived GET for the provider, so the recording stays private and the grant
+ * expires on its own. Uploading direct to S3 also keeps a full-length meeting off
+ * the Lambda request path, which caps out at 6 MB.
+ */
+export async function uploadMeetingAudio(file: File): Promise<string> {
+  const contentType = file.type || 'audio/mpeg';
+  const { uploadUrl, key } = await apiRequest<{ uploadUrl: string; publicUrl: string; key: string }>(
+    'POST',
+    '/storage/presign',
+    { filename: file.name, contentType }
+  );
+
+  const resp = await httpFetch(uploadUrl, {
+    method: 'PUT',
+    headers: { 'Content-Type': contentType },
+    body: file,
+  });
+  if (!resp.ok) throw new Error(`Audio upload failed: ${resp.status}`);
+  return key;
 }

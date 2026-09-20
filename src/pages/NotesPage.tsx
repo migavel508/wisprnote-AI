@@ -19,6 +19,7 @@ import {
 } from '../services/workspaceService';
 import CreateFolderModal, { type FolderDraft } from '../components/CreateFolderModal';
 import { onVaultEvent } from '../lib/vaultEvents';
+import TranscriptView from '../components/TranscriptView';
 
 interface NotesPageProps {
   selectedTask: TaskHistory | null;
@@ -33,17 +34,6 @@ interface NotesPageProps {
 }
 
 type NoteTab = 'transcription' | 'summary' | 'notes' | 'note' | 'chat';
-
-// Helper function to format transcription with bold speaker labels
-function formatTranscriptionWithBoldSpeakers(text: string): string {
-  if (!text) return '';
-  
-  // Match patterns like "Speaker 1:", "Speaker 2:", "Speaker A:", etc.
-  // Also match common variations like "Host:", "Guest:", "Interviewer:", etc.
-  const speakerPattern = /^(Speaker\s*\d+|Speaker\s*[A-Z]|Host|Guest|Interviewer|Interviewee|Moderator|Participant\s*\d*|Person\s*\d*)\s*:/gim;
-  
-  return text.replace(speakerPattern, (match) => `**${match.trim()}**`);
-}
 
 export default function NotesPage({ selectedTask, isLoading = false, isLoadingDetails = false, onTaskUpdated, session, allTasks = [], chatPanel }: NotesPageProps) {
   const [noteTab, setNoteTab] = useState<NoteTab>('summary');
@@ -163,7 +153,7 @@ export default function NotesPage({ selectedTask, isLoading = false, isLoadingDe
   // must re-sync when the attendee values arrive/change — not only when the id
   // changes. Keying on the id alone left the chip stuck on the initial empty
   // list until a full page refresh.
-  const taskAttendeesKey = (selectedTask?.attendees ?? []).join(' ');
+  const taskAttendeesKey = (selectedTask?.attendees ?? []).join('\u0000');
   useEffect(() => {
     setAttendees(selectedTask?.attendees ?? []);
     // eslint-disable-next-line react-hooks/exhaustive-deps
@@ -783,9 +773,7 @@ export default function NotesPage({ selectedTask, isLoading = false, isLoadingDe
                     <p className="text-[13px] text-app-fg-muted">Loading transcription...</p>
                   </div>
                 ) : (
-                  <div className="prose prose-sm max-w-none prose-p:text-[14.5px] prose-p:leading-[1.75] prose-p:text-zinc-700 dark:prose-p:text-zinc-300 prose-strong:text-zinc-900 dark:prose-strong:text-zinc-100 prose-headings:text-zinc-900 dark:prose-headings:text-zinc-100 prose-headings:tracking-tight transcription-content markdown-body">
-                    <Markdown remarkPlugins={[remarkGfm]}>{formatTranscriptionWithBoldSpeakers(selectedTask.transcription || '')}</Markdown>
-                  </div>
+                  <TranscriptView text={selectedTask.transcription || ''} />
                 )
               )}
 
