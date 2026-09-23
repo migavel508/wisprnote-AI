@@ -10,10 +10,14 @@
   work in — so everything your team knows lives in one place instead of scattered across
   a dozen apps.
 
+  [![Download for macOS](https://img.shields.io/github/v/release/migavel508/wisprnote-AI?label=Download%20for%20macOS&color=0b6e4f&style=for-the-badge)](https://github.com/migavel508/wisprnote-AI/releases/latest)
+
   [![License: AGPL v3](https://img.shields.io/badge/License-AGPL_v3-blue.svg)](LICENSE)
   [![Commercial licence available](https://img.shields.io/badge/commercial-licence_available-green.svg)](LICENSING.md)
+  [![Built with Tauri](https://img.shields.io/badge/built%20with-Tauri%20%2B%20Rust-orange.svg)](https://tauri.app)
+  [![MCP server](https://img.shields.io/badge/MCP-server%20included-8A63D2.svg)](mcp-server/)
 
-  [Demo](docs/demo/wisprnote-demo.mp4) • [What it does](#what-it-does) • [Install](docs/INSTALL.md) • [Architecture](#architecture) • [Licence](#licence)
+  [Download](https://github.com/migavel508/wisprnote-AI/releases/latest) • [Demo](docs/demo/wisprnote-demo.mp4) • [What it does](#what-it-does) • [Install](docs/INSTALL.md) • [Architecture](#architecture) • [Licence](#licence)
 </div>
 
 <div align="center">

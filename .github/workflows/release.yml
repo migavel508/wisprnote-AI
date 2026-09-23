@@ -1,0 +1,84 @@
+name: Release
+
+# Builds the macOS app and attaches a .dmg to a GitHub Release.
+#
+# Why this exists: a Tauri app with no published release is effectively
+# untryable — a visitor needs the Rust toolchain and Xcode to get past the
+# README. The download is what turns a reader into a user.
+#
+# Triggered by pushing a tag:
+#     git tag v0.1.0 && git push origin v0.1.0
+#
+# Signing is OPTIONAL. Without the Apple secrets below the build still produces
+# a working .dmg, but macOS Gatekeeper will warn on first open and users must
+# right-click → Open. Add the secrets to publish something that opens cleanly.
+
+on:
+  push:
+    tags:
+      - 'v*'
+  # Lets you produce a draft build without tagging, to check the pipeline works.
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  build-macos:
+    runs-on: macos-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 20
+          cache: npm
+
+      - name: Install Rust
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          # Universal binary: Apple Silicon and Intel from one build.
+          targets: aarch64-apple-darwin,x86_64-apple-darwin
+
+      - name: Cache cargo
+        uses: swatinem/rust-cache@v2
+        with:
+          workspaces: src-tauri
+
+      - name: Install dependencies
+        run: npm ci
+
+      - name: Typecheck
+        run: npm run lint
+
+      - name: Test
+        run: npm test -- --run
+
+      - name: Build and publish
+        uses: tauri-apps/tauri-action@v0
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          # Code signing — all optional. Absent secrets produce an unsigned build.
+          APPLE_CERTIFICATE: ${{ secrets.APPLE_CERTIFICATE }}
+          APPLE_CERTIFICATE_PASSWORD: ${{ secrets.APPLE_CERTIFICATE_PASSWORD }}
+          APPLE_SIGNING_IDENTITY: ${{ secrets.APPLE_SIGNING_IDENTITY }}
+          # Notarisation — without these the .dmg is signed but still quarantined.
+          APPLE_ID: ${{ secrets.APPLE_ID }}
+          APPLE_PASSWORD: ${{ secrets.APPLE_PASSWORD }}
+          APPLE_TEAM_ID: ${{ secrets.APPLE_TEAM_ID }}
+        with:
+          tagName: ${{ github.ref_name }}
+          releaseName: 'Wisprnote ${{ github.ref_name }}'
+          releaseBody: |
+            See [CHANGELOG.md](CHANGELOG.md) for what changed.
+
+            **macOS** — download the `.dmg` below and drag Wisprnote to Applications.
+
+            Wisprnote needs Microphone and Screen Recording permission to capture a
+            meeting, and optionally Accessibility to read participant names from
+            Zoom, Meet, Teams or Slack. It works without the last one; speakers are
+            then labelled "Speaker 1", "Speaker 2" until you rename them.
+          # Published as a draft so you can read the notes before anyone sees them.
+          releaseDraft: true
+          prerelease: false
+          args: --target universal-apple-darwin
