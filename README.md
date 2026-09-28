@@ -20,35 +20,94 @@
   [Download](https://github.com/migavel508/wisprnote-AI/releases/latest) • [Demo](#demo) • [What it does](#what-it-does) • [Install](docs/INSTALL.md) • [Architecture](#architecture) • [Licence](#licence)
 </div>
 
-<div align="center">
-  <img
-    src="docs/demo/wisprnote-demo-loop.gif"
-    alt="Wisprnote demo: the Knowledge Graph drawing itself, linking topics, decisions and people across recorded meetings"
-    width="880"
-  />
-  <br />
-  <em>Ten seconds from the four-minute demo &mdash; <a href="#demo">see the rest</a></em>
-</div>
-
 ---
 
 ## Demo
 
-The loop above is the Knowledge Graph: the meetings you have recorded, and the topics,
-decisions and people inside them, drawn as a graph and re-linked as new meetings land.
-It is silent, and it plays straight from this page.
-
-The full walkthrough is **four minutes**: capture a meeting, read the structured summary
-and AI visualisation, watch the graph connect it to earlier calls, then connect Jira and
-turn a decision into a ticket.
+The whole four-minute walkthrough, cut into eleven loops — one per part of the product, in
+the order the demo shows them. Each one plays silently in place on this page.
 
 **[▶ Play the full demo](docs/demo/wisprnote-demo.mp4)** — MP4 (H.264/AAC) • 1920×1080 •
 4:00 • 26 MB • [static poster frame](docs/demo/demo-poster.jpg)
 
-GitHub cannot play a video out of its own tree. A `<video>` tag aimed at `docs/demo/`
-degrades to a dead player, because `raw.githubusercontent.com` serves the `.mp4` as
-`application/octet-stream`, which browsers refuse to play. A looping GIF is the one
-format GitHub does render inline, so that is what leads this page.
+### 1 · Home — 0:00
+
+![The Wisprnote home screen: "Your meetings are thinking for you" above an Ask anything box, then the meetings list](docs/demo/01-home.gif)
+
+One question box, not a menu. The prompt chips suggest what to try, and the meetings list is
+a click away.
+
+### 2 · Capture — 0:20
+
+![Wisprnote recording a meeting, with the elapsed timer and the live transcript filling in underneath](docs/demo/02-capture.gif)
+
+Microphone and system audio, transcribed live, with the timer running.
+
+### 3 · Processing — 1:09
+
+![Wisprnote processing a finished recording, reporting "Title hunt begins" and "Finding the perfect view"](docs/demo/03-processing.gif)
+
+Stop recording and the pipeline says what it is doing, rather than sitting on a spinner.
+
+### 4 · Summary and notes — 1:22
+
+![A finished meeting open on the summary tab, with key summary, discussion points and structured notes, and tabs for transcription, summary and notes](docs/demo/04-summary-notes.gif)
+
+The meeting arrives already written: key summary, discussion points, structured notes —
+switchable against the raw transcription.
+
+### 5 · AI visualisation — 2:01
+
+![The meeting notes redrawn as an AI visualisation map titled "Product Development in the AI Era"](docs/demo/05-ai-visualisation.gif)
+
+The same notes redrawn as a map, which you can open and dismiss.
+
+### 6 · Ask across meetings — 2:13
+
+![The chat screen: "Hi Aishwin, ask anything" with a prompt to ask across all meetings, recipe chips and a model picker showing Sonnet 4.6](docs/demo/06-ask-meetings.gif)
+
+Chat that reads every meeting at once — summaries, decisions, action items, follow-ups — with
+the model picker in reach.
+
+### 7 · Knowledge graph — 2:18
+
+![The Knowledge Graph drawing itself, with the caption "Cross-meeting memory — see how topics, decisions, and people connect" and a node's detail open](docs/demo/07-knowledge-graph.gif)
+
+Topics, decisions and people as nodes, edges re-linked as new meetings land, and a click for
+any node's detail.
+
+### 8 · People — 3:06
+
+![The People view, searchable by people, roles and companies, auto-extracted from the meeting notes](docs/demo/08-people.gif)
+
+Who was in the room, extracted from the notes themselves rather than typed in.
+
+### 9 · Dictionary — 3:10
+
+![The Dictionary, personal and shared with the team, empty for now with a prompt to add names and jargon](docs/demo/09-dictionary.gif)
+
+Your own dictionary for names and jargon, shareable with the team.
+
+### 10 · Connectors — 3:16
+
+![The Connectors settings page, with a Jira card that pulls issues, comments and sprints into the brain and turns meeting decisions into tickets](docs/demo/10-connectors.gif)
+
+Connect the tools your team already uses. Jira pulls issues, comments and sprints into the
+brain, and turns meeting decisions into tickets.
+
+### 11 · My notes — 3:34
+
+![The My notes view: private notes and folders, with prompt chips for catching up, listing key decisions and showing in-flight projects](docs/demo/11-my-notes.gif)
+
+Private notes and folders alongside the meetings, with folders to keep them sorted.
+
+---
+
+Every second of the four-minute demo is covered above, in order. The clips are GIFs cut from
+the committed MP4 because GitHub will not play a video out of its own tree: a `<video>` tag
+aimed at `docs/demo/` degrades to a dead player, since `raw.githubusercontent.com` serves the
+`.mp4` as `application/octet-stream`, which browsers refuse to play. A looping GIF is the one
+format GitHub does render inline.
 
 ---
 
