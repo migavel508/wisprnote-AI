@@ -17,16 +17,38 @@
   [![Built with Tauri](https://img.shields.io/badge/built%20with-Tauri%20%2B%20Rust-orange.svg)](https://tauri.app)
   [![MCP server](https://img.shields.io/badge/MCP-server%20included-8A63D2.svg)](mcp-server/)
 
-  [Download](https://github.com/migavel508/wisprnote-AI/releases/latest) • [Demo](docs/demo/wisprnote-demo.mp4) • [What it does](#what-it-does) • [Install](docs/INSTALL.md) • [Architecture](#architecture) • [Licence](#licence)
+  [Download](https://github.com/migavel508/wisprnote-AI/releases/latest) • [Demo](#demo) • [What it does](#what-it-does) • [Install](docs/INSTALL.md) • [Architecture](#architecture) • [Licence](#licence)
 </div>
 
 <div align="center">
-  <a href="docs/demo/wisprnote-demo.mp4">
-    <img src="docs/demo/demo-poster.jpg" alt="Watch the Wisprnote demo — 4 minutes" width="100%" />
-  </a>
+  <img
+    src="docs/demo/wisprnote-demo-loop.gif"
+    alt="Wisprnote demo: the Knowledge Graph drawing itself, linking topics, decisions and people across recorded meetings"
+    width="880"
+  />
   <br />
-  <em><a href="docs/demo/wisprnote-demo.mp4">▶ Watch the demo</a> — 4 minutes</em>
+  <em>Ten seconds from the four-minute demo &mdash; <a href="#demo">see the rest</a></em>
 </div>
+
+---
+
+## Demo
+
+The loop above is the Knowledge Graph: the meetings you have recorded, and the topics,
+decisions and people inside them, drawn as a graph and re-linked as new meetings land.
+It is silent, and it plays straight from this page.
+
+The full walkthrough is **four minutes**: capture a meeting, read the structured summary
+and AI visualisation, watch the graph connect it to earlier calls, then connect Jira and
+turn a decision into a ticket.
+
+**[▶ Play the full demo](docs/demo/wisprnote-demo.mp4)** — MP4 (H.264/AAC) • 1920×1080 •
+4:00 • 26 MB • [static poster frame](docs/demo/demo-poster.jpg)
+
+GitHub cannot play a video out of its own tree. A `<video>` tag aimed at `docs/demo/`
+degrades to a dead player, because `raw.githubusercontent.com` serves the `.mp4` as
+`application/octet-stream`, which browsers refuse to play. A looping GIF is the one
+format GitHub does render inline, so that is what leads this page.
 
 ---
 
